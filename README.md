@@ -44,7 +44,7 @@ Explanation of some options and arguments:
 
 
 # Example Usage with Explanation of Output
-![pmemstat example](images/Screenshot-KDEApps-2021-12-07.png)
+![pmemstat example](images/pmemstat_2022-03-17.png)
 
 On every loop, we see
 * a leader line with:
