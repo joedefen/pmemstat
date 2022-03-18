@@ -1,0 +1,742 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Copyright (c) 2022 Joe Defen
+
+A program to aggregate the memory used by processes into categories
+so that the memory footprint of processes is more clear.
+
+The lines of smaps look as sequences of the lines shown
+below. We call the 1st line a "section line" and those following "item lines".
+
+    00400000-004b8000 r-xp 00000000 fd:00 11143998     /opt/.../inetrep
+    Size:                736 kB
+    Rss:                 592 kB
+    Pss:                  87 kB
+    Shared_Clean:        592 kB
+    Shared_Dirty:          0 kB
+    Private_Clean:         0 kB
+    Referenced:          592 kB
+    Anonymous:             0 kB
+    AnonHugePages:         0 kB
+    Swap:                  0 kB
+    KernelPageSize:        4 kB
+    MMUPageSize:           4 kB
+
+NOTE: kB is a misnomer ... shoud be "KB".  Morons.
+"""
+# pylint: disable=broad-except,import-outside-toplevel,global-statement
+# pylint: disable=too-many-boolean-expressions,invalid-name
+
+import os
+import re
+import sys
+import traceback
+import time
+from types import SimpleNamespace
+from io import StringIO
+from datetime import datetime, timedelta
+
+
+# Trace Levels:
+#  0 - forced, temporary debugging (comment it out)
+#  1+ - regular debugging (higher is less important and/or more verbose)
+
+DebugLevel = 0
+
+def DB(level, *args, **kwargs):
+    """Debug message printer.
+    - printing is conditional DebugLevel being no smaller than the passed level
+    - level 0 is uncondtional. It is use for temporary traces that
+      are commented out when the debug need is gone.
+    """
+    # pylint: disable=protected-access
+    # print(f'DbLevel={DebugLevel} level={level} do_debug={bool(DebugLevel>=level)}')
+    if DebugLevel >= level:
+        lineno = sys._getframe(1).f_lineno
+        tstr = StringIO()
+        print(f'DB{level}', end=' ', file=tstr)
+        kwargs['end'] = ' '
+        kwargs['file'] = tstr
+        print(*args, **kwargs)
+        print(tstr.getvalue() + f'[:{lineno}]')
+
+
+class ProcMem:
+    """Represents the memory map summation for processes and groups.
+      - the ProcMem object represents one process (or pid)
+      - the ProcMem static data represents aggregate data for groups.
+    """
+    # pylint: disable=too-many-instance-attributes
+    section_pat = re.compile(
+            r'^([0-9a-f]+)-([0-9a-f]+)' # $1,$2: 00400000-004b8000
+            + r'\s+([a-z-]+)'   # $3: r-xp
+            + r'\s+([0-9a-f]+)'  # $4: 00000000
+            + r'\s+(\S+)'  # $5: fd:00
+            + r'\s+(\d+)'  # $6: 11143998
+            + r'(\s*|\s+(\S.*))$' # $8: /.../inetrep
+            , re.IGNORECASE)
+    item_pat = re.compile(
+            r'^(\w+):' # $1: MMUPageSize:
+            + r'\s+(\d+)'  # $2: 4
+            + r'\s+kb$'  # kB
+            , re.IGNORECASE)
+    junk_pat = re.compile(
+            r'^(THPeligible|VmFlags)'
+            , re.IGNORECASE)
+    prcs = {}
+    args = None
+    debug = 0
+    summaries = {} # indexed by pid TODO remove this (replace by groups)
+    groups = {} # indexed by group key (e.g., cmd)
+    divisor = 0 # determined by arguments
+    units = '' # determined by arguments
+    fwidth = 11
+    max_cmd_len = 32 # command line maximum length
+    chunk_dict = {
+            'cat': None,
+            'beg': 0,
+            'end': 0,
+            'offset': 0,
+            'size': 0,
+            'eSize': 0,
+            'rss': 0,
+            'pss': 0,
+            'shared': 0,
+            'private': 0,
+            'swap': 0,
+            'pswap': 0,
+            'perms': '',
+            'item': '',
+            }
+
+    def __init__(self, pid):
+        self.pid = pid
+        self.alive = True
+        self.is_new = True
+        self.wanted = True # until proven otherwise
+        self.is_changed = False
+        self.whynot = None # populate me with why unwanted
+        self.smaps_file = f'/proc/{self.pid}/smaps'
+        self.rollup_file = f'/proc/{self.pid}/smaps_rollup'
+        self.rollup_lines = None
+        self.smaps_lines = None
+        self.chunks = []
+
+        self.exebasename = None, None
+        self.key, self.cmdline, self.cmdline_trunc = None, None, None
+
+
+    def get_cmdline(self):
+        """Get the command line of the PID."""
+        try:
+
+            cmdline_file = f'/proc/{self.pid}/cmdline'
+            try:
+                line = open(cmdline_file).read()[:-1]
+            except FileNotFoundError as exc:
+                # this seems to be a race which ignore; either the process is just
+                # started or just quickly ended before even identified
+                if ProcMem.debug:
+                    DB(1, f'skip pid={self.pid} no-rollup-lines exc={type(exc).__name__}')
+                return
+            arguments = line.split('\0')
+            if not arguments or not arguments[0]: # kernel process
+                self.wanted = False
+                self.whynot = 'KernelProcess'
+                # print(f'{self.pid}: kernel thread')
+                return
+            # DB(0, f'{self.pid}: {arguments}')
+            # sometimes the first word
+            wds = os.path.basename(arguments[0]).split() + arguments[1:]
+            basename = re.sub(r'^\W+', '', wds.pop(0))
+            basename = re.sub(r'\W+$', '', basename)
+            # DB(0, f'basename={basename} wds={wds}')
+            if basename in ('python', 'python2', 'python3', 'perl', 'bash', 'ruby',
+                    'sh', 'ksh', 'zsh') and wds:
+                script = os.path.basename(wds[0])
+                # DB(0, f'script={script} wds[0]={wds[0]}')
+                if script != wds[0]:
+                    basename = f'{basename}+{script}'
+                    del wds[0]
+            self.exebasename = basename
+            self.cmdline = ' '.join([basename] + wds)
+            self.cmdline_trunc = self.cmdline[0:ProcMem.max_cmd_len]
+            # DB(0, f'basename={basename} cmdline_trunc={self.cmdline}')
+        except Exception as exc:
+            # not really expecting this ... probably a bug
+            print(f'  WARNING: skip pid={self.pid} no-basename exc={exc}')
+            print(traceback.format_exc())
+            self.wanted = False
+            self.whynot = 'CannotGetCmdline'
+            return
+
+        ## print(f'DBDB: {self.pid} {ProcMem.args.pids}')
+        # filter unwanted before too much work
+        if (ProcMem.args.pids and str(self.pid) not in ProcMem.args.pids
+                and self.exebasename not in ProcMem.args.pids):
+            self.wanted = False
+            self.whynot = 'FilteredByArgs'
+            # print(f'    >>>> unwanted {pid}')
+        ## print(f'DBDB: {self.pid} wanted={self.wanted} whynot={self.whynot}')
+        self.key = (self.cmdline_trunc if ProcMem.args.groupby == 'cmd' else
+                self.exebasename if ProcMem.args.groupby == 'exe' else self.pid)
+
+    def read_lines(self, filename):
+        """ Get the lines of the smaps """
+        lines = None
+        try:
+            with open(filename) as fhandle:
+                lines = fhandle.read().splitlines()
+        except (PermissionError, FileNotFoundError) as exc:
+            # normal cases: not permitted or this is a race where the pid is terminating
+            self.whynot = f'CannotReadLines({type(exc).__name__})'
+        except Exception as exc:
+            # unexpected cases (probably a bug)
+            print(f'ERROR: skip pid={self.pid} no-smaps-or-rollup-lines exc={type(exc).__name__}')
+            self.whynot = f'CannotReadLines({type(exc).__name__})'
+        return lines
+
+    def get_rollup_lines(self):
+        """Get the lines of the 'smaps_rollup' file for this PID"""
+        try:
+            self.rollup_lines = self.read_lines(self.rollup_file)
+        except Exception as exc:
+            self.rollup_lines = None
+            if ProcMem.debug:
+                DB(1, f'skip pid={self.pid} no-rollup-lines exc={type(exc).__name__}')
+
+        if not self.rollup_lines:
+            self.wanted = False
+            self.whynot = 'CannotReadRollups'
+        elif ProcMem.debug:
+            DB(3, f'pid={self.pid} {self.exebasename} #rollup_lines={len(self.rollup_lines)}')
+
+        return bool(self.rollup_lines)
+
+    def get_smaps_lines(self):
+        """Get the lines of the 'smaps' file for this PID"""
+        try:
+            self.smaps_lines = self.read_lines(self.smaps_file)
+        except Exception:
+            self.smaps_lines = None
+            if ProcMem.debug:
+                DB(1, f'skip pid={self.pid} no-smap-lines exc={type(exc).__name__}')
+
+        if not self.smaps_lines:
+            self.wanted = False
+            self.whynot = 'CannotReadSmaps'
+        else:
+            if ProcMem.debug:
+                DB(1, f'pid={self.pid} {self.exebasename} #smaps_lines={len(self.smaps_lines)}')
+        return bool(self.smaps_lines)
+
+    @staticmethod
+    def make_summary_dict(pid=0, info=''):
+        """ Make an object to summarize memory use of a PID or group """
+        summary = {
+                'pswap': 0,
+                'shSYSV': 0,
+                'shOth': 0, # e.g., memory mapped file
+                'stack': 0,
+                'text': 0,
+                'data': 0, # deprecated 'pseudo' (e.g., memory barrier) now in 'data'
+                'ptotal': 0,
+                'pss': 0,  # comes from rollups
+                'number': -pid if pid else 0, # count if positive; else -pid
+                'info': info,
+                }
+        return summary
+
+    @staticmethod
+    def get_group(key):
+        """Per group info."""
+        group = ProcMem.groups.get(key, None)
+        if not group:
+            group = SimpleNamespace(key=key,
+                    is_new=True,
+                    alive=False,
+                    whynot=None,
+                    changed=False,
+                    o_prcset=set(),
+                    prcset=set(),
+                    o_rollup_summary=None,
+                    rollup_summary=None,
+                    o_summary=None,
+                    summary=None)
+            ProcMem.groups[key] = group
+            # DB(0, f'add group[{key}]')
+        return group
+
+    @staticmethod
+    def prep_new_loop():
+        """Prepare for a new loop.
+        Returns whether or not any groups are left.
+        If not, it will be time to terminate.
+        """
+        if ProcMem.groups:
+            for key in list(ProcMem.groups):
+                group = ProcMem.groups[key]
+                if not group.alive:
+                    del ProcMem.groups[key]
+                    # DB(0, f'del group[{key}]')
+                    continue
+                group.is_new = False
+                group.alive = False
+                group.o_rollup_summary, group.rollup_summary = group.rollup_summary, None
+                if group.prcset:
+                    group.o_prcset, group.prcset = group.prcset, set()
+                group.is_changed = False
+                group.delta_pss = 0
+
+        for pid in list(ProcMem.prcs):
+            prc = ProcMem.prcs[pid]
+            if not prc.alive:
+                del ProcMem.prcs[pid]
+                continue
+            prc.alive = False
+            prc.rollup_lines = None
+            prc.smaps_lines = None
+            prc.chunks = []
+        return ProcMem.groups
+
+    @staticmethod
+    def add_to_summary(summary, total):
+        """ Add a summary memory use into a running total of memory use """
+        if summary and total:
+            for key, val in summary.items():
+                if key in ('info',):
+                    pass
+                elif key in ('number',):
+                    total[key] += 1
+                elif isinstance(val, int):
+                    total[key] += val
+
+
+    def make_chunks(self, lines):
+        """ Parse the already smaps read lines."""
+        chunk = None
+        for idx, line in enumerate(lines):
+            match = self.section_pat.match(line)
+            if match:
+                if chunk:
+                    self.chunks.append(chunk)
+                chunk = SimpleNamespace(**ProcMem.chunk_dict)
+                chunk.beg = int(match.group(1), 16)
+                chunk.end = int(match.group(2), 16)
+                chunk.perms = match.group(3)
+                chunk.offset = int(match.group(4), 16)
+                chunk.item = match.group(8)
+                continue
+            match = self.item_pat.match(line)
+            if match:
+                tag = match.group(1)
+                val = int(match.group(2))
+                if tag == 'Size':
+                    chunk.size = val
+                elif tag == 'Rss':
+                    chunk.rss = val
+                elif tag.startswith('Shared'):
+                    chunk.shared += val
+                elif tag.startswith('Private'):
+                    chunk.private += val
+                elif tag == 'Swap':
+                    chunk.swap = val
+                elif tag == 'Pss':
+                    chunk.pss = val
+                continue
+            match = self.junk_pat.match(line)
+            if match:
+                continue
+            print(f'ERROR: cannot parse "{line}" [{self.smaps_file}:{idx+1}]')
+        if chunk:
+            self.chunks.append(chunk)
+
+
+    def parse_rollups(self, lines):
+        """ Parse the already read lines."""
+        summary = ProcMem.make_summary_dict()
+        for idx, line in enumerate(lines):
+            if not line.endswith('kB'):
+                continue
+            match = self.item_pat.match(line)
+            if match:
+                tag = match.group(1)
+                val = int(match.group(2))
+                if tag == 'Pss_Anon':
+                    summary['data'] += val
+                    summary['ptotal'] += val
+                elif tag == 'Pss_File':
+                    summary['text'] += val
+                    summary['ptotal'] += val
+                elif tag == 'Pss_Shmem':
+                    summary['shOth'] += val
+                    summary['ptotal'] += val
+                elif tag == 'SwapPss':
+                    summary['pswap'] += val
+                continue
+            print(f'ERROR: cannot parse "{line}" [{self.rollup_file}:{idx+1}]')
+        summary['pss'] = summary['ptotal'] # for consistency
+        return summary
+
+    def categorize_chunks(self):
+        """ Analyze the chunks to categorize the memory """
+        for idx, chunk in enumerate(self.chunks):
+            chunk.eSize = chunk.size
+            if chunk.cat: # if already done, don't do again
+                continue
+
+            if 's' in chunk.perms:
+                if 'SYSV' in chunk.item:
+                    chunk.cat = 'shSYSV'
+                    # chunk.eSize = chunk.rss + chunk.swap
+                    chunk.eSize = chunk.pss
+                else:
+                    chunk.cat = 'shOth'
+                    chunk.eSize = chunk.pss
+            elif chunk.item and '[stack]' in chunk.item:
+                chunk.cat = 'stack'
+                chunk.eSize = chunk.private
+            elif (chunk.size == 4 and idx < len(self.chunks) - 1
+                    and chunk.offset == chunk.beg and not chunk.item
+                    and '---p' in chunk.perms):
+                    # stack seems to be 4K unwriteable immediately followed
+                    # by something very huge like 10240 or 10236.
+                    # The size is bogus ... replace the 'Size' with
+                    # the 'Private' plus swapped
+                nchunk = self.chunks[idx+1]
+                if (chunk.end == nchunk.end
+                        and 'w' in nchunk.perms
+                        and not nchunk.item
+                        and nchunk.offset == nchunk.beg
+                        and nchunk.size >= 10000
+                        and nchunk.size <= 20000):
+                    chunk.eSize = 0
+                    chunk.cat = 'data' # was 'pseudo'
+                    nchunk.eSize = nchunk.private + nchunk.swap
+                    nchunk.cat = 'stack'
+            if not chunk.cat:
+                if '---' in chunk.perms:
+                    chunk.cat = 'data' # was 'pseudo'
+                    chunk.eSize = 0
+                elif 'w' in chunk.perms:
+                    chunk.cat = 'data'
+                    chunk.eSize = chunk.rss + chunk.swap
+                else:
+                    chunk.cat = 'text'
+                    chunk.eSize = chunk.pss + chunk.swap
+        if ProcMem.debug:
+            for chunk in self.chunks:
+                DB(6, '{self.pid} {self.exebasename} CHUNK:', chunk)
+
+
+    def summarize_chunks(self):
+        """ Accumulate the chunks into the summary of memory use for the PID """
+        summary = self.make_summary_dict(self.pid)
+
+        for chunk in self.chunks:
+            if ProcMem.debug:
+                DB(5, f'{self.pid} {self.exebasename} BLK: {chunk.cat} eSize={chunk.eSize}'
+                    + f' size={chunk.size} {chunk.perms} {chunk.item}')
+            summary[chunk.cat] += chunk.eSize
+            summary['ptotal'] += chunk.eSize
+            summary['pswap'] += chunk.pswap
+        # print(f'DB self.summaries[{key}]: {self.summaries[key]}')
+        return summary
+
+    def prc_pid(self):
+        """Process one PID"""
+        self.alive = True
+        self.is_changed = False
+        if not self.whynot and not self.cmdline:
+            self.get_cmdline()
+            if not self.cmdline:
+                return
+        if not self.whynot:
+            self.get_rollup_lines()
+        if self.whynot:
+            DB(4, f'pid={self.pid} {self.exebasename} whynot={self.whynot}')
+            return
+        self.is_changed = False
+        rollup_summary = self.parse_rollups(self.rollup_lines)
+        group = ProcMem.get_group(self.key)
+        if not group.alive:
+            info = str(self.key)
+            if ProcMem.args.groupby == 'pid':
+                info += ' ' + self.cmdline_trunc
+            group.rollup_summary = ProcMem.make_summary_dict(info=info)
+            group.summary = ProcMem.make_summary_dict(info=info)
+            group.alive = True
+        ProcMem.add_to_summary(rollup_summary, group.rollup_summary)
+        group.prcset.add(self)
+
+    @staticmethod
+    def test_delta(group, summary, o_summary):
+        """Check whether the group rollup or smaps summary exceeds threshold """
+        # pylint: disable=chained-comparison
+        is_over = False
+        # DB(0, f'{group.key} o=[{group.o_summary}]\n          n=[{group.summary}]')
+        delta_pss = summary['pss'] - o_summary['pss'] + summary['pswap'] - o_summary['pswap']
+        thresh = ProcMem.args.min_delta_kb
+
+        # DB(0, f'{group.key} ~pss {delta_pss}KB min={ProcMem.args.min_delta_kb}')
+        # DB(0, f'{group.key} ~pss {delta_pss}KB thresh={thresh}')
+        if ((thresh <= 0 and abs(delta_pss) >= -thresh)
+                or (thresh > 0 and delta_pss >= thresh)):
+            is_over = True
+            if ProcMem.debug:
+                DB(2, f'{group.key} ~pss {delta_pss}KB thresh={thresh}')
+        return is_over, delta_pss
+
+    @staticmethod
+    def prc_group(group):
+        """Process on group"""
+        do_smaps = False
+        if group.o_rollup_summary:
+            do_smaps, _ = ProcMem.test_delta(
+                    group, group.rollup_summary, group.o_rollup_summary)
+        else:
+            do_smaps = True
+
+        for prc in list(group.prcset):
+            group.summary['info'] = (f'{prc.exebasename}' if ProcMem.args.groupby == 'exe'
+                    else f'{prc.cmdline_trunc}' if ProcMem.args.groupby == 'cmd'
+                    else f'{prc.pid} {prc.cmdline_trunc}')
+            if do_smaps:
+                prc.get_smaps_lines()
+                if prc.whynot:
+                    group.prcset.remove(prc)
+                    continue
+                prc.make_chunks(prc.smaps_lines)
+                prc.categorize_chunks()
+                summary = prc.summarize_chunks()
+                ProcMem.add_to_summary(summary, group.summary)
+            prc.chunks, prc.smaps_lines, prc.rollup_lines = [], [], []
+        group.summary['pss'] = group.rollup_summary['ptotal']
+        group.summary['pswap'] = group.rollup_summary['pswap']
+
+        if not group.prcset:
+            group.alive = False
+            do_smaps = False
+        if not do_smaps:
+            group.summary = group.o_summary
+            return
+
+        if ProcMem.debug:
+            DB(2, f'{group.key} summary: {group.summary}')
+
+        group.is_changed = False
+        if group.o_summary:
+            group.is_changed, group.delta_pss = ProcMem.test_delta(
+                    group, group.summary, group.o_summary)
+        else:
+            group.is_changed = True
+
+        if group.is_changed:
+            group.o_summary = group.summary
+        elif group.o_summary:
+            group.summary = group.o_summary
+
+        if ProcMem.debug:
+            DB(1 if group.is_changed else 5, f'{group.key}:', group.summary)
+
+
+    @staticmethod
+    def pr_summary(lead, summary):
+        """Print a summary of memory use"""
+        body = ''
+        for attr, value in summary.items():
+            if attr not in ('pss', 'number', 'info'):
+                mbytes = int(round(value*1024/ProcMem.divisor))
+                body += f'{mbytes:>{ProcMem.fwidth},}'
+        num = summary['number']
+        print(body, lead, -num if num <= 0 else f'{num}x', summary['info'])
+
+    @staticmethod
+    def get_meminfo():
+        """Get most vital stats from /proc/meminfo'"""
+        meminfofile = '/proc/meminfo'
+        meminfoKB = {'MemTotal': 0, 'MemAvailable': 0, 'Dirty':0}
+        keys = list(meminfoKB.keys())
+
+        with open(meminfofile) as fileh:
+            for line in fileh:
+                match = re.match(r'^([^:]+):\s+(\d+)\s*kB', line)
+                if not match:
+                    continue
+                key, value = match.group(1), int(match.group(2))
+                if key not in keys:
+                    continue
+                meminfoKB[key] = value
+                keys.remove(key)
+                if not keys:
+                    break
+        assert not keys, f'ALERT: cannot get vitals ({keys}) from {meminfofile}'
+        return meminfoKB
+
+
+    @staticmethod
+    def loop(now, is_first):
+        """one loop thru all pids"""
+        total_pids = 0
+        allpids = []
+        wanted_prcs = {}
+        meminfoKB = ProcMem.get_meminfo()
+
+        with os.scandir('/proc') as it:
+            for entry in it:
+                # if re.match(r'^\d+$', entry.name):
+                if entry.name.isdigit():
+                    allpids.append(entry.name)
+
+        for pid in allpids:
+            ## print(f'DBDB pid={pid} ProcMem.args.pids={args.pids}')
+            prc = ProcMem.prcs.get(pid, None)
+            if not prc:
+                prc = ProcMem(int(pid))
+                ProcMem.prcs[pid] = prc
+            else:
+                prc.is_new = False
+            prc.prc_pid()
+            ## if str(pid) in args.pids:
+                ## print(f'DBDB pid={pid} dir={vars(prc)}')
+            total_pids += 0 if prc.whynot == 'KernelProcess' else 1
+
+            if prc.wanted:
+                wanted_prcs[pid] = prc
+                if ProcMem.debug:
+                    DB(1, f'Doing pid={pid} exec={prc.exebasename} cmd={prc.cmdline_trunc}')
+            else:
+                if ProcMem.debug:
+                    DB(4, f'Unwanted pid={pid} exec={prc.exebasename}')
+
+        # all pids have been processed into groups.
+        # for each group, if it has changed, sum all the smaps for the group
+        # if the group rollup_summary indicates enough change
+        grand_summary = ProcMem.make_summary_dict(info='---- GRAND TOTAL ----')
+        for group in ProcMem.groups.values():
+            if group.alive:
+                ProcMem.prc_group(group)
+                ProcMem.add_to_summary(group.summary, grand_summary)
+
+
+        # print timestamp of report
+        leader = f'\n---- {str(now)} MB:'
+        leader += f' Mem={int(round(meminfoKB["MemTotal"]/1024)):,}'
+        leader += f' Avail={int(round(meminfoKB["MemAvailable"]/1024)):,}'
+        leader += f' Dirty={int(round(meminfoKB["Dirty"]/1024)):,}'
+        leader += f' PIDs: {len(wanted_prcs)}/{total_pids}'
+        print(leader)
+
+        # detect changed group on basis of differing PIDs contributing
+
+        if grand_summary['number'] == 0:
+            print('DONE: no pids to report ... exiting now')
+            sys.exit(0)
+
+        # print header and  grand totals
+        header = ''
+        for attr in grand_summary:
+            if attr not in ('pss', 'number', 'info'):
+                header += f'{attr:>{ProcMem.fwidth}}'
+        print(header, f'  key/info (in {ProcMem.units})')
+        ProcMem.pr_summary('T', grand_summary)
+
+        alive_groups = {}
+        for key, group in ProcMem.groups.items():
+            if group.alive:
+                alive_groups[key] = group
+                if not group.summary:
+                    DB(0, 'no summary:', str(group))
+
+        sorted_keys = sorted(alive_groups.keys(),
+                key=lambda x: alive_groups[x].summary['ptotal'], reverse=True)
+
+        ptotal_limit = (grand_summary['ptotal'] * ProcMem.args.top_pct / 100) * 1.001
+        others_summary = None
+        running_summary = ProcMem.make_summary_dict(info='---- RUNNING ----')
+        for key in sorted_keys:
+            group = alive_groups[key]
+            ProcMem.add_to_summary(group.summary, running_summary)
+            if running_summary['ptotal'] <= ptotal_limit:
+                if group.alive and (group.is_new or group.is_changed):
+                    ProcMem.pr_summary('A' if group.is_new else f'{group.delta_pss:+,}K', group.summary)
+                    # DB(0, f'obj: {vars(obj)}')
+            elif is_first:
+                if not others_summary:
+                    others_summary = ProcMem.make_summary_dict(info='---- OTHERS ----')
+                ProcMem.add_to_summary(group.summary, others_summary)
+        if others_summary:
+            ProcMem.pr_summary('O',  others_summary)
+
+
+        for group in ProcMem.groups.values():
+            if not group.alive and group.o_summary:
+                ProcMem.pr_summary('x', group.o_summary)
+
+        ProcMem.prep_new_loop()
+
+def main():
+    """Main loop"""
+    global DebugLevel
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-D', '--debug', action='count', default=0,
+            help='debug mode (the more Ds, the higher the debug level)')
+    parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid'), default='exe',
+            help='grouping method for presenting rows')
+    parser.add_argument('-k', '--min-delta-kb', type=int, default=None,
+            help='minimum percent KB to show again [dflt=100 if DB else 1000')
+    parser.add_argument('-l', '--loop', type=int, default=0, dest='loop_secs',
+            help='loop interval in seconds [dflt=0]')
+    parser.add_argument('-L', '--cmdlen', type=int, default=36,
+            help='max command line length for reporting/grouping  [dflt=36]')
+    parser.add_argument('-t', '--top-pct', type=int, default=100,
+            help='report group contributing to top pct of ptotal [dflt=100]')
+    parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB'), default='MB',
+            help='units of memory [dflt=MB]')
+    parser.add_argument('pids', nargs='*', action='store',
+            help='list of pids/groups (none means all we can read)')
+    args = parser.parse_args()
+    # DB(0, f'args={args}')
+
+    DebugLevel = args.debug
+    if args.debug:
+        DB(1, f'DebugLevel', DebugLevel)
+    ProcMem.args = args
+    ProcMem.debug = args.debug
+    ProcMem.units = args.units
+
+    if args.units == 'mB':
+        ProcMem.divisor = 1000*1000
+        ProcMem.fwidth = 8
+    elif args.units == 'MB':
+        ProcMem.divisor = 1024*1024
+        ProcMem.fwidth = 8
+    else:
+        ProcMem.divisor = 1024 # KB (the original)
+        ProcMem.fwidth = 11
+
+    if args.min_delta_kb is None:
+        args.min_delta_kb = 100 if args.units == 'KB' else 1000
+
+    is_first = True
+    while True:
+        now = datetime.now()
+        ProcMem.loop(now, is_first)
+        if args.loop_secs <= 0:
+            break
+        until_dt = now + timedelta(0, args.loop_secs)
+        diff_dt = until_dt - datetime.now()
+        seconds = diff_dt.total_seconds()
+        if seconds > 0:
+            time.sleep(seconds)
+        is_first = False
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        print("exception:", str(exc))
+        print(traceback.format_exc())
