@@ -71,6 +71,8 @@ def DB(level, *opts, **kwargs):
 ######
 
 class Window:
+    """ Layer above curses to encapsulate what we need """
+    timeout_ms = 200
     """TBD"""
     def __init__(self, head_line=True, body_rows=200, body_cols=200):
         self.scr = self._start_curses()
@@ -102,7 +104,7 @@ class Window:
         curses.cbreak()
         curses.noecho()
         curses.curs_set(0)
-        scr.timeout(200)
+        scr.timeout(Window.timeout_ms)
         scr.clear()
         return scr
 
@@ -187,11 +189,13 @@ class Window:
         self.body.clear()
         self.head_count = self.body_count = 0
 
-    def prompt(self):
+    def prompt(self, seconds=1.0):
         """Here is where we sleep waiting for commands or timeout"""
-        for _ in range(5):
+        elapsed = 0.0
+        while elapsed < seconds:
             key = self.scr.getch()
             if key == -1:
+                elapsed += self.timeout_ms / 1000
                 continue
             if key in (ord('k'), curses.KEY_UP):
                 self.scroll_pos = max(self.scroll_pos - 1, 0)
@@ -722,7 +726,9 @@ class PmemStat:
                 mbytes = int(round(value*1024/self.divisor))
                 body += f'{mbytes:>{self.fwidth},}'
         num = summary['number']
-        print(body, lead, -num if num <= 0 else f'{num}x', summary['info'])
+        self.emit(f'{body} {lead} '
+                  + (f'{-num}' if num <= 0 else f'{num}x')
+                  + ' ' + summary['info'])
 
     @staticmethod
     def get_meminfo():
@@ -749,6 +755,7 @@ class PmemStat:
 
     def loop(self, now, is_first):
         """one loop thru all pids"""
+        # pylint: disable=too-many-branches
         total_pids = 0
         allpids = []
         wanted_prcs = {}
@@ -792,12 +799,15 @@ class PmemStat:
 
 
         # print timestamp of report
-        leader = f'\n---- {str(now)} MB:'
+        if not self.window:
+            leader = f'\n---- {str(now)} MB:'
+        else:
+            leader = f'{str(now)} MB:'
         leader += f' Mem={int(round(meminfoKB["MemTotal"]/1024)):,}'
         leader += f' Avail={int(round(meminfoKB["MemAvailable"]/1024)):,}'
         leader += f' Dirty={int(round(meminfoKB["Dirty"]/1024)):,}'
         leader += f' PIDs: {len(wanted_prcs)}/{total_pids}'
-        print(leader)
+        self.emit(leader, to_head=True)
 
         # detect changed group on basis of differing PIDs contributing
 
@@ -811,7 +821,7 @@ class PmemStat:
         for attr in grand_summary:
             if attr not in exclusions:
                 header += f'{attr:>{self.fwidth}}'
-        print(header, f'  key/info (in {self.units})')
+        self.emit(f'{header}   key/info (in {self.units})')
         self.pr_summary('T', grand_summary)
 
         alive_groups = {}
@@ -862,25 +872,16 @@ class PmemStat:
     def window_loop(self):
         """ TBD """
         self.window = Window()
-#    is_first = True
-        for loop in range(1000000000):
-            self.window.add_header(f'title {loop}')
-            for i in range(40):
-                self.window.add_body(chr(0x61+(i%26)) * (self.window.body_cols-1))
+        is_first = True
+        for _ in range(1000000000):
+            # self.window.add_header(f'title {loop}')
+            # for i in range(40):
+                # self.window.add_body(chr(0x61+(i%26)) * (self.window.body_cols-1))
+            self.loop(datetime.now(), is_first)
             self.window.render()
-            self.window.prompt()
+            self.window.prompt(self.opts.loop_secs)
             self.window.clear()
-
-#        now = datetime.now()
-#        ProcMem.loop(now, is_first)
-#        if ProcMem.opts.loop_secs <= 0:
-#            break
-#        until_dt = now + timedelta(0, ProcMem.opts.loop_secs)
-#        diff_dt = until_dt - datetime.now()
-#        seconds = diff_dt.total_seconds()
-#        if seconds > 0:
-#            time.sleep(seconds)
-#        is_first = False
+            is_first = False
 
 def main():
     """Main loop"""
