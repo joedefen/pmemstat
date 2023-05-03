@@ -73,10 +73,13 @@ def DB(level, *opts, **kwargs):
 class Window:
     """ Layer above curses to encapsulate what we need """
     timeout_ms = 200
+    static_scr = None
     """TBD"""
-    def __init__(self, head_line=True, body_rows=200, body_cols=200):
+    def __init__(self, head_line=True, head_rows=10, body_rows=200, body_cols=200):
         self.scr = self._start_curses()
+        self.head_rows = head_rows
         self.body_rows, self.body_cols = body_rows, body_cols
+        self.head = curses.newpad(head_rows, body_cols)
         self.body = curses.newpad(body_rows, body_cols)
         self.head_count = 0
         self.head_lines = 1 if head_line else 0
@@ -89,8 +92,7 @@ class Window:
 
     def _set_screen_dims(self):
         """Recalculate dimensions ... return True if geometry changed."""
-        # pylint: disable=no-member
-        rows, cols = curses.LINES, curses.COLS
+        rows, cols = self.scr.getmaxyx()
         same = bool(rows == self.rows and cols == self.cols)
         self.rows, self.cols = rows, cols
         return same
@@ -100,10 +102,11 @@ class Window:
         """ Curses initial setup.  Note: not using curses.wrapper because we
         don't wish to change the colors. """
         atexit.register(Window.stop_curses)
-        scr = curses.initscr()
-        curses.cbreak()
+        Window.static_scr = scr = curses.initscr()
         curses.noecho()
+        curses.cbreak()
         curses.curs_set(0)
+        scr.keypad(1)
         scr.timeout(Window.timeout_ms)
         scr.clear()
         return scr
@@ -111,9 +114,12 @@ class Window:
     @staticmethod
     def stop_curses():
         """ Curses shutdown (registered to be called on exit). """
-        curses.nocbreak()
-        curses.echo()
-        curses.endwin()
+        if Window.static_scr:
+            curses.nocbreak()
+            curses.echo()
+            Window.static_scr.keypad(0)
+            curses.endwin()
+            Window.static_scr = None
 
     def calc(self):
         """Recalculate dimensions ... return True if geometry changed."""
@@ -124,16 +130,22 @@ class Window:
         self.body_base = self.head_count + self.head_lines
         return not same
 
-    def add_header(self, text):
+    def add_header(self, text, attr):
         """Add text to header"""
-        if self.head_count < self.rows:
-            self.scr.addstr(self.head_count, 0, text)
+        if self.head_count < self.head_rows:
+            if attr:
+                self.head.addstr(self.head_count, 0, text, attr)
+            else:
+                self.head.addstr(self.head_count, 0, text)
             self.head_count += 1
 
-    def add_body(self, text):
+    def add_body(self, text, attr=None):
         """ Add text to body (below header and header line)"""
         if self.body_count < self.body_rows:
-            self.body.addstr(self.body_count, 0, text)
+            if attr:
+                self.body.addstr(self.body_count, 0, text, attr)
+            else:
+                self.body.addstr(self.body_count, 0, text)
             self.body_count += 1
 
     def _scroll_indicator_row(self):
@@ -165,27 +177,21 @@ class Window:
             # self.scr.vline(self._scroll_indicator_row(), 0, curses.ACS_VLINE, 1)
             self.scr.attroff(curses.A_REVERSE)
             self.scr.refresh()
-#           row = self._scroll_indicator_row()
-#           if row > 0:
-#               rectangle(self.scr, self.body_base, 0, row-1, 0)
-#           self.scr.attron(curses.A_REVERSE)
-#           rectangle(self.scr, row, 0, row, 0)
-#           self.scr.attroff(curses.A_REVERSE)
-#           if row < self.rows-1:
-#               rectangle(self.scr, row+1, 0, self.rows-1, 0)
-#           # self.scr.addstr(self._scroll_indicator_row(), 0, 'X')
-#           self.scr.refresh()
 
+        if self.rows > 0:
+            self.head.refresh(0, 0, 0, 1 if self.max_scroll > 0 else 0,
+                      min(self.head_count, self.rows)-1, self.cols-1)
         if self.body_base < self.rows:
             self.scroll_pos = max(self.scroll_pos, 0)
             self.scroll_pos = min(self.scroll_pos, self.max_scroll)
             self.body.refresh(self.scroll_pos, 0,
-                  self.head_count+self.head_lines, 1 if self.max_scroll > 0 else 0,
+                  self.body_base, 1 if self.max_scroll > 0 else 0,
                   self.rows-1, self.cols-1)
 
     def clear(self):
         """Clear in prep for new screen"""
         self.scr.clear()
+        self.head.clear()
         self.body.clear()
         self.head_count = self.body_count = 0
 
@@ -194,9 +200,14 @@ class Window:
         elapsed = 0.0
         while elapsed < seconds:
             key = self.scr.getch()
-            if key == -1:
+            if key == curses.ERR:
                 elapsed += self.timeout_ms / 1000
                 continue
+            if key in (curses.KEY_RESIZE, ) or curses.is_term_resized(self.rows, self.cols):
+                # self.scr.erase()
+                self._set_screen_dims()
+                self.render()
+                
             if key in (ord('k'), curses.KEY_UP):
                 self.scroll_pos = max(self.scroll_pos - 1, 0)
                 self.render()
@@ -593,7 +604,9 @@ class PmemStat:
                     o_rollup_summary=None,
                     rollup_summary=None,
                     o_summary=None,
-                    summary=None)
+                    summary=None,
+                    first_summary=None,
+                    growth_pct=0.0)
             self.groups[key] = group
             # DB(0, f'add group[{key}]')
         return group
@@ -702,6 +715,12 @@ class PmemStat:
         else:
             group.is_changed = True
 
+        if group.first_summary:
+            group.growth_pct = 100*(group.summary['ptotal']
+                - group.first_summary['ptotal'])/group.first_summary['ptotal']
+        else:
+            group.first_summary = group.summary
+
         if group.is_changed:
             group.o_summary = group.summary
         elif group.o_summary:
@@ -713,22 +732,29 @@ class PmemStat:
     def pr_exclusions(self):
         """ TBD """
         exclusions = {'number', 'info'}
+        others = ['text', 'shSYSV', 'shOth', 'stack'] if self.opts.others else []
         if not self.debug:
             exclusions.add('pss')
-        return exclusions
+        return others, exclusions
 
-    def pr_summary(self, lead, summary):
+    def pr_summary(self, lead, summary, attr=None):
         """Print a summary of memory use"""
         body = ''
-        exclusions = self.pr_exclusions()
-        for attr, value in summary.items():
-            if attr not in exclusions:
+        others, exclusions = self.pr_exclusions()
+        others_mb = 0
+        for item, value in summary.items():
+            if item not in exclusions:
                 mbytes = int(round(value*1024/self.divisor))
+                if item in others:
+                    others_mb += mbytes
+                    if item != others[0]:
+                        continue
+                    mbytes = others_mb
                 body += f'{mbytes:>{self.fwidth},}'
         num = summary['number']
         self.emit(f'{body} {lead} '
                   + (f'{-num}' if num <= 0 else f'{num}x')
-                  + ' ' + summary['info'])
+                  + ' ' + summary['info'], attr=attr)
 
     @staticmethod
     def get_meminfo():
@@ -817,11 +843,16 @@ class PmemStat:
 
         # print header and  grand totals
         header = ''
-        exclusions = self.pr_exclusions()
-        for attr in grand_summary:
-            if attr not in exclusions:
-                header += f'{attr:>{self.fwidth}}'
-        self.emit(f'{header}   key/info (in {self.units})')
+        others, exclusions = self.pr_exclusions()
+        for item in grand_summary:
+            if item not in exclusions:
+                if item in others:
+                    if item != others[0]:
+                        continue
+                    item = 'other'
+                header += f'{item:>{self.fwidth}}'
+        self.emit(f'{header}   key/info (in {self.units})', to_head=True,
+                  attr=curses.A_BOLD)
         self.pr_summary('T', grand_summary)
 
         alive_groups = {}
@@ -832,7 +863,8 @@ class PmemStat:
                     DB(0, 'no summary:', str(group))
 
         sorted_keys = sorted(alive_groups.keys(),
-                key=lambda x: alive_groups[x].summary['ptotal'], reverse=True)
+                key=lambda x: (alive_groups[x].growth_pct,
+                               alive_groups[x].summary['ptotal']), reverse=True)
 
         ptotal_limit = (grand_summary['ptotal'] * self.opts.top_pct / 100) * 1.001
         others_summary = None
@@ -841,9 +873,12 @@ class PmemStat:
             group = alive_groups[key]
             self.add_to_summary(group.summary, running_summary)
             if running_summary['ptotal'] <= ptotal_limit:
-                if group.alive and (group.is_new or group.is_changed):
-                    self.pr_summary('A' if group.is_new else f'{group.delta_pss:+,}K',
-                                        group.summary)
+                if group.alive and (group.is_new or group.is_changed or self.window):
+                    attr = curses.A_REVERSE if group.is_new or group.is_changed else None
+                    attr = None if is_first else attr
+                    self.pr_summary('A' if group.is_new
+                        else f'{group.delta_pss:+,}K' if group.is_changed
+                        else ' ', group.summary, attr=attr)
                     # DB(0, f'obj: {vars(obj)}')
             elif is_first:
                 if not others_summary:
@@ -859,13 +894,13 @@ class PmemStat:
 
         self.prep_new_loop()
 
-    def emit(self, line, to_head=False):
+    def emit(self, line, to_head=False, attr=None):
         """ Emit a line of the report"""
         if self.window:
             if to_head:
-                self.window.add_header(line)
+                self.window.add_header(line, attr)
             else:
-                self.window.add_body(line)
+                self.window.add_body(line, attr)
         else:
             print(line)
 
@@ -900,6 +935,8 @@ def main():
             help='max command line length for reporting/grouping  [dflt=36]')
     parser.add_argument('-t', '--top-pct', type=int, default=100,
             help='report group contributing to top pct of ptotal [dflt=100]')
+    parser.add_argument('-o', '--others', action='store_true',
+            help='collapse shSYSV, shOth, stack, text into "other"')
     parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB'), default='MB',
             help='units of memory [dflt=MB]')
     parser.add_argument('-w', '--window', action='store_true',
