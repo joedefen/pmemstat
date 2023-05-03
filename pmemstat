@@ -23,10 +23,11 @@ below. We call the 1st line a "section line" and those following "item lines".
     KernelPageSize:        4 kB
     MMUPageSize:           4 kB
 
-NOTE: kB is a misnomer ... shoud be "KB".  Morons.
+NOTE: kB is a misnomer ... should be "KB".  Morons.
 """
 # pylint: disable=broad-except,import-outside-toplevel,global-statement
 # pylint: disable=too-many-boolean-expressions,invalid-name
+# pylint: disable=too-many-instance-attributes
 
 import os
 import re
@@ -35,7 +36,7 @@ import atexit
 import traceback
 import time
 import curses
-from curses.textpad import rectangle
+# from curses.textpad import rectangle
 from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta
@@ -65,6 +66,147 @@ def DB(level, *opts, **kwargs):
         print(tstr.getvalue() + f'[:{lineno}]')
 
 
+######
+####################################################################################
+######
+
+class Window:
+    """TBD"""
+    def __init__(self, head_line=True, body_rows=200, body_cols=200):
+        self.scr = self._start_curses()
+        self.body_rows, self.body_cols = body_rows, body_cols
+        self.body = curses.newpad(body_rows, body_cols)
+        self.head_count = 0
+        self.head_lines = 1 if head_line else 0
+        self.body_count = 0
+        self.scroll_pos = 0  # how far down into body are we?
+        self.rows, self.cols = 0, 0
+        self.max_body_count, self.max_scroll = 0, 0
+        self._set_screen_dims()
+        self.calc()
+
+    def _set_screen_dims(self):
+        """Recalculate dimensions ... return True if geometry changed."""
+        # pylint: disable=no-member
+        rows, cols = curses.LINES, curses.COLS
+        same = bool(rows == self.rows and cols == self.cols)
+        self.rows, self.cols = rows, cols
+        return same
+
+    @staticmethod
+    def _start_curses():
+        """ Curses initial setup.  Note: not using curses.wrapper because we
+        don't wish to change the colors. """
+        atexit.register(Window.stop_curses)
+        scr = curses.initscr()
+        curses.cbreak()
+        curses.noecho()
+        curses.curs_set(0)
+        scr.timeout(200)
+        scr.clear()
+        return scr
+
+    @staticmethod
+    def stop_curses():
+        """ Curses shutdown (registered to be called on exit). """
+        curses.nocbreak()
+        curses.echo()
+        curses.endwin()
+
+    def calc(self):
+        """Recalculate dimensions ... return True if geometry changed."""
+        same = self._set_screen_dims()
+        self.head_count = min(self.rows - self.head_lines, self.head_count)
+        self.max_body_count = self.rows - self.head_count - self.head_lines
+        self.max_scroll = max(self.body_count - self.max_body_count, 0)
+        self.body_base = self.head_count + self.head_lines
+        return not same
+
+    def add_header(self, text):
+        """Add text to header"""
+        if self.head_count < self.rows:
+            self.scr.addstr(self.head_count, 0, text)
+            self.head_count += 1
+
+    def add_body(self, text):
+        """ Add text to body (below header and header line)"""
+        if self.body_count < self.body_rows:
+            self.body.addstr(self.body_count, 0, text)
+            self.body_count += 1
+
+    def _scroll_indicator_row(self):
+        """ Compute the absolute scroll indicator row:
+        - We want the top to be only when scroll_pos==0
+        - We want the bottom to be only when scroll_pos=max_scroll-1
+        """
+        if self.max_scroll <= 1:
+            return self.body_base
+        y2, y1 = self.max_body_count-1, 1
+        x2, x1 = self.max_scroll, 1
+        x = self.scroll_pos
+        pos = y1 + (y2-y1)*(x-x1)/(x2-x1)
+        return min(self.body_base + int(max(pos, 0)), self.rows-1)
+
+    def render(self):
+        """Draw everything added."""
+        self.calc()
+        if self.max_scroll <= 0:
+            self.scr.refresh()
+        if self.head_count < self.rows:
+            # rectangle(self.scr, self.head_count, 0, self.head_count, self.cols-1)
+            self.scr.hline(self.head_count, 0, curses.ACS_HLINE, self.cols)
+        if self.max_scroll > 0:
+            # rectangle(self.scr, self.body_base, 0, self.rows-1, 0)
+            self.scr.vline(self.body_base, 0, curses.ACS_VLINE, self.max_body_count)
+            self.scr.addstr(self._scroll_indicator_row(), 0, '|', curses.A_REVERSE)
+            self.scr.attron(curses.A_REVERSE)
+            # self.scr.vline(self._scroll_indicator_row(), 0, curses.ACS_VLINE, 1)
+            self.scr.attroff(curses.A_REVERSE)
+            self.scr.refresh()
+#           row = self._scroll_indicator_row()
+#           if row > 0:
+#               rectangle(self.scr, self.body_base, 0, row-1, 0)
+#           self.scr.attron(curses.A_REVERSE)
+#           rectangle(self.scr, row, 0, row, 0)
+#           self.scr.attroff(curses.A_REVERSE)
+#           if row < self.rows-1:
+#               rectangle(self.scr, row+1, 0, self.rows-1, 0)
+#           # self.scr.addstr(self._scroll_indicator_row(), 0, 'X')
+#           self.scr.refresh()
+
+        if self.body_base < self.rows:
+            self.scroll_pos = max(self.scroll_pos, 0)
+            self.scroll_pos = min(self.scroll_pos, self.max_scroll)
+            self.body.refresh(self.scroll_pos, 0,
+                  self.head_count+self.head_lines, 1 if self.max_scroll > 0 else 0,
+                  self.rows-1, self.cols-1)
+
+    def clear(self):
+        """Clear in prep for new screen"""
+        self.scr.clear()
+        self.body.clear()
+        self.head_count = self.body_count = 0
+
+    def prompt(self):
+        """Here is where we sleep waiting for commands or timeout"""
+        for _ in range(5):
+            key = self.scr.getch()
+            if key == -1:
+                continue
+            if key in (ord('k'), curses.KEY_UP):
+                self.scroll_pos = max(self.scroll_pos - 1, 0)
+                self.render()
+            elif key in (ord('j'), curses.KEY_DOWN):
+                self.scroll_pos += 1
+                self.render()
+            else:
+                pass # unknown key
+
+
+######
+####################################################################################
+######
+
 class ProcMem:
     """Represents the memory map summation for processes and groups.
       - the ProcMem object represents one process (or pid)
@@ -87,14 +229,15 @@ class ProcMem:
     junk_pat = re.compile(
             r'^(THPeligible|VmFlags)'
             , re.IGNORECASE)
-    prcs = {}
     opts = None
-    debug = 0
-    summaries = {} # indexed by pid TODO remove this (replace by groups)
-    groups = {} # indexed by group key (e.g., cmd)
-    divisor = 0 # determined by arguments
-    units = '' # determined by arguments
-    fwidth = 11
+    # debug = 0
+    # summaries = {} # indexed by pid TODO remove this (replace by groups)
+    # prcs = {}
+    # groups = {} # indexed by group key (e.g., cmd)
+    # divisor = 0 # determined by arguments
+    # units = '' # determined by arguments
+    # fwidth = 11
+    pmemstat = None # the main program object
     max_cmd_len = 32 # command line maximum length
     chunk_dict = {
             'cat': None,
@@ -136,11 +279,12 @@ class ProcMem:
 
             cmdline_file = f'/proc/{self.pid}/cmdline'
             try:
-                line = open(cmdline_file).read()[:-1]
+                # pylint: disable=consider-using-with
+                line = open(cmdline_file, encoding='utf-8').read()[:-1]
             except FileNotFoundError as exc:
                 # this seems to be a race which ignore; either the process is just
                 # started or just quickly ended before even identified
-                if ProcMem.debug:
+                if DebugLevel:
                     DB(1, f'skip pid={self.pid} no-rollup-lines exc={type(exc).__name__}')
                 return
             arguments = line.split('\0')
@@ -189,7 +333,7 @@ class ProcMem:
         """ Get the lines of the smaps """
         lines = None
         try:
-            with open(filename) as fhandle:
+            with open(filename, encoding='utf-8') as fhandle:
                 lines = fhandle.read().splitlines()
         except (PermissionError, FileNotFoundError) as exc:
             # normal cases: not permitted or this is a race where the pid is terminating
@@ -206,13 +350,13 @@ class ProcMem:
             self.rollup_lines = self.read_lines(self.rollup_file)
         except Exception as exc:
             self.rollup_lines = None
-            if ProcMem.debug:
+            if DebugLevel:
                 DB(1, f'skip pid={self.pid} no-rollup-lines exc={type(exc).__name__}')
 
         if not self.rollup_lines:
             self.wanted = False
             self.whynot = 'CannotReadRollups'
-        elif ProcMem.debug:
+        elif DebugLevel:
             DB(3, f'pid={self.pid} {self.exebasename} #rollup_lines={len(self.rollup_lines)}')
 
         return bool(self.rollup_lines)
@@ -221,100 +365,18 @@ class ProcMem:
         """Get the lines of the 'smaps' file for this PID"""
         try:
             self.smaps_lines = self.read_lines(self.smaps_file)
-        except Exception:
+        except Exception as exc:
             self.smaps_lines = None
-            if ProcMem.debug:
+            if DebugLevel:
                 DB(1, f'skip pid={self.pid} no-smap-lines exc={type(exc).__name__}')
 
         if not self.smaps_lines:
             self.wanted = False
             self.whynot = 'CannotReadSmaps'
         else:
-            if ProcMem.debug:
+            if DebugLevel:
                 DB(1, f'pid={self.pid} {self.exebasename} #smaps_lines={len(self.smaps_lines)}')
         return bool(self.smaps_lines)
-
-    @staticmethod
-    def make_summary_dict(pid=0, info=''):
-        """ Make an object to summarize memory use of a PID or group """
-        summary = {
-                'pswap': 0,
-                'shSYSV': 0,
-                'shOth': 0, # e.g., memory mapped file
-                'stack': 0,
-                'text': 0,
-                'data': 0, # deprecated 'pseudo' (e.g., memory barrier) now in 'data'
-                'ptotal': 0,
-                'pss': 0,  # comes from rollups
-                'number': -pid if pid else 0, # count if positive; else -pid
-                'info': info,
-                }
-        return summary
-
-    @staticmethod
-    def get_group(key):
-        """Per group info."""
-        group = ProcMem.groups.get(key, None)
-        if not group:
-            group = SimpleNamespace(key=key,
-                    is_new=True,
-                    alive=False,
-                    whynot=None,
-                    changed=False,
-                    o_prcset=set(),
-                    prcset=set(),
-                    o_rollup_summary=None,
-                    rollup_summary=None,
-                    o_summary=None,
-                    summary=None)
-            ProcMem.groups[key] = group
-            # DB(0, f'add group[{key}]')
-        return group
-
-    @staticmethod
-    def prep_new_loop():
-        """Prepare for a new loop.
-        Returns whether or not any groups are left.
-        If not, it will be time to terminate.
-        """
-        if ProcMem.groups:
-            for key in list(ProcMem.groups):
-                group = ProcMem.groups[key]
-                if not group.alive:
-                    del ProcMem.groups[key]
-                    # DB(0, f'del group[{key}]')
-                    continue
-                group.is_new = False
-                group.alive = False
-                group.o_rollup_summary, group.rollup_summary = group.rollup_summary, None
-                if group.prcset:
-                    group.o_prcset, group.prcset = group.prcset, set()
-                group.is_changed = False
-                group.delta_pss = 0
-
-        for pid in list(ProcMem.prcs):
-            prc = ProcMem.prcs[pid]
-            if not prc.alive:
-                del ProcMem.prcs[pid]
-                continue
-            prc.alive = False
-            prc.rollup_lines = None
-            prc.smaps_lines = None
-            prc.chunks = []
-        return ProcMem.groups
-
-    @staticmethod
-    def add_to_summary(summary, total):
-        """ Add a summary memory use into a running total of memory use """
-        if summary and total:
-            for key, val in summary.items():
-                if key in ('info',):
-                    pass
-                elif key in ('number',):
-                    total[key] += 1 if val <= 0 else val
-                elif isinstance(val, int):
-                    total[key] += val
-
 
     def make_chunks(self, lines):
         """ Parse the already smaps read lines."""
@@ -355,6 +417,22 @@ class ProcMem:
         if chunk:
             self.chunks.append(chunk)
 
+    @staticmethod
+    def make_summary_dict(pid=0, info=''):
+        """ Make an object to summarize memory use of a PID or group """
+        summary = {
+                'pswap': 0,
+                'shSYSV': 0,
+                'shOth': 0, # e.g., memory mapped file
+                'stack': 0,
+                'text': 0,
+                'data': 0, # deprecated 'pseudo' (e.g., memory barrier) now in 'data'
+                'ptotal': 0,
+                'pss': 0,  # comes from rollups
+                'number': -pid if pid else 0, # count if positive; else -pid
+                'info': info,
+                }
+        return summary
 
     def parse_rollups(self, lines):
         """ Parse the already read lines."""
@@ -428,7 +506,7 @@ class ProcMem:
                 else:
                     chunk.cat = 'text'
                     chunk.eSize = chunk.pss + chunk.swap
-        if ProcMem.debug:
+        if DebugLevel:
             for chunk in self.chunks:
                 DB(6, '{self.pid} {self.exebasename} CHUNK:', chunk)
 
@@ -438,7 +516,7 @@ class ProcMem:
         summary = self.make_summary_dict(self.pid)
 
         for chunk in self.chunks:
-            if ProcMem.debug:
+            if DebugLevel:
                 DB(5, f'{self.pid} {self.exebasename} BLK: {chunk.cat} eSize={chunk.eSize}'
                     + f' size={chunk.size} {chunk.perms} {chunk.item}')
             summary[chunk.cat] += chunk.eSize
@@ -462,7 +540,7 @@ class ProcMem:
             return
         self.is_changed = False
         rollup_summary = self.parse_rollups(self.rollup_lines)
-        group = ProcMem.get_group(self.key)
+        group = self.pmemstat.get_group(self.key)
         if not group.alive:
             info = str(self.key)
             if ProcMem.opts.groupby == 'pid':
@@ -470,40 +548,125 @@ class ProcMem:
             group.rollup_summary = ProcMem.make_summary_dict(info=info)
             group.summary = ProcMem.make_summary_dict(info=info)
             group.alive = True
-        ProcMem.add_to_summary(rollup_summary, group.rollup_summary)
+        self.pmemstat.add_to_summary(rollup_summary, group.rollup_summary)
         group.prcset.add(self)
 
+######
+####################################################################################
+######
+
+class PmemStat:
+    """ The singleton class for running the main loop, etc"""
+
+    def __init__(self, opts):
+        self.opts = opts
+        self.debug = opts.debug
+        self.units = opts.units
+        self.prcs = {}
+        self.groups = {} # indexed by group key (e.g., cmd)
+        if self.units == 'mB':
+            self.divisor = 1000*1000
+            self.fwidth = 8
+        elif self.units == 'MB':
+            self.divisor = 1024*1024
+            self.fwidth = 8
+        else:
+            self.divisor = 1024 # KB (the original)
+            self.fwidth = 11
+        self.window = None
+
+    def get_group(self, key):
+        """Per group info."""
+        group = self.groups.get(key, None)
+        if not group:
+            group = SimpleNamespace(key=key,
+                    is_new=True,
+                    alive=False,
+                    whynot=None,
+                    changed=False,
+                    o_prcset=set(),
+                    prcset=set(),
+                    o_rollup_summary=None,
+                    rollup_summary=None,
+                    o_summary=None,
+                    summary=None)
+            self.groups[key] = group
+            # DB(0, f'add group[{key}]')
+        return group
+
+    def prep_new_loop(self):
+        """Prepare for a new loop.
+        Returns whether or not any groups are left.
+        If not, it will be time to terminate.
+        """
+        if self.groups:
+            for key in list(self.groups):
+                group = self.groups[key]
+                if not group.alive:
+                    del self.groups[key]
+                    # DB(0, f'del group[{key}]')
+                    continue
+                group.is_new = False
+                group.alive = False
+                group.o_rollup_summary, group.rollup_summary = group.rollup_summary, None
+                if group.prcset:
+                    group.o_prcset, group.prcset = group.prcset, set()
+                group.is_changed = False
+                group.delta_pss = 0
+
+        for pid in list(self.prcs):
+            prc = self.prcs[pid]
+            if not prc.alive:
+                del self.prcs[pid]
+                continue
+            prc.alive = False
+            prc.rollup_lines = None
+            prc.smaps_lines = None
+            prc.chunks = []
+        return self.groups
+
     @staticmethod
-    def test_delta(group, summary, o_summary):
+    def add_to_summary(summary, total):
+        """ Add a summary memory use into a running total of memory use """
+        if summary and total:
+            for key, val in summary.items():
+                if key in ('info',):
+                    pass
+                elif key in ('number',):
+                    total[key] += 1 if val <= 0 else val
+                elif isinstance(val, int):
+                    total[key] += val
+
+
+    def test_delta(self, group, summary, o_summary):
         """Check whether the group rollup or smaps summary exceeds threshold """
         # pylint: disable=chained-comparison
         is_over = False
         # DB(0, f'{group.key} o=[{group.o_summary}]\n          n=[{group.summary}]')
         delta_pss = summary['pss'] - o_summary['pss'] + summary['pswap'] - o_summary['pswap']
-        thresh = ProcMem.opts.min_delta_kb
+        thresh = self.opts.min_delta_kb
 
-        # DB(0, f'{group.key} ~pss {delta_pss}KB min={ProcMem.opts.min_delta_kb}')
+        # DB(0, f'{group.key} ~pss {delta_pss}KB min={self.opts.min_delta_kb}')
         # DB(0, f'{group.key} ~pss {delta_pss}KB thresh={thresh}')
         if ((thresh <= 0 and abs(delta_pss) >= -thresh)
                 or (thresh > 0 and delta_pss >= thresh)):
             is_over = True
-            if ProcMem.debug:
+            if self.debug:
                 DB(2, f'{group.key} ~pss {delta_pss}KB thresh={thresh}')
         return is_over, delta_pss
 
-    @staticmethod
-    def prc_group(group):
+    def prc_group(self, group):
         """Process on group"""
         do_smaps = False
         if group.o_rollup_summary:
-            do_smaps, _ = ProcMem.test_delta(
+            do_smaps, _ = self.test_delta(
                     group, group.rollup_summary, group.o_rollup_summary)
         else:
             do_smaps = True
 
         for prc in list(group.prcset):
-            group.summary['info'] = (f'{prc.exebasename}' if ProcMem.opts.groupby == 'exe'
-                    else f'{prc.cmdline_trunc}' if ProcMem.opts.groupby == 'cmd'
+            group.summary['info'] = (f'{prc.exebasename}' if self.opts.groupby == 'exe'
+                    else f'{prc.cmdline_trunc}' if self.opts.groupby == 'cmd'
                     else f'{prc.pid} {prc.cmdline_trunc}')
             if do_smaps:
                 prc.get_smaps_lines()
@@ -513,7 +676,7 @@ class ProcMem:
                 prc.make_chunks(prc.smaps_lines)
                 prc.categorize_chunks()
                 summary = prc.summarize_chunks()
-                ProcMem.add_to_summary(summary, group.summary)
+                self.add_to_summary(summary, group.summary)
             prc.chunks, prc.smaps_lines, prc.rollup_lines = [], [], []
         group.summary['pss'] = group.rollup_summary['ptotal']
         group.summary['pswap'] = group.rollup_summary['pswap']
@@ -525,12 +688,12 @@ class ProcMem:
             group.summary = group.o_summary
             return
 
-        if ProcMem.debug:
+        if self.debug:
             DB(2, f'{group.key} summary: {group.summary}')
 
         group.is_changed = False
         if group.o_summary:
-            group.is_changed, group.delta_pss = ProcMem.test_delta(
+            group.is_changed, group.delta_pss = self.test_delta(
                     group, group.summary, group.o_summary)
         else:
             group.is_changed = True
@@ -540,26 +703,24 @@ class ProcMem:
         elif group.o_summary:
             group.summary = group.o_summary
 
-        if ProcMem.debug:
+        if self.debug:
             DB(1 if group.is_changed else 5, f'{group.key}:', group.summary)
 
-    @staticmethod
-    def pr_exclusions():
+    def pr_exclusions(self):
         """ TBD """
         exclusions = {'number', 'info'}
-        if not ProcMem.debug:
+        if not self.debug:
             exclusions.add('pss')
         return exclusions
 
-    @staticmethod
-    def pr_summary(lead, summary):
+    def pr_summary(self, lead, summary):
         """Print a summary of memory use"""
         body = ''
-        exclusions = ProcMem.pr_exclusions()
+        exclusions = self.pr_exclusions()
         for attr, value in summary.items():
             if attr not in exclusions:
-                mbytes = int(round(value*1024/ProcMem.divisor))
-                body += f'{mbytes:>{ProcMem.fwidth},}'
+                mbytes = int(round(value*1024/self.divisor))
+                body += f'{mbytes:>{self.fwidth},}'
         num = summary['number']
         print(body, lead, -num if num <= 0 else f'{num}x', summary['info'])
 
@@ -586,13 +747,12 @@ class ProcMem:
         return meminfoKB
 
 
-    @staticmethod
-    def loop(now, is_first):
+    def loop(self, now, is_first):
         """one loop thru all pids"""
         total_pids = 0
         allpids = []
         wanted_prcs = {}
-        meminfoKB = ProcMem.get_meminfo()
+        meminfoKB = self.get_meminfo()
 
         with os.scandir('/proc') as it:
             for entry in it:
@@ -601,11 +761,11 @@ class ProcMem:
                     allpids.append(entry.name)
 
         for pid in allpids:
-            ## print(f'DBDB pid={pid} ProcMem.opts.pids={opts.pids}')
-            prc = ProcMem.prcs.get(pid, None)
+            ## print(f'DBDB pid={pid} self.opts.pids={opts.pids}')
+            prc = self.prcs.get(pid, None)
             if not prc:
                 prc = ProcMem(int(pid))
-                ProcMem.prcs[pid] = prc
+                self.prcs[pid] = prc
             else:
                 prc.is_new = False
             prc.prc_pid()
@@ -615,20 +775,20 @@ class ProcMem:
 
             if prc.wanted:
                 wanted_prcs[pid] = prc
-                if ProcMem.debug:
+                if self.debug:
                     DB(1, f'Doing pid={pid} exe={prc.exebasename} cmd={prc.cmdline_trunc}')
             else:
-                if ProcMem.debug:
+                if self.debug:
                     DB(4, f'Unwanted pid={pid} exe={prc.exebasename}')
 
         # all pids have been processed into groups.
         # for each group, if it has changed, sum all the smaps for the group
         # if the group rollup_summary indicates enough change
         grand_summary = ProcMem.make_summary_dict(info='---- GRAND TOTAL ----')
-        for group in ProcMem.groups.values():
+        for group in self.groups.values():
             if group.alive:
-                ProcMem.prc_group(group)
-                ProcMem.add_to_summary(group.summary, grand_summary)
+                self.prc_group(group)
+                self.add_to_summary(group.summary, grand_summary)
 
 
         # print timestamp of report
@@ -647,15 +807,15 @@ class ProcMem:
 
         # print header and  grand totals
         header = ''
-        exclusions = ProcMem.pr_exclusions()
+        exclusions = self.pr_exclusions()
         for attr in grand_summary:
             if attr not in exclusions:
-                header += f'{attr:>{ProcMem.fwidth}}'
-        print(header, f'  key/info (in {ProcMem.units})')
-        ProcMem.pr_summary('T', grand_summary)
+                header += f'{attr:>{self.fwidth}}'
+        print(header, f'  key/info (in {self.units})')
+        self.pr_summary('T', grand_summary)
 
         alive_groups = {}
-        for key, group in ProcMem.groups.items():
+        for key, group in self.groups.items():
             if group.alive:
                 alive_groups[key] = group
                 if not group.summary:
@@ -664,171 +824,52 @@ class ProcMem:
         sorted_keys = sorted(alive_groups.keys(),
                 key=lambda x: alive_groups[x].summary['ptotal'], reverse=True)
 
-        ptotal_limit = (grand_summary['ptotal'] * ProcMem.opts.top_pct / 100) * 1.001
+        ptotal_limit = (grand_summary['ptotal'] * self.opts.top_pct / 100) * 1.001
         others_summary = None
         running_summary = ProcMem.make_summary_dict(info='---- RUNNING ----')
         for key in sorted_keys:
             group = alive_groups[key]
-            ProcMem.add_to_summary(group.summary, running_summary)
+            self.add_to_summary(group.summary, running_summary)
             if running_summary['ptotal'] <= ptotal_limit:
                 if group.alive and (group.is_new or group.is_changed):
-                    ProcMem.pr_summary('A' if group.is_new else f'{group.delta_pss:+,}K',
+                    self.pr_summary('A' if group.is_new else f'{group.delta_pss:+,}K',
                                         group.summary)
                     # DB(0, f'obj: {vars(obj)}')
             elif is_first:
                 if not others_summary:
                     others_summary = ProcMem.make_summary_dict(info='---- OTHERS ----')
-                ProcMem.add_to_summary(group.summary, others_summary)
+                self.add_to_summary(group.summary, others_summary)
         if others_summary:
-            ProcMem.pr_summary('O',  others_summary)
+            self.pr_summary('O',  others_summary)
 
 
-        for group in ProcMem.groups.values():
+        for group in self.groups.values():
             if not group.alive and group.o_summary:
-                ProcMem.pr_summary('x', group.o_summary)
+                self.pr_summary('x', group.o_summary)
 
-        ProcMem.prep_new_loop()
+        self.prep_new_loop()
 
-######
-####################################################################################
-######
-
-class Window:
-    """TBD"""
-    def __init__(self, head_line=True, body_rows=200, body_cols=200):
-        self.scr = self._start_curses()
-        self.body_rows, self.body_cols = body_rows, body_cols
-        self.body = curses.newpad(body_rows, body_cols)
-        self.head_count = 0
-        self.head_lines = 1 if head_line else 0
-        self.body_count = 0
-        self.scroll_pos = 0  # how far down into body are we?
-        self.rows, self.cols = curses.LINES, curses.COLS
-        self.max_body_count, self.max_scroll = 0, 0
-        self.calc()
-
-    @staticmethod
-    def _start_curses():
-        """ Curses initial setup.  Note: not using curses.wrapper because we
-        don't wish to change the colors. """
-        atexit.register(Window.stop_curses)
-        scr = curses.initscr()
-        curses.cbreak()
-        curses.noecho()
-        curses.curs_set(0)
-        scr.timeout(200)
-        scr.clear()
-        return scr
-
-    @staticmethod
-    def stop_curses():
-        """ Curses shutdown (registered to be called on exit). """
-        curses.nocbreak()
-        curses.echo()
-        curses.endwin()
-
-    def calc(self):
-        """Recalculate dimensions ... return True if geometry changed."""
-        rows, cols = curses.LINES, curses.COLS
-        same = bool(rows == self.rows and cols == self.cols)
-        self.rows, self.cols = rows, cols
-        self.head_count = min(self.rows - self.head_lines, self.head_count)
-        self.max_body_count = self.rows - self.head_count - self.head_lines
-        self.max_scroll = max(self.body_count - self.max_body_count, 0)
-        self.body_base = self.head_count + self.head_lines
-        return not same
-
-    def add_header(self, text):
-        """Add text to header"""
-        if self.head_count < self.rows:
-            self.scr.addstr(self.head_count, 0, text)
-            self.head_count += 1
-
-    def add_body(self, text):
-        """ Add text to body (below header and header line)"""
-        if self.body_count < self.body_rows:
-            self.body.addstr(self.body_count, 0, text)
-            self.body_count += 1
-
-    def _scroll_indicator_row(self):
-        """ Compute the absolute scroll indicator row:
-        - We want the top to be only when scroll_pos==0
-        - We want the bottom to be only when scroll_pos=max_scroll-1
-        """
-        if self.max_scroll <= 1:
-            return self.body_base
-        y2, y1 = self.max_body_count-1, 1
-        x2, x1 = self.max_scroll, 1
-        x = self.scroll_pos
-        pos = y1 + (y2-y1)*(x-x1)/(x2-x1)
-        return min(self.body_base + int(max(pos, 0)), self.rows-1)
-
-    def render(self):
-        """Draw everything added."""
-        self.calc()
-        if self.max_scroll <= 0:
-            self.scr.refresh()
-        if self.head_count < self.rows:
-            # rectangle(self.scr, self.head_count, 0, self.head_count, self.cols-1)
-            self.scr.hline(self.head_count, 0, curses.ACS_HLINE, self.cols)
-        if self.max_scroll > 0:
-            # rectangle(self.scr, self.body_base, 0, self.rows-1, 0)
-            self.scr.vline(self.body_base, 0, curses.ACS_VLINE, self.max_body_count)
-            self.scr.addstr(self._scroll_indicator_row(), 0, '|', curses.A_REVERSE)
-            self.scr.attron(curses.A_REVERSE)
-            # self.scr.vline(self._scroll_indicator_row(), 0, curses.ACS_VLINE, 1)
-            self.scr.attroff(curses.A_REVERSE)
-            self.scr.refresh()
-#           row = self._scroll_indicator_row()
-#           if row > 0:
-#               rectangle(self.scr, self.body_base, 0, row-1, 0)
-#           self.scr.attron(curses.A_REVERSE)
-#           rectangle(self.scr, row, 0, row, 0)
-#           self.scr.attroff(curses.A_REVERSE)
-#           if row < self.rows-1:
-#               rectangle(self.scr, row+1, 0, self.rows-1, 0)
-#           # self.scr.addstr(self._scroll_indicator_row(), 0, 'X')
-#           self.scr.refresh()
-
-        if self.body_base < self.rows:
-            self.scroll_pos = max(self.scroll_pos, 0)
-            self.scroll_pos = min(self.scroll_pos, self.max_scroll)
-            self.body.refresh(self.scroll_pos, 0,
-                  self.head_count+self.head_lines, 1 if self.max_scroll > 0 else 0,
-                  self.rows-1, self.cols-1)
-
-    def clear(self):
-        """Clear in prep for new screen"""
-        self.scr.clear()
-        self.body.clear()
-        self.head_count = self.body_count = 0
-
-    def prompt(self):
-        for _ in range(5):
-            key = self.scr.getch()
-            if key == -1:
-                continue
-            if key in (ord('k'), curses.KEY_UP):
-                self.scroll_pos = max(self.scroll_pos - 1, 0)
-                self.render()
-            elif key in (ord('j'), curses.KEY_DOWN):
-                self.scroll_pos += 1
-                self.render()
+    def emit(self, line, to_head=False):
+        """ Emit a line of the report"""
+        if self.window:
+            if to_head:
+                self.window.add_header(line)
             else:
-                pass # unknown key
+                self.window.add_body(line)
+        else:
+            print(line)
 
-
-def window_loop():
-    """ TBD """
-    window = Window()
+    def window_loop(self):
+        """ TBD """
+        self.window = Window()
 #    is_first = True
-    for loop in range(1000000000):
-        window.add_header(f'title {loop}')
-        for i in range(40):
-            window.add_body(chr(0x61+(i%26)) * (window.body_cols-1))
-        window.render()
-        window.prompt()
-        window.clear()
+        for loop in range(1000000000):
+            self.window.add_header(f'title {loop}')
+            for i in range(40):
+                self.window.add_body(chr(0x61+(i%26)) * (self.window.body_cols-1))
+            self.window.render()
+            self.window.prompt()
+            self.window.clear()
 
 #        now = datetime.now()
 #        ProcMem.loop(now, is_first)
@@ -870,33 +911,24 @@ def main():
     DebugLevel = opts.debug
     if opts.debug:
         DB(1, 'DebugLevel', DebugLevel)
-    ProcMem.opts = opts
-    ProcMem.debug = opts.debug
-    ProcMem.units = opts.units
-
-    if opts.units == 'mB':
-        ProcMem.divisor = 1000*1000
-        ProcMem.fwidth = 8
-    elif opts.units == 'MB':
-        ProcMem.divisor = 1024*1024
-        ProcMem.fwidth = 8
-    else:
-        ProcMem.divisor = 1024 # KB (the original)
-        ProcMem.fwidth = 11
-
     if opts.min_delta_kb is None:
         opts.min_delta_kb = 100 if opts.units == 'KB' else 1000
+    if opts.window and opts.loop_secs < 1:
+        opts.loop_secs = 5
 
+    pmemstat = PmemStat(opts=opts)
+    ProcMem.pmemstat = pmemstat
+    ProcMem.opts = opts
 
     if opts.window:
         if opts.loop_secs <= 0:
             opts.loop_secs = 5
-        window_loop()
+        pmemstat.window_loop()
     else:
         is_first = True
         while True:
             now = datetime.now()
-            ProcMem.loop(now, is_first)
+            pmemstat.loop(now, is_first)
             if opts.loop_secs <= 0:
                 break
             until_dt = now + timedelta(0, opts.loop_secs)
@@ -910,9 +942,9 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except KeyboardInterrupt as exc:
+    except KeyboardInterrupt:
         pass
-    except Exception as exc:
+    except Exception as exce:
         Window.stop_curses()
-        print("exception:", str(exc))
+        print("exception:", str(exce))
         print(traceback.format_exc())
