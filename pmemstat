@@ -31,8 +31,11 @@ NOTE: kB is a misnomer ... shoud be "KB".  Morons.
 import os
 import re
 import sys
+import atexit
 import traceback
 import time
+import curses
+from curses.textpad import rectangle
 from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta
@@ -44,7 +47,7 @@ from datetime import datetime, timedelta
 
 DebugLevel = 0
 
-def DB(level, *args, **kwargs):
+def DB(level, *opts, **kwargs):
     """Debug message printer.
     - printing is conditional on DebugLevel being no smaller than the passed level
     - level 0 is unconditional. It is use for temporary traces that
@@ -58,7 +61,7 @@ def DB(level, *args, **kwargs):
         print(f'DB{level}', end=' ', file=tstr)
         kwargs['end'] = ' '
         kwargs['file'] = tstr
-        print(*args, **kwargs)
+        print(*opts, **kwargs)
         print(tstr.getvalue() + f'[:{lineno}]')
 
 
@@ -85,7 +88,7 @@ class ProcMem:
             r'^(THPeligible|VmFlags)'
             , re.IGNORECASE)
     prcs = {}
-    args = None
+    opts = None
     debug = 0
     summaries = {} # indexed by pid TODO remove this (replace by groups)
     groups = {} # indexed by group key (e.g., cmd)
@@ -171,16 +174,16 @@ class ProcMem:
             self.whynot = 'CannotGetCmdline'
             return
 
-        ## print(f'DBDB: {self.pid} {ProcMem.args.pids}')
+        ## print(f'DBDB: {self.pid} {ProcMem.opts.pids}')
         # filter unwanted before too much work
-        if (ProcMem.args.pids and str(self.pid) not in ProcMem.args.pids
-                and self.exebasename not in ProcMem.args.pids):
+        if (ProcMem.opts.pids and str(self.pid) not in ProcMem.opts.pids
+                and self.exebasename not in ProcMem.opts.pids):
             self.wanted = False
             self.whynot = 'FilteredByArgs'
             # print(f'    >>>> unwanted {pid}')
         ## print(f'DBDB: {self.pid} wanted={self.wanted} whynot={self.whynot}')
-        self.key = (self.cmdline_trunc if ProcMem.args.groupby == 'cmd' else
-                self.exebasename if ProcMem.args.groupby == 'exe' else self.pid)
+        self.key = (self.cmdline_trunc if ProcMem.opts.groupby == 'cmd' else
+                self.exebasename if ProcMem.opts.groupby == 'exe' else self.pid)
 
     def read_lines(self, filename):
         """ Get the lines of the smaps """
@@ -462,7 +465,7 @@ class ProcMem:
         group = ProcMem.get_group(self.key)
         if not group.alive:
             info = str(self.key)
-            if ProcMem.args.groupby == 'pid':
+            if ProcMem.opts.groupby == 'pid':
                 info += ' ' + self.cmdline_trunc
             group.rollup_summary = ProcMem.make_summary_dict(info=info)
             group.summary = ProcMem.make_summary_dict(info=info)
@@ -477,9 +480,9 @@ class ProcMem:
         is_over = False
         # DB(0, f'{group.key} o=[{group.o_summary}]\n          n=[{group.summary}]')
         delta_pss = summary['pss'] - o_summary['pss'] + summary['pswap'] - o_summary['pswap']
-        thresh = ProcMem.args.min_delta_kb
+        thresh = ProcMem.opts.min_delta_kb
 
-        # DB(0, f'{group.key} ~pss {delta_pss}KB min={ProcMem.args.min_delta_kb}')
+        # DB(0, f'{group.key} ~pss {delta_pss}KB min={ProcMem.opts.min_delta_kb}')
         # DB(0, f'{group.key} ~pss {delta_pss}KB thresh={thresh}')
         if ((thresh <= 0 and abs(delta_pss) >= -thresh)
                 or (thresh > 0 and delta_pss >= thresh)):
@@ -499,8 +502,8 @@ class ProcMem:
             do_smaps = True
 
         for prc in list(group.prcset):
-            group.summary['info'] = (f'{prc.exebasename}' if ProcMem.args.groupby == 'exe'
-                    else f'{prc.cmdline_trunc}' if ProcMem.args.groupby == 'cmd'
+            group.summary['info'] = (f'{prc.exebasename}' if ProcMem.opts.groupby == 'exe'
+                    else f'{prc.cmdline_trunc}' if ProcMem.opts.groupby == 'cmd'
                     else f'{prc.pid} {prc.cmdline_trunc}')
             if do_smaps:
                 prc.get_smaps_lines()
@@ -542,6 +545,7 @@ class ProcMem:
 
     @staticmethod
     def pr_exclusions():
+        """ TBD """
         exclusions = {'number', 'info'}
         if not ProcMem.debug:
             exclusions.add('pss')
@@ -566,7 +570,7 @@ class ProcMem:
         meminfoKB = {'MemTotal': 0, 'MemAvailable': 0, 'Dirty':0}
         keys = list(meminfoKB.keys())
 
-        with open(meminfofile) as fileh:
+        with open(meminfofile, encoding='utf-8') as fileh:
             for line in fileh:
                 match = re.match(r'^([^:]+):\s+(\d+)\s*kB', line)
                 if not match:
@@ -597,7 +601,7 @@ class ProcMem:
                     allpids.append(entry.name)
 
         for pid in allpids:
-            ## print(f'DBDB pid={pid} ProcMem.args.pids={args.pids}')
+            ## print(f'DBDB pid={pid} ProcMem.opts.pids={opts.pids}')
             prc = ProcMem.prcs.get(pid, None)
             if not prc:
                 prc = ProcMem(int(pid))
@@ -605,7 +609,7 @@ class ProcMem:
             else:
                 prc.is_new = False
             prc.prc_pid()
-            ## if str(pid) in args.pids:
+            ## if str(pid) in opts.pids:
                 ## print(f'DBDB pid={pid} dir={vars(prc)}')
             total_pids += 0 if prc.whynot == 'KernelProcess' else 1
 
@@ -660,7 +664,7 @@ class ProcMem:
         sorted_keys = sorted(alive_groups.keys(),
                 key=lambda x: alive_groups[x].summary['ptotal'], reverse=True)
 
-        ptotal_limit = (grand_summary['ptotal'] * ProcMem.args.top_pct / 100) * 1.001
+        ptotal_limit = (grand_summary['ptotal'] * ProcMem.opts.top_pct / 100) * 1.001
         others_summary = None
         running_summary = ProcMem.make_summary_dict(info='---- RUNNING ----')
         for key in sorted_keys:
@@ -668,7 +672,8 @@ class ProcMem:
             ProcMem.add_to_summary(group.summary, running_summary)
             if running_summary['ptotal'] <= ptotal_limit:
                 if group.alive and (group.is_new or group.is_changed):
-                    ProcMem.pr_summary('A' if group.is_new else f'{group.delta_pss:+,}K', group.summary)
+                    ProcMem.pr_summary('A' if group.is_new else f'{group.delta_pss:+,}K',
+                                        group.summary)
                     # DB(0, f'obj: {vars(obj)}')
             elif is_first:
                 if not others_summary:
@@ -683,6 +688,158 @@ class ProcMem:
                 ProcMem.pr_summary('x', group.o_summary)
 
         ProcMem.prep_new_loop()
+
+######
+####################################################################################
+######
+
+class Window:
+    """TBD"""
+    def __init__(self, head_line=True, body_rows=200, body_cols=200):
+        self.scr = self._start_curses()
+        self.body_rows, self.body_cols = body_rows, body_cols
+        self.body = curses.newpad(body_rows, body_cols)
+        self.head_count = 0
+        self.head_lines = 1 if head_line else 0
+        self.body_count = 0
+        self.scroll_pos = 0  # how far down into body are we?
+        self.rows, self.cols = curses.LINES, curses.COLS
+        self.max_body_count, self.max_scroll = 0, 0
+        self.calc()
+
+    @staticmethod
+    def _start_curses():
+        """ Curses initial setup.  Note: not using curses.wrapper because we
+        don't wish to change the colors. """
+        atexit.register(Window.stop_curses)
+        scr = curses.initscr()
+        curses.cbreak()
+        curses.noecho()
+        curses.curs_set(0)
+        scr.timeout(200)
+        scr.clear()
+        return scr
+
+    @staticmethod
+    def stop_curses():
+        """ Curses shutdown (registered to be called on exit). """
+        curses.nocbreak()
+        curses.echo()
+        curses.endwin()
+
+    def calc(self):
+        """Recalculate dimensions ... return True if geometry changed."""
+        rows, cols = curses.LINES, curses.COLS
+        same = bool(rows == self.rows and cols == self.cols)
+        self.rows, self.cols = rows, cols
+        self.head_count = min(self.rows - self.head_lines, self.head_count)
+        self.max_body_count = self.rows - self.head_count - self.head_lines
+        self.max_scroll = max(self.body_count - self.max_body_count, 0)
+        self.body_base = self.head_count + self.head_lines
+        return not same
+
+    def add_header(self, text):
+        """Add text to header"""
+        if self.head_count < self.rows:
+            self.scr.addstr(self.head_count, 0, text)
+            self.head_count += 1
+
+    def add_body(self, text):
+        """ Add text to body (below header and header line)"""
+        if self.body_count < self.body_rows:
+            self.body.addstr(self.body_count, 0, text)
+            self.body_count += 1
+
+    def _scroll_indicator_row(self):
+        """ Compute the absolute scroll indicator row:
+        - We want the top to be only when scroll_pos==0
+        - We want the bottom to be only when scroll_pos=max_scroll-1
+        """
+        if self.max_scroll <= 1:
+            return self.body_base
+        y2, y1 = self.max_body_count-1, 1
+        x2, x1 = self.max_scroll, 1
+        x = self.scroll_pos
+        pos = y1 + (y2-y1)*(x-x1)/(x2-x1)
+        return min(self.body_base + int(max(pos, 0)), self.rows-1)
+
+    def render(self):
+        """Draw everything added."""
+        self.calc()
+        if self.max_scroll <= 0:
+            self.scr.refresh()
+        if self.head_count < self.rows:
+            # rectangle(self.scr, self.head_count, 0, self.head_count, self.cols-1)
+            self.scr.hline(self.head_count, 0, curses.ACS_HLINE, self.cols)
+        if self.max_scroll > 0:
+            # rectangle(self.scr, self.body_base, 0, self.rows-1, 0)
+            self.scr.vline(self.body_base, 0, curses.ACS_VLINE, self.max_body_count)
+            self.scr.addstr(self._scroll_indicator_row(), 0, '|', curses.A_REVERSE)
+            self.scr.attron(curses.A_REVERSE)
+            # self.scr.vline(self._scroll_indicator_row(), 0, curses.ACS_VLINE, 1)
+            self.scr.attroff(curses.A_REVERSE)
+            self.scr.refresh()
+#           row = self._scroll_indicator_row()
+#           if row > 0:
+#               rectangle(self.scr, self.body_base, 0, row-1, 0)
+#           self.scr.attron(curses.A_REVERSE)
+#           rectangle(self.scr, row, 0, row, 0)
+#           self.scr.attroff(curses.A_REVERSE)
+#           if row < self.rows-1:
+#               rectangle(self.scr, row+1, 0, self.rows-1, 0)
+#           # self.scr.addstr(self._scroll_indicator_row(), 0, 'X')
+#           self.scr.refresh()
+
+        if self.body_base < self.rows:
+            self.scroll_pos = max(self.scroll_pos, 0)
+            self.scroll_pos = min(self.scroll_pos, self.max_scroll)
+            self.body.refresh(self.scroll_pos, 0,
+                  self.head_count+self.head_lines, 1 if self.max_scroll > 0 else 0,
+                  self.rows-1, self.cols-1)
+
+    def clear(self):
+        """Clear in prep for new screen"""
+        self.scr.clear()
+        self.body.clear()
+        self.head_count = self.body_count = 0
+
+    def prompt(self):
+        for _ in range(5):
+            key = self.scr.getch()
+            if key == -1:
+                continue
+            if key in (ord('k'), curses.KEY_UP):
+                self.scroll_pos = max(self.scroll_pos - 1, 0)
+                self.render()
+            elif key in (ord('j'), curses.KEY_DOWN):
+                self.scroll_pos += 1
+                self.render()
+            else:
+                pass # unknown key
+
+
+def window_loop():
+    """ TBD """
+    window = Window()
+#    is_first = True
+    for loop in range(1000000000):
+        window.add_header(f'title {loop}')
+        for i in range(40):
+            window.add_body(chr(0x61+(i%26)) * (window.body_cols-1))
+        window.render()
+        window.prompt()
+        window.clear()
+
+#        now = datetime.now()
+#        ProcMem.loop(now, is_first)
+#        if ProcMem.opts.loop_secs <= 0:
+#            break
+#        until_dt = now + timedelta(0, ProcMem.opts.loop_secs)
+#        diff_dt = until_dt - datetime.now()
+#        seconds = diff_dt.total_seconds()
+#        if seconds > 0:
+#            time.sleep(seconds)
+#        is_first = False
 
 def main():
     """Main loop"""
@@ -703,48 +860,59 @@ def main():
             help='report group contributing to top pct of ptotal [dflt=100]')
     parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB'), default='MB',
             help='units of memory [dflt=MB]')
+    parser.add_argument('-w', '--window', action='store_true',
+            help='show in "curses" window')
     parser.add_argument('pids', nargs='*', action='store',
             help='list of pids/groups (none means all we can read)')
-    args = parser.parse_args()
-    # DB(0, f'args={args}')
+    opts = parser.parse_args()
+    # DB(0, f'opts={opts}')
 
-    DebugLevel = args.debug
-    if args.debug:
-        DB(1, f'DebugLevel', DebugLevel)
-    ProcMem.args = args
-    ProcMem.debug = args.debug
-    ProcMem.units = args.units
+    DebugLevel = opts.debug
+    if opts.debug:
+        DB(1, 'DebugLevel', DebugLevel)
+    ProcMem.opts = opts
+    ProcMem.debug = opts.debug
+    ProcMem.units = opts.units
 
-    if args.units == 'mB':
+    if opts.units == 'mB':
         ProcMem.divisor = 1000*1000
         ProcMem.fwidth = 8
-    elif args.units == 'MB':
+    elif opts.units == 'MB':
         ProcMem.divisor = 1024*1024
         ProcMem.fwidth = 8
     else:
         ProcMem.divisor = 1024 # KB (the original)
         ProcMem.fwidth = 11
 
-    if args.min_delta_kb is None:
-        args.min_delta_kb = 100 if args.units == 'KB' else 1000
+    if opts.min_delta_kb is None:
+        opts.min_delta_kb = 100 if opts.units == 'KB' else 1000
 
-    is_first = True
-    while True:
-        now = datetime.now()
-        ProcMem.loop(now, is_first)
-        if args.loop_secs <= 0:
-            break
-        until_dt = now + timedelta(0, args.loop_secs)
-        diff_dt = until_dt - datetime.now()
-        seconds = diff_dt.total_seconds()
-        if seconds > 0:
-            time.sleep(seconds)
-        is_first = False
+
+    if opts.window:
+        if opts.loop_secs <= 0:
+            opts.loop_secs = 5
+        window_loop()
+    else:
+        is_first = True
+        while True:
+            now = datetime.now()
+            ProcMem.loop(now, is_first)
+            if opts.loop_secs <= 0:
+                break
+            until_dt = now + timedelta(0, opts.loop_secs)
+            diff_dt = until_dt - datetime.now()
+            seconds = diff_dt.total_seconds()
+            if seconds > 0:
+                time.sleep(seconds)
+            is_first = False
 
 
 if __name__ == '__main__':
     try:
         main()
+    except KeyboardInterrupt as exc:
+        pass
     except Exception as exc:
+        Window.stop_curses()
         print("exception:", str(exc))
         print(traceback.format_exc())
