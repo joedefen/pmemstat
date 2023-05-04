@@ -1,6 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+Pending Features:
+  - PSI Indicator in title?  PSI Page (maybe with a thread)?
+  - Default is window mode
+  - Help Menu
+  - Real-time controls:
+    - others (i.e., brief) 
+    - units
+    - page up/down
+    - fit window
+  - CPU of processes and overall?
+  - Ability to kill processes?
+
+
+
 Copyright (c) 2022 Joe Defen
 
 A program to aggregate the memory used by processes into categories
@@ -65,6 +79,17 @@ def DB(level, *opts, **kwargs):
         print(*opts, **kwargs)
         print(tstr.getvalue() + f'[:{lineno}]')
 
+##############################################################################
+##   human()
+##############################################################################
+def human(number):
+    """ Return a concise number description."""
+    suffixes = ['K', 'M', 'G', 'T']
+    while suffixes:
+        suffix = suffixes.pop(0)
+        number /= 1024
+        if number < 999.95 or not suffixes:
+            return f'{number:.1f}{suffix}'
 
 ######
 ####################################################################################
@@ -585,9 +610,12 @@ class PmemStat:
         elif self.units == 'MB':
             self.divisor = 1024*1024
             self.fwidth = 8
-        else:
+        elif self.units == 'KB':
             self.divisor = 1024 # KB (the original)
             self.fwidth = 11
+        else: # human
+            self.divisor = 1 # human
+            self.fwidth = 7
         self.window = None
 
     def get_group(self, key):
@@ -737,7 +765,7 @@ class PmemStat:
             exclusions.add('pss')
         return others, exclusions
 
-    def pr_summary(self, lead, summary, attr=None):
+    def pr_summary(self, lead, summary, attr=None, to_head=False):
         """Print a summary of memory use"""
         body = ''
         others, exclusions = self.pr_exclusions()
@@ -750,11 +778,14 @@ class PmemStat:
                     if item != others[0]:
                         continue
                     mbytes = others_mb
-                body += f'{mbytes:>{self.fwidth},}'
+                if self.divisor > 1:
+                    body += f'{mbytes:>{self.fwidth},}'
+                else:
+                    body += f'{human(mbytes):>{self.fwidth}}'
         num = summary['number']
         self.emit(f'{body} {lead} '
                   + (f'{-num}' if num <= 0 else f'{num}x')
-                  + ' ' + summary['info'], attr=attr)
+                  + ' ' + summary['info'], attr=attr, to_head=to_head)
 
     @staticmethod
     def get_meminfo():
@@ -826,12 +857,12 @@ class PmemStat:
 
         # print timestamp of report
         if not self.window:
-            leader = f'\n---- {str(now)} MB:'
+            leader = f'\n---- {now.strftime("%H:%M:%S")}' 
         else:
-            leader = f'{str(now)} MB:'
-        leader += f' Mem={int(round(meminfoKB["MemTotal"]/1024)):,}'
-        leader += f' Avail={int(round(meminfoKB["MemAvailable"]/1024)):,}'
-        leader += f' Dirty={int(round(meminfoKB["Dirty"]/1024)):,}'
+            leader = f'{now.strftime("%H:%M:%S")}'
+        leader += f' Mem={human(meminfoKB["MemTotal"]*1024)}'
+        leader += f' Avail={human(meminfoKB["MemAvailable"]*1024)}'
+        leader += f' Dirty={human(meminfoKB["Dirty"]*1024)}'
         leader += f' PIDs: {len(wanted_prcs)}/{total_pids}'
         self.emit(leader, to_head=True)
 
@@ -853,7 +884,7 @@ class PmemStat:
                 header += f'{item:>{self.fwidth}}'
         self.emit(f'{header}   key/info (in {self.units})', to_head=True,
                   attr=curses.A_BOLD)
-        self.pr_summary('T', grand_summary)
+        self.pr_summary('T', grand_summary, to_head=True)
 
         alive_groups = {}
         for key, group in self.groups.items():
@@ -863,7 +894,7 @@ class PmemStat:
                     DB(0, 'no summary:', str(group))
 
         sorted_keys = sorted(alive_groups.keys(),
-                key=lambda x: (alive_groups[x].growth_pct,
+                key=lambda x: (alive_groups[x].is_changed,
                                alive_groups[x].summary['ptotal']), reverse=True)
 
         ptotal_limit = (grand_summary['ptotal'] * self.opts.top_pct / 100) * 1.001
@@ -906,7 +937,7 @@ class PmemStat:
 
     def window_loop(self):
         """ TBD """
-        self.window = Window()
+        self.window = Window(head_line=True)
         is_first = True
         for _ in range(1000000000):
             # self.window.add_header(f'title {loop}')
@@ -937,7 +968,7 @@ def main():
             help='report group contributing to top pct of ptotal [dflt=100]')
     parser.add_argument('-o', '--others', action='store_true',
             help='collapse shSYSV, shOth, stack, text into "other"')
-    parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB'), default='MB',
+    parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'), default='MB',
             help='units of memory [dflt=MB]')
     parser.add_argument('-w', '--window', action='store_true',
             help='show in "curses" window')
