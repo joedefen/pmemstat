@@ -3,19 +3,14 @@
 """
 Pending Features:
   - PSI Indicator in title?  PSI Page (maybe with a thread)?
-  - DONE: Default is window mode
   - Help Menu
+  - CPU of processes and overall
   - Real-time controls:
-    - DONE: others (i.e., brief)
-    - DONE: units
-    - DONE: page up/down
-    - DONE: fit window
-    - number lines
     - sort by: mem/key/cpu
     - new/chg on top: OFF/on
-  - CPU of processes and overall?
   - Ability to kill processes?
   - Waiting for first screen shows empty page with "working..."?
+  - Support H, $ for navigation
 
 Keys:
     a
@@ -29,13 +24,14 @@ Keys:
  n  C-f PAGE-DOWN - page down
     g: groupby: exe/cmd/pid
  n  h : enter/exit help page
+    H HOME:  goto top of list
     i
  n  j DOWN - one line down
  n  k UP - one line up
     l
     m
-    n
-    o:  collapse cols to "others": ON/off
+    n: line numbers: ON/off
+    o: collapse cols to "others": ON/off
     p
     q
     r
@@ -48,6 +44,7 @@ Keys:
     x
     y
     z
+    $ END: go to end of list
 
 
 
@@ -150,7 +147,7 @@ class Window:
         self.scroll_pos = 0  # how far down into body are we?
         self.rows, self.cols = 0, 0
         self.max_body_count, self.max_scroll = 0, 0
-        self.handled_keys = keys if isinstance(keys, list) else []
+        self.handled_keys = keys if isinstance(keys, set) else []
         self._set_screen_dims()
         self.calc()
 
@@ -275,23 +272,25 @@ class Window:
                 break
 
             # Navigation Keys...
+            was_scroll_pos = self.scroll_pos
             if key in (ord('k'), curses.KEY_UP):
                 self.scroll_pos = max(self.scroll_pos - 1, 0)
-                self.render()
             elif key in (ord('j'), curses.KEY_DOWN):
                 self.scroll_pos += 1
-                self.render()
             elif key in (ctl_b, curses.KEY_PPAGE):
                 self.scroll_pos -= self.max_body_count
-                self.render()
             elif key in (ctl_u, ):
                 self.scroll_pos -= self.max_body_count//2
-                self.render()
             elif key in (ctl_f, curses.KEY_NPAGE):
                 self.scroll_pos += self.max_body_count
-                self.render()
             elif key in (ctl_d, ):
                 self.scroll_pos += self.max_body_count//2
+            elif key in (ord('H'), curses.KEY_HOME):
+                self.scroll_pos = 0
+            elif key in (ord('$'), curses.KEY_END):
+                self.scroll_pos = self.body_count
+
+            if self.scroll_pos != was_scroll_pos:
                 self.render()
             # App keys...
             elif key in self.handled_keys:
@@ -656,7 +655,8 @@ class ProcMem:
 
 class PmemStat:
     """ The singleton class for running the main loop, etc"""
-    keys_we_handle =  [ ord('f'), ord('g'), ord('o'), ord('u'),]
+    keys_we_handle =  set([ord('f'), ord('g'), ord('o'), ord('u'),
+                    ord('n'), ord('h'), ord('?'), ord('?'),])
 
     def __init__(self, opts):
         self.opts = opts
@@ -664,6 +664,7 @@ class PmemStat:
         self.prcs = {}
         self.groups = {} # indexed by group key (e.g., cmd)
         self.window = None
+        self.number = 0  # line number for opts.numbers
         self.units, self.divisor, self.fwidth = 0, 0, 0
         self._set_units()
         
@@ -834,6 +835,9 @@ class PmemStat:
         body = ''
         others, exclusions = self.pr_exclusions()
         others_mb = 0
+        if self.opts.numbers:
+            body += f'{self.number:>4,}'
+        self.number += 1
         for item, value in summary.items():
             if item not in exclusions:
                 mbytes = int(round(value*1024/self.divisor))
@@ -939,6 +943,9 @@ class PmemStat:
         # print header and  grand totals
         header = ''
         others, exclusions = self.pr_exclusions()
+        self.number = 0
+        if self.opts.numbers:
+            header += '   #'
         for item in grand_summary:
             if item not in exclusions:
                 if item in others:
@@ -1018,6 +1025,8 @@ class PmemStat:
                 after = {'MB': 'mB', 'mB': 'KB', 'KB': 'human', 'human': 'MB'}
                 self.opts.units = after[self.opts.units]
                 self._set_units()
+            elif key in (ord('n'), ):
+                self.opts.numbers = not self.opts.numbers
             elif key in (ord('h'), ord('?')):
                 pass # TODO: implement help page
 
@@ -1049,6 +1058,8 @@ def main():
             help='max shown command length [dflt=36 if not -w]')
     parser.add_argument('-t', '--top-pct', type=int, default=100,
             help='report group contributing to top pct of ptotal [dflt=100]')
+    parser.add_argument('-n', '--numbers', action='store_true',
+            help='show line numbers in report')
     parser.add_argument('-o', '--others', action='store_true',
             help='collapse shSYSV, shOth, stack, text into "other"')
     parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'),
