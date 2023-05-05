@@ -9,7 +9,8 @@ Pending Features:
     - others (i.e., brief) 
     - units
     - page up/down
-    - fit window
+  - New options:
+    - DONE: fit window
   - CPU of processes and overall?
   - Ability to kill processes?
 
@@ -897,13 +898,14 @@ class PmemStat:
                 key=lambda x: (alive_groups[x].is_changed,
                                alive_groups[x].summary['ptotal']), reverse=True)
 
+        limit = self.window.max_body_count if self.opts.fit_to_window else 1000000
         ptotal_limit = (grand_summary['ptotal'] * self.opts.top_pct / 100) * 1.001
         others_summary = None
         running_summary = ProcMem.make_summary_dict(info='---- RUNNING ----')
-        for key in sorted_keys:
+        for idx, key in enumerate(sorted_keys):
             group = alive_groups[key]
             self.add_to_summary(group.summary, running_summary)
-            if running_summary['ptotal'] <= ptotal_limit:
+            if idx < limit-1 and running_summary['ptotal'] <= ptotal_limit:
                 if group.alive and (group.is_new or group.is_changed or self.window):
                     attr = curses.A_REVERSE if group.is_new or group.is_changed else None
                     attr = None if is_first else attr
@@ -911,16 +913,17 @@ class PmemStat:
                         else f'{group.delta_pss:+,}K' if group.is_changed
                         else ' ', group.summary, attr=attr)
                     # DB(0, f'obj: {vars(obj)}')
-            elif is_first:
+            elif is_first or self.opts.window:
                 if not others_summary:
                     others_summary = ProcMem.make_summary_dict(info='---- OTHERS ----')
                 self.add_to_summary(group.summary, others_summary)
         if others_summary:
             self.pr_summary('O',  others_summary)
 
-
+        remainder = limit - self.window.body_count if self.opts.fit_to_window else 1000000
         for group in self.groups.values():
-            if not group.alive and group.o_summary:
+            if not group.alive and group.o_summary and remainder > 0:
+                remainder -= 1
                 self.pr_summary('x', group.o_summary)
 
         self.prep_new_loop()
@@ -930,6 +933,7 @@ class PmemStat:
         if self.window:
             if to_head:
                 self.window.add_header(line, attr)
+                self.window.calc()
             else:
                 self.window.add_body(line, attr)
         else:
@@ -940,9 +944,6 @@ class PmemStat:
         self.window = Window(head_line=True)
         is_first = True
         for _ in range(1000000000):
-            # self.window.add_header(f'title {loop}')
-            # for i in range(40):
-                # self.window.add_body(chr(0x61+(i%26)) * (self.window.body_cols-1))
             self.loop(datetime.now(), is_first)
             self.window.render()
             self.window.prompt(self.opts.loop_secs)
@@ -956,8 +957,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-D', '--debug', action='count', default=0,
             help='debug mode (the more Ds, the higher the debug level)')
-    parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid'), default='exe',
-            help='grouping method for presenting rows')
+    parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid'),
+            default='exe', help='grouping method for presenting rows')
+    parser.add_argument('-f', '--fit-to-window', action='store_true',
+            help='do not overflow window')
     parser.add_argument('-k', '--min-delta-kb', type=int, default=None,
             help='minimum percent KB to show again [dflt=100 if DB else 1000')
     parser.add_argument('-l', '--loop', type=int, default=0, dest='loop_secs',
@@ -968,8 +971,8 @@ def main():
             help='report group contributing to top pct of ptotal [dflt=100]')
     parser.add_argument('-o', '--others', action='store_true',
             help='collapse shSYSV, shOth, stack, text into "other"')
-    parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'), default='MB',
-            help='units of memory [dflt=MB]')
+    parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'),
+            default='MB', help='units of memory [dflt=MB]')
     parser.add_argument('-w', '--window', action='store_true',
             help='show in "curses" window')
     parser.add_argument('pids', nargs='*', action='store',
@@ -982,8 +985,14 @@ def main():
         DB(1, 'DebugLevel', DebugLevel)
     if opts.min_delta_kb is None:
         opts.min_delta_kb = 100 if opts.units == 'KB' else 1000
-    if opts.window and opts.loop_secs < 1:
-        opts.loop_secs = 5
+    if opts.window:
+        if opts.loop_secs < 1:
+            opts.loop_secs = 5
+        if opts.fit_to_window:
+            opts.top_pct = 100
+        opts.cmdlen = 200
+    else:
+        opts.fit_to_window = False
 
     pmemstat = PmemStat(opts=opts)
     ProcMem.pmemstat = pmemstat
