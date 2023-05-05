@@ -16,7 +16,7 @@ Keys:
     a
     b
  n  C-b PAGE-UP - page up
-    c
+    c: cpu: ON/off
     d
  n  C-d Half page down
     e
@@ -76,6 +76,7 @@ NOTE: kB is a misnomer ... should be "KB".  Morons.
 # pylint: disable=broad-except,import-outside-toplevel,global-statement
 # pylint: disable=too-many-boolean-expressions,invalid-name
 # pylint: disable=too-many-instance-attributes,too-many-lines
+# pylint: disable=too-many-arguments
 
 import os
 import re
@@ -83,6 +84,7 @@ import sys
 import atexit
 import traceback
 import time
+import subprocess
 import curses
 # from curses.textpad import rectangle
 from types import SimpleNamespace
@@ -351,6 +353,7 @@ class ProcMem:
             'perms': '',
             'item': '',
             }
+    clock_tick = None
 
     def __init__(self, pid):
         self.pid = pid
@@ -364,10 +367,60 @@ class ProcMem:
         self.rollup_lines = None
         self.smaps_lines = None
         self.chunks = []
-
+        self.cpu = None
         self.exebasename = None, None
         self.key, self.cmdline, self.cmdline_trunc = None, None, None
 
+    def refresh_cpu(self):
+        """Get the Cpu Number for the PID (if possible)"""
+        def init_cpu(error=False):
+            return SimpleNamespace(error=error, fh=None,
+                base_mono=0, base_ticks=0, percent=0,)
+
+        if ProcMem.clock_tick is None:
+            try:
+                ProcMem.clock_tick = 0
+                rv = subprocess.run(['getconf', 'CLK_TCK'],
+                            capture_output=True, text=True, check=True)
+                ProcMem.clock_tick = int(rv.stdout.strip())
+            except Exception:
+                pass
+            if self.clock_tick <= 0:
+                ProcMem.clock_tick = 100
+
+        if not self.cpu:
+            self.cpu = init_cpu()
+            try:
+                self.cpu.fh = open(f'/proc/{self.pid}/stat', encoding='utf-8')
+            except (PermissionError, FileNotFoundError):
+                self.cpu = init_cpu(error=True)
+                return
+        if self.cpu.error:
+            return
+        try:
+            self.cpu.fh.seek(0)
+            data = self.cpu.fh.read().split()
+            user, system = int(data[13]), int(data[14])
+        except Exception:
+            self.cpu = init_cpu(error=True)
+            return
+        ticks = user + system
+        mono = time.monotonic()
+
+        if self.cpu.base_mono >= 0: # initialized
+            delta_ticks = ticks - self.cpu.base_ticks
+            delta_time = mono - self.cpu.base_mono
+            self.cpu.percent = 0
+            if delta_time > 0 and delta_ticks >= 0:
+                self.cpu.percent = round(100
+                    * delta_ticks / ProcMem.clock_tick / delta_time, 8)
+            # print(f'{self.cpu.percent}%')
+            if delta_time >= 20: # rebase sample
+                self.cpu.base_mono = mono
+                self.cpu.base_ticks = ticks
+        else:
+            self.cpu.base_mono = mono
+            self.cpu.base_ticks = ticks
 
     def get_cmdline(self):
         """Get the command line of the PID."""
@@ -519,6 +572,7 @@ class ProcMem:
     def make_summary_dict(pid=0, info=''):
         """ Make an object to summarize memory use of a PID or group """
         summary = {
+                'cpu_pct': 0,
                 'pswap': 0,
                 'shSYSV': 0,
                 'shOth': 0, # e.g., memory mapped file
@@ -608,7 +662,6 @@ class ProcMem:
             for chunk in self.chunks:
                 DB(6, '{self.pid} {self.exebasename} CHUNK:', chunk)
 
-
     def summarize_chunks(self):
         """ Accumulate the chunks into the summary of memory use for the PID """
         summary = self.make_summary_dict(self.pid)
@@ -638,6 +691,9 @@ class ProcMem:
             return
         self.is_changed = False
         rollup_summary = self.parse_rollups(self.rollup_lines)
+        if self.opts.cpu:
+            self.refresh_cpu()
+            rollup_summary['cpu_pct'] = self.cpu.percent
         group = self.pmemstat.get_group(self.key)
         if not group.alive:
             info = str(self.key)
@@ -655,8 +711,9 @@ class ProcMem:
 
 class PmemStat:
     """ The singleton class for running the main loop, etc"""
-    keys_we_handle =  set([ord('f'), ord('g'), ord('o'), ord('u'),
-                    ord('n'), ord('h'), ord('?'), ord('?'),])
+    keys_we_handle =  set([ord('c'), ord('f'), ord('g'), ord('o'),
+                    ord('u'), ord('n'), ord('h'), ord('?'),
+                    ord('s'), ord('?'), ord('?'), ord('?'), ])
 
     def __init__(self, opts):
         self.opts = opts
@@ -668,6 +725,17 @@ class PmemStat:
         self.units, self.divisor, self.fwidth = 0, 0, 0
         self._set_units()
         
+    def get_sortby(self):
+        """Make sort_by sensible."""
+        if self.opts.sortby in ('cpu',) and not self.opts.cpu:
+            return 'mem'
+        return self.opts.sortby
+
+    def is_fit_opted(self):
+        """Make fit_to_window sensible."""
+        return self.opts.fit_to_window and self.get_sortby() in (
+            'mem', 'cpu')
+
     def _set_units(self):
         self.units = self.opts.units
         if self.units == 'mB':
@@ -744,9 +812,8 @@ class PmemStat:
                     pass
                 elif key in ('number',):
                     total[key] += 1 if val <= 0 else val
-                elif isinstance(val, int):
+                elif isinstance(val, (int, float)):
                     total[key] += val
-
 
     def test_delta(self, group, summary, o_summary):
         """Check whether the group rollup or smaps summary exceeds threshold """
@@ -790,12 +857,15 @@ class PmemStat:
             prc.chunks, prc.smaps_lines, prc.rollup_lines = [], [], []
         group.summary['pss'] = group.rollup_summary['ptotal']
         group.summary['pswap'] = group.rollup_summary['pswap']
+        group.summary['cpu_pct'] = group.rollup_summary['cpu_pct']
 
         if not group.prcset:
             group.alive = False
             do_smaps = False
         if not do_smaps:
             group.summary = group.o_summary
+            if group.summary and group.rollup_summary:
+                group.summary['cpu_pct'] = group.rollup_summary['cpu_pct']
             return
 
         if self.debug:
@@ -825,6 +895,8 @@ class PmemStat:
     def pr_exclusions(self):
         """ TBD """
         exclusions = {'number', 'info'}
+        if not self.opts.cpu:
+            exclusions.add('cpu_pct')
         others = ['text', 'shSYSV', 'shOth', 'stack'] if self.opts.others else []
         if not self.debug:
             exclusions.add('pss')
@@ -836,10 +908,13 @@ class PmemStat:
         others, exclusions = self.pr_exclusions()
         others_mb = 0
         if self.opts.numbers:
-            body += f'{self.number:>4,}'
+            body += f'{self.number:>4}'
         self.number += 1
         for item, value in summary.items():
             if item not in exclusions:
+                if item in ('cpu_pct', ):
+                    body += f'{value:>{self.fwidth}.1f}'
+                    continue
                 mbytes = int(round(value*1024/self.divisor))
                 if item in others:
                     others_mb += mbytes
@@ -876,7 +951,6 @@ class PmemStat:
                     break
         assert not keys, f'ALERT: cannot get vitals ({keys}) from {meminfofile}'
         return meminfoKB
-
 
     def loop(self, now, is_first):
         """one loop thru all pids"""
@@ -922,7 +996,6 @@ class PmemStat:
                 self.prc_group(group)
                 self.add_to_summary(group.summary, grand_summary)
 
-
         # print timestamp of report
         if not self.window:
             leader = f'\n---- {now.strftime("%H:%M:%S")}'
@@ -953,8 +1026,9 @@ class PmemStat:
                         continue
                     item = 'other'
                 header += f'{item:>{self.fwidth}}'
-        self.emit(f'{header}   key/info (by {self.opts.groupby})', to_head=True,
-                  attr=curses.A_BOLD)
+        self.emit(f'{header}   key/info'
+                + f' ({self.opts.groupby} by {self.get_sortby()})',
+                to_head=True, attr=curses.A_BOLD)
         self.pr_summary('T', grand_summary, to_head=True)
 
         alive_groups = {}
@@ -964,11 +1038,18 @@ class PmemStat:
                 if not group.summary:
                     DB(0, 'no summary:', str(group))
 
-        sorted_keys = sorted(alive_groups.keys(),
+        if self.get_sortby() == 'cpu':
+            sorted_keys = sorted(alive_groups.keys(),
+                key=lambda x: alive_groups[x].summary['cpu_pct'], reverse=True)
+        elif self.get_sortby() == 'name':
+            sorted_keys = sorted(alive_groups.keys(),
+                key=lambda x: str(alive_groups[x].key))
+        else:
+            sorted_keys = sorted(alive_groups.keys(),
                 key=lambda x: (alive_groups[x].is_changed,
                                alive_groups[x].summary['ptotal']), reverse=True)
 
-        limit = self.window.max_body_count if self.opts.fit_to_window else 1000000
+        limit = self.window.max_body_count if self.is_fit_opted() else 1000000
         ptotal_limit = (grand_summary['ptotal'] * self.opts.top_pct / 100) * 1.001
         others_summary = None
         running_summary = ProcMem.make_summary_dict(info='---- RUNNING ----')
@@ -990,7 +1071,7 @@ class PmemStat:
         if others_summary:
             self.pr_summary('O',  others_summary)
 
-        remainder = limit - self.window.body_count if self.opts.fit_to_window else 1000000
+        remainder = limit - self.window.body_count if self.is_fit_opted() else 1000000
         for group in self.groups.values():
             if not group.alive and group.o_summary and remainder > 0:
                 remainder -= 1
@@ -1013,7 +1094,9 @@ class PmemStat:
         """ TBD """
         def do_key(key):
             # ENSURE keys are in 'keys_we_handle'
-            if key in (ord('f'), ):
+            if key in (ord('c'), ):
+                self.opts.cpu = not self.opts.cpu
+            elif key in (ord('f'), ):
                 self.opts.fit_to_window = not self.opts.fit_to_window
             elif key in (ord('g'), ):
                 after = {'exe': 'cmd', 'cmd': 'pid', 'pid': 'exe'}
@@ -1027,6 +1110,9 @@ class PmemStat:
                 self._set_units()
             elif key in (ord('n'), ):
                 self.opts.numbers = not self.opts.numbers
+            elif key in (ord('s'), ):
+                after = {'mem': 'cpu', 'cpu': 'name', 'name': 'mem'}
+                self.opts.sortby = after[self.opts.sortby]
             elif key in (ord('h'), ord('?')):
                 pass # TODO: implement help page
 
@@ -1046,6 +1132,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-D', '--debug', action='count', default=0,
             help='debug mode (the more Ds, the higher the debug level)')
+    parser.add_argument('-c', '--cpu', action='store_true',
+            help='report percent CPU')
     parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid'),
             default='exe', help='grouping method for presenting rows')
     parser.add_argument('-f', '--fit-to-window', action='store_true',
@@ -1064,6 +1152,8 @@ def main():
             help='collapse shSYSV, shOth, stack, text into "other"')
     parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'),
             default='MB', help='units of memory [dflt=MB]')
+    parser.add_argument('-s', '--sortby', choices=('mem', 'cpu', 'name'),
+            default='mem', help='grouping method for presenting rows')
     parser.add_argument('-W', '--no-window', action='store_false', dest='window',
             help='show in "curses" window [disables: -D,-t,-L]')
     parser.add_argument('pids', nargs='*', action='store',
