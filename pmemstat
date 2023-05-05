@@ -3,16 +3,52 @@
 """
 Pending Features:
   - PSI Indicator in title?  PSI Page (maybe with a thread)?
-  - Default is window mode
+  - DONE: Default is window mode
   - Help Menu
   - Real-time controls:
-    - others (i.e., brief) 
-    - units
-    - page up/down
-  - New options:
+    - DONE: others (i.e., brief)
+    - DONE: units
+    - DONE: page up/down
     - DONE: fit window
+    - number lines
+    - sort by: mem/key/cpu
+    - new/chg on top: OFF/on
   - CPU of processes and overall?
   - Ability to kill processes?
+  - Waiting for first screen shows empty page with "working..."?
+
+Keys:
+    a
+    b
+ n  C-b PAGE-UP - page up
+    c
+    d
+ n  C-d Half page down
+    e
+    f: fit: ON/off
+ n  C-f PAGE-DOWN - page down
+    g: groupby: exe/cmd/pid
+ n  h : enter/exit help page
+    i
+ n  j DOWN - one line down
+ n  k UP - one line up
+    l
+    m
+    n
+    o:  collapse cols to "others": ON/off
+    p
+    q
+    r
+    s
+    t
+    u units: MB/mB/KB/human
+ n  C-u Half page up
+    v
+    w
+    x
+    y
+    z
+
 
 
 
@@ -42,7 +78,7 @@ NOTE: kB is a misnomer ... should be "KB".  Morons.
 """
 # pylint: disable=broad-except,import-outside-toplevel,global-statement
 # pylint: disable=too-many-boolean-expressions,invalid-name
-# pylint: disable=too-many-instance-attributes
+# pylint: disable=too-many-instance-attributes,too-many-lines
 
 import os
 import re
@@ -101,7 +137,8 @@ class Window:
     timeout_ms = 200
     static_scr = None
     """TBD"""
-    def __init__(self, head_line=True, head_rows=10, body_rows=200, body_cols=200):
+    def __init__(self, head_line=True, head_rows=10, body_rows=200,
+                 body_cols=200, keys=None):
         self.scr = self._start_curses()
         self.head_rows = head_rows
         self.body_rows, self.body_cols = body_rows, body_cols
@@ -113,6 +150,7 @@ class Window:
         self.scroll_pos = 0  # how far down into body are we?
         self.rows, self.cols = 0, 0
         self.max_body_count, self.max_scroll = 0, 0
+        self.handled_keys = keys if isinstance(keys, list) else []
         self._set_screen_dims()
         self.calc()
 
@@ -223,6 +261,7 @@ class Window:
 
     def prompt(self, seconds=1.0):
         """Here is where we sleep waiting for commands or timeout"""
+        ctl_b, ctl_d, ctl_f, ctl_u = 2, 4, 6, 21
         elapsed = 0.0
         while elapsed < seconds:
             key = self.scr.getch()
@@ -232,16 +271,33 @@ class Window:
             if key in (curses.KEY_RESIZE, ) or curses.is_term_resized(self.rows, self.cols):
                 # self.scr.erase()
                 self._set_screen_dims()
-                self.render()
-                
+                # self.render()
+                break
+
+            # Navigation Keys...
             if key in (ord('k'), curses.KEY_UP):
                 self.scroll_pos = max(self.scroll_pos - 1, 0)
                 self.render()
             elif key in (ord('j'), curses.KEY_DOWN):
                 self.scroll_pos += 1
                 self.render()
-            else:
-                pass # unknown key
+            elif key in (ctl_b, curses.KEY_PPAGE):
+                self.scroll_pos -= self.max_body_count
+                self.render()
+            elif key in (ctl_u, ):
+                self.scroll_pos -= self.max_body_count//2
+                self.render()
+            elif key in (ctl_f, curses.KEY_NPAGE):
+                self.scroll_pos += self.max_body_count
+                self.render()
+            elif key in (ctl_d, ):
+                self.scroll_pos += self.max_body_count//2
+                self.render()
+            # App keys...
+            elif key in self.handled_keys:
+                return key # return for handling
+            # ignore unhandled keys
+        return None
 
 
 ######
@@ -381,7 +437,9 @@ class ProcMem:
             self.whynot = f'CannotReadLines({type(exc).__name__})'
         except Exception as exc:
             # unexpected cases (probably a bug)
-            print(f'ERROR: skip pid={self.pid} no-smaps-or-rollup-lines exc={type(exc).__name__}')
+            if not self.opts.window:
+                print(f'ERROR: skip pid={self.pid}',
+                      f'no-smaps-or-rollup-lines exc={type(exc).__name__}')
             self.whynot = f'CannotReadLines({type(exc).__name__})'
         return lines
 
@@ -598,13 +656,19 @@ class ProcMem:
 
 class PmemStat:
     """ The singleton class for running the main loop, etc"""
+    keys_we_handle =  [ ord('f'), ord('g'), ord('o'), ord('u'),]
 
     def __init__(self, opts):
         self.opts = opts
         self.debug = opts.debug
-        self.units = opts.units
         self.prcs = {}
         self.groups = {} # indexed by group key (e.g., cmd)
+        self.window = None
+        self.units, self.divisor, self.fwidth = 0, 0, 0
+        self._set_units()
+        
+    def _set_units(self):
+        self.units = self.opts.units
         if self.units == 'mB':
             self.divisor = 1000*1000
             self.fwidth = 8
@@ -617,7 +681,6 @@ class PmemStat:
         else: # human
             self.divisor = 1 # human
             self.fwidth = 7
-        self.window = None
 
     def get_group(self, key):
         """Per group info."""
@@ -849,7 +912,7 @@ class PmemStat:
         # all pids have been processed into groups.
         # for each group, if it has changed, sum all the smaps for the group
         # if the group rollup_summary indicates enough change
-        grand_summary = ProcMem.make_summary_dict(info='---- GRAND TOTAL ----')
+        grand_summary = ProcMem.make_summary_dict(info=f'--TOTALS in {self.units} --')
         for group in self.groups.values():
             if group.alive:
                 self.prc_group(group)
@@ -858,7 +921,7 @@ class PmemStat:
 
         # print timestamp of report
         if not self.window:
-            leader = f'\n---- {now.strftime("%H:%M:%S")}' 
+            leader = f'\n---- {now.strftime("%H:%M:%S")}'
         else:
             leader = f'{now.strftime("%H:%M:%S")}'
         leader += f' Mem={human(meminfoKB["MemTotal"]*1024)}'
@@ -883,7 +946,7 @@ class PmemStat:
                         continue
                     item = 'other'
                 header += f'{item:>{self.fwidth}}'
-        self.emit(f'{header}   key/info (in {self.units})', to_head=True,
+        self.emit(f'{header}   key/info (by {self.opts.groupby})', to_head=True,
                   attr=curses.A_BOLD)
         self.pr_summary('T', grand_summary, to_head=True)
 
@@ -941,12 +1004,29 @@ class PmemStat:
 
     def window_loop(self):
         """ TBD """
-        self.window = Window(head_line=True)
+        def do_key(key):
+            # ENSURE keys are in 'keys_we_handle'
+            if key in (ord('f'), ):
+                self.opts.fit_to_window = not self.opts.fit_to_window
+            elif key in (ord('g'), ):
+                after = {'exe': 'cmd', 'cmd': 'pid', 'pid': 'exe'}
+                self.opts.groupby = after[self.opts.groupby]
+                self.groups = {}
+            elif key in (ord('o'), ):
+                self.opts.others = not self.opts.others
+            elif key in (ord('u'), ):
+                after = {'MB': 'mB', 'mB': 'KB', 'KB': 'human', 'human': 'MB'}
+                self.opts.units = after[self.opts.units]
+                self._set_units()
+            elif key in (ord('h'), ord('?')):
+                pass # TODO: implement help page
+
+        self.window = Window(head_line=True, keys=self.keys_we_handle)
         is_first = True
         for _ in range(1000000000):
             self.loop(datetime.now(), is_first)
             self.window.render()
-            self.window.prompt(self.opts.loop_secs)
+            do_key(self.window.prompt(self.opts.loop_secs))
             self.window.clear()
             is_first = False
 
@@ -960,29 +1040,26 @@ def main():
     parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid'),
             default='exe', help='grouping method for presenting rows')
     parser.add_argument('-f', '--fit-to-window', action='store_true',
-            help='do not overflow window')
+            help='do not overflow window [if -w]')
     parser.add_argument('-k', '--min-delta-kb', type=int, default=None,
-            help='minimum percent KB to show again [dflt=100 if DB else 1000')
+            help='minimum delta KB to show again [dflt=100 if DB else 1000')
     parser.add_argument('-l', '--loop', type=int, default=0, dest='loop_secs',
-            help='loop interval in seconds [dflt=0]')
+            help='loop interval in secs [dflt=5 if -w else 0]')
     parser.add_argument('-L', '--cmdlen', type=int, default=36,
-            help='max command line length for reporting/grouping  [dflt=36]')
+            help='max shown command length [dflt=36 if not -w]')
     parser.add_argument('-t', '--top-pct', type=int, default=100,
             help='report group contributing to top pct of ptotal [dflt=100]')
     parser.add_argument('-o', '--others', action='store_true',
             help='collapse shSYSV, shOth, stack, text into "other"')
     parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'),
             default='MB', help='units of memory [dflt=MB]')
-    parser.add_argument('-w', '--window', action='store_true',
-            help='show in "curses" window')
+    parser.add_argument('-W', '--no-window', action='store_false', dest='window',
+            help='show in "curses" window [disables: -D,-t,-L]')
     parser.add_argument('pids', nargs='*', action='store',
-            help='list of pids/groups (none means all we can read)')
+            help='list of pids/groups (none means every accessible pid)')
     opts = parser.parse_args()
     # DB(0, f'opts={opts}')
 
-    DebugLevel = opts.debug
-    if opts.debug:
-        DB(1, 'DebugLevel', DebugLevel)
     if opts.min_delta_kb is None:
         opts.min_delta_kb = 100 if opts.units == 'KB' else 1000
     if opts.window:
@@ -991,8 +1068,13 @@ def main():
         if opts.fit_to_window:
             opts.top_pct = 100
         opts.cmdlen = 200
+        opts.debug = False
+        opts.top_pct = 100
     else:
         opts.fit_to_window = False
+    DebugLevel = opts.debug
+    if opts.debug:
+        DB(1, 'DebugLevel', DebugLevel)
 
     pmemstat = PmemStat(opts=opts)
     ProcMem.pmemstat = pmemstat
