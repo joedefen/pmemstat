@@ -84,16 +84,22 @@ class Window:
                     self.head.addstr(text)
                 else:
                     self.head.addstr(self.head_count, 0, text)
-            self.head_count += 1
+            self.head_count += 0 if resume else 1
 
-    def add_body(self, text, attr=None):
+    def add_body(self, text, attr=None, resume=False):
         """ Add text to body (below header and header line)"""
         if self.body_count < self.body_rows:
             if attr:
-                self.body.addstr(self.body_count, 0, text, attr)
+                if resume:
+                    self.body.addstr(text, attr)
+                else:
+                    self.body.addstr(self.body_count, 0, text, attr)
             else:
-                self.body.addstr(self.body_count, 0, text)
-            self.body_count += 1
+                if resume:
+                    self.body.addstr(text)
+                else:
+                    self.body.addstr(self.body_count, 0, text)
+            self.body_count += 0 if resume else 1
 
     def _scroll_indicator_row(self):
         """ Compute the absolute scroll indicator row:

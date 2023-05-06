@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 Pending Features:
-  - PSI Indicator in title?  PSI Page (maybe with a thread)?
-  - Help Menu
-  - Real-time controls:
-    - new/chg goes to top: OFF/on
   - Ability to kill processes?
+  - Search string
   - Improved CPU stat (keep list of values for 20s or s)
+  - Iffy:
+    - PSI Indicator in title?  PSI Page (maybe with a thread)?
 
 Keys:
     a
@@ -20,7 +19,7 @@ Keys:
     f: fit: ON/off
  n  C-f PAGE-DOWN - page down
     g: groupby: exe/cmd/pid
- n  h : enter/exit help page
+    h : enter/exit help page
     H HOME:  goto top of list
     i
  n  j DOWN - one line down
@@ -31,7 +30,7 @@ Keys:
     o: collapse cols to "others": ON/off
     p
     q
-    r
+    r: rise to the top: ON/off
     s
     t
     u units: MB/mB/KB/human
@@ -76,7 +75,7 @@ NOTE: kB is a misnomer ... should be "KB".  Morons.
 # pylint: disable=broad-except,import-outside-toplevel,global-statement
 # pylint: disable=too-many-boolean-expressions,invalid-name
 # pylint: disable=too-many-instance-attributes,too-many-lines
-# pylint: disable=too-many-arguments
+# pylint: disable=too-many-arguments,too-many-branches
 
 import os
 import re
@@ -84,6 +83,7 @@ import sys
 import traceback
 import time
 import subprocess
+import textwrap
 import curses
 # from curses.textpad import rectangle
 from types import SimpleNamespace
@@ -546,7 +546,7 @@ class PmemStat:
     """ The singleton class for running the main loop, etc"""
     keys_we_handle =  set([ord('c'), ord('f'), ord('g'), ord('o'),
                     ord('u'), ord('n'), ord('h'), ord('?'),
-                    ord('s'), ord('?'), ord('?'), ord('?'), ])
+                    ord('s'), ord('r'), ord('?'), ord('?'), ])
 
     def __init__(self, opts):
         self.opts = opts
@@ -557,6 +557,7 @@ class PmemStat:
         self.window = None
         self.number = 0  # line number for opts.numbers
         self.units, self.divisor, self.fwidth = 0, 0, 0
+        self.mode = 'normal' # (or 'help' or ?'psi')
         self._set_units()
 
     def get_sortby(self):
@@ -896,7 +897,7 @@ class PmemStat:
                 key=lambda x: str(alive_groups[x].key))
         else:
             sorted_keys = sorted(alive_groups.keys(),
-                key=lambda x: (alive_groups[x].is_changed,
+                key=lambda x: (alive_groups[x].is_changed and self.opts.rise_to_top,
                                alive_groups[x].summary['ptotal']), reverse=True)
 
         limit = self.window.max_body_count if self.is_fit_opted() else 1000000
@@ -931,12 +932,49 @@ class PmemStat:
         """ Emit a line of the report"""
         if self.window:
             if to_head:
-                self.window.add_header(line, attr, resume=resume)
+                self.window.add_header(line, attr=attr, resume=resume)
                 self.window.calc()
             else:
-                self.window.add_body(line, attr)
+                self.window.add_body(line, attr=attr, resume=resume)
         else:
             print(line)
+
+    def help_screen(self):
+        """Populate help screen"""
+        headers = """
+            -- HELP SCREEN (press 'h' to exit) --
+            Navigation:
+                k, UP:  up one row             H, HOME:  top row
+              j, DOWN:  down one row            $, END:  bottom row
+               Ctrl-u:  half-page up     Ctrl-b, PPAGE:  page up
+               Ctrl-d:  half-page down   Ctrl-f, NPAGE:  page down
+            Type option keys below to rotate choice:
+        """
+        for line in textwrap.dedent(headers).splitlines():
+            self.emit(line, to_head=True)
+
+        options = [
+                ['c - show cpu', 'cpu', 'ON', 'off'],
+                ['f - fit rows to window', 'fit_to_window', 'ON', 'off'],
+                ['g - group by', 'groupby', 'exe', 'cmd', 'pid'],
+                ['n - line numbers', 'numbers',  'ON', 'off'],
+                ['o - less memory detail', 'others',  'ON', 'off'],
+                ['r - raise new/changed to top', 'rise_to_top',  'ON', 'off'],
+                ['s - sort by', 'sortby', 'mem', 'cpu', 'name'],
+                ['u - memory units', 'units', 'MB', 'mB', 'KB', 'human'],
+        ]
+        for option in options:
+            leader = option[0]
+            member = option[1]
+            choices = option[2:]
+            value = getattr(self.opts, member)
+            if isinstance(value, bool):
+                value = "ON" if value else "off"
+            self.emit(f'{leader:>30}: ')
+            for choice in choices:
+                self.emit(' ', resume=True)
+                self.emit(f'{choice}', resume=True,
+                    attr=curses.A_REVERSE if choice == value else None)
 
     def window_loop(self):
         """ TBD """
@@ -951,31 +989,44 @@ class PmemStat:
                 after = {'exe': 'cmd', 'cmd': 'pid', 'pid': 'exe'}
                 self.opts.groupby = after[self.opts.groupby]
                 regroup = True
+            elif key in (ord('n'), ):
+                self.opts.numbers = not self.opts.numbers
             elif key in (ord('o'), ):
                 self.opts.others = not self.opts.others
+            elif key in (ord('r'), ):
+                self.opts.rise_to_top = not self.opts.rise_to_top
+            elif key in (ord('s'), ):
+                after = {'mem': 'cpu', 'cpu': 'name', 'name': 'mem'}
+                self.opts.sortby = after[self.opts.sortby]
             elif key in (ord('u'), ):
                 after = {'MB': 'mB', 'mB': 'KB', 'KB': 'human', 'human': 'MB'}
                 self.opts.units = after[self.opts.units]
                 self._set_units()
-            elif key in (ord('n'), ):
-                self.opts.numbers = not self.opts.numbers
-            elif key in (ord('s'), ):
-                after = {'mem': 'cpu', 'cpu': 'name', 'name': 'mem'}
-                self.opts.sortby = after[self.opts.sortby]
             elif key in (ord('h'), ord('?')):
-                pass # TODO: implement help page
+                after = {'normal': 'help', 'help': 'normal'}
+                self.mode = after[self.mode]
             return regroup
 
         self.window = Window(head_line=True, keys=self.keys_we_handle)
         is_first = True
-        regroup = True
+        was_groupby, regroup = self.opts.groupby, True
         for _ in range(1000000000):
-            self.loop(datetime.now(), is_first=is_first, regroup=regroup)
-            regroup = False
-            self.window.render()
-            regroup = do_key(self.window.prompt(self.opts.loop_secs))
-            self.window.clear()
-            is_first = False
+            if self.mode == 'normal':
+                regroup = bool(was_groupby != self.opts.groupby)
+                self.loop(datetime.now(), is_first=is_first, regroup=regroup)
+                was_groupby, regroup = self.opts.groupby, False
+                regroup = False
+                self.window.render()
+                do_key(self.window.prompt(self.opts.loop_secs))
+                self.window.clear()
+                is_first = False
+            elif self.mode == 'help':
+                self.help_screen()
+                self.window.render()
+                do_key(self.window.prompt(self.opts.loop_secs))
+                self.window.clear()
+            else:
+                assert False, f'unsupported mode ({self.mode})'
 
 def main():
     """Main loop"""
@@ -1004,6 +1055,8 @@ def main():
             help='collapse shSYSV, shOth, stack, text into "other"')
     parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'),
             default='MB', help='units of memory [dflt=MB]')
+    parser.add_argument('-R', '--no-rise', action='store_false', dest='rise_to_top',
+            help='do NOT raise change/adds to top (only in window mode)')
     parser.add_argument('-s', '--sortby', choices=('mem', 'cpu', 'name'),
             default='mem', help='grouping method for presenting rows')
     parser.add_argument('-W', '--no-window', action='store_false', dest='window',
