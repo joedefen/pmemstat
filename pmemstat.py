@@ -4,13 +4,10 @@
 Pending Features:
   - PSI Indicator in title?  PSI Page (maybe with a thread)?
   - Help Menu
-  - CPU of processes and overall
   - Real-time controls:
-    - sort by: mem/key/cpu
-    - new/chg on top: OFF/on
+    - new/chg goes to top: OFF/on
   - Ability to kill processes?
-  - Waiting for first screen shows empty page with "working..."?
-  - Support H, $ for navigation
+  - Improved CPU stat (keep list of values for 20s or s)
 
 Keys:
     a
@@ -52,7 +49,7 @@ Keys:
 Copyright (c) 2022-2023 Joe Defen
 
 NOTE: to create a single file standalone, run:
-    stickytape pmemstat.py --copy-shebang > pmemstat && chmod +x pmemstat 
+    stickytape pmemstat.py --copy-shebang > pmemstat && chmod +x pmemstat
 
 A program to aggregate the memory used by processes into categories
 so that the memory footprint of processes is more clear.
@@ -196,8 +193,8 @@ class ProcMem:
         self.whynot = None # populate me with why unwanted
         self.smaps_file = f'/proc/{self.pid}/smaps'
         self.rollup_file = f'/proc/{self.pid}/smaps_rollup'
-        self.rollup_lines = None
-        self.smaps_lines = None
+        self.rollup_lines = []
+        self.smaps_lines = []
         self.chunks = []
         self.cpu = None
         self.exebasename = None, None
@@ -330,10 +327,11 @@ class ProcMem:
 
     def get_rollup_lines(self):
         """Get the lines of the 'smaps_rollup' file for this PID"""
+        self.rollup_lines = []
         try:
             self.rollup_lines = self.read_lines(self.rollup_file)
         except Exception as exc:
-            self.rollup_lines = None
+            self.rollup_lines = []
             if DebugLevel:
                 DB(1, f'skip pid={self.pid} no-rollup-lines exc={type(exc).__name__}')
 
@@ -347,10 +345,11 @@ class ProcMem:
 
     def get_smaps_lines(self):
         """Get the lines of the 'smaps' file for this PID"""
+        self.smaps_lines = []
         try:
             self.smaps_lines = self.read_lines(self.smaps_file)
         except Exception as exc:
-            self.smaps_lines = None
+            self.smaps_lines = []
             if DebugLevel:
                 DB(1, f'skip pid={self.pid} no-smap-lines exc={type(exc).__name__}')
 
@@ -364,6 +363,7 @@ class ProcMem:
 
     def make_chunks(self, lines):
         """ Parse the already smaps read lines."""
+        self.chunks = []
         chunk = None
         for idx, line in enumerate(lines):
             match = self.section_pat.match(line)
@@ -550,6 +550,7 @@ class PmemStat:
 
     def __init__(self, opts):
         self.opts = opts
+        self.loop_num = 0
         self.debug = opts.debug
         self.prcs = {}
         self.groups = {} # indexed by group key (e.g., cmd)
@@ -605,11 +606,13 @@ class PmemStat:
             # DB(0, f'add group[{key}]')
         return group
 
-    def prep_new_loop(self):
+    def prep_new_loop(self, regroup):
         """Prepare for a new loop.
         Returns whether or not any groups are left.
         If not, it will be time to terminate.
         """
+        if regroup:
+            self.groups = {}
         if self.groups:
             for key in list(self.groups):
                 group = self.groups[key]
@@ -631,9 +634,6 @@ class PmemStat:
                 del self.prcs[pid]
                 continue
             prc.alive = False
-            prc.rollup_lines = None
-            prc.smaps_lines = None
-            prc.chunks = []
         return self.groups
 
     @staticmethod
@@ -687,7 +687,6 @@ class PmemStat:
                 prc.categorize_chunks()
                 summary = prc.summarize_chunks()
                 self.add_to_summary(summary, group.summary)
-            prc.chunks, prc.smaps_lines, prc.rollup_lines = [], [], []
         group.summary['pss'] = group.rollup_summary['ptotal']
         group.summary['pswap'] = group.rollup_summary['pswap']
         group.summary['cpu_pct'] = group.rollup_summary['cpu_pct']
@@ -785,13 +784,40 @@ class PmemStat:
         assert not keys, f'ALERT: cannot get vitals ({keys}) from {meminfofile}'
         return meminfoKB
 
-    def loop(self, now, is_first):
+    def loop(self, now, is_first, regroup=False):
         """one loop thru all pids"""
-        # pylint: disable=too-many-branches
+
+        def pr_top_of_report():
+            nonlocal self, meminfoKB, wanted_prcs, total_pids
+            # print timestamp of report
+            if not self.window:
+                leader = f'\n---- {now.strftime("%H:%M:%S")}'
+            else:
+                leader = f'{now.strftime("%H:%M:%S")}'
+                self.emit(leader, to_head=True,
+                          attr=curses.A_BOLD if self.loop_num % 2 else None)
+                leader = ''
+
+            leader += f' Mem={human(meminfoKB["MemTotal"]*1024)}'
+            leader += f' Avail={human(meminfoKB["MemAvailable"]*1024)}'
+            leader += f' Dirty={human(meminfoKB["Dirty"]*1024)}'
+            leader += f' PIDs: {len(wanted_prcs)}/{total_pids}'
+            self.emit(leader, to_head=True, resume=bool(self.window))
+
+            # pylint: disable=too-many-branches
+        self.loop_num += 1
+        meminfoKB = self.get_meminfo()
         total_pids = 0
         allpids = []
         wanted_prcs = {}
-        meminfoKB = self.get_meminfo()
+
+        self.prep_new_loop(regroup)
+
+        if self.window and (is_first or regroup):
+            pr_top_of_report()
+            self.emit('   WORKING .... be patient ;-)', attr=curses.A_REVERSE)
+            self.window.render()
+            self.window.clear()
 
         with os.scandir('/proc') as it:
             for entry in it:
@@ -829,17 +855,6 @@ class PmemStat:
                 self.prc_group(group)
                 self.add_to_summary(group.summary, grand_summary)
 
-        # print timestamp of report
-        if not self.window:
-            leader = f'\n---- {now.strftime("%H:%M:%S")}'
-        else:
-            leader = f'{now.strftime("%H:%M:%S")}'
-        leader += f' Mem={human(meminfoKB["MemTotal"]*1024)}'
-        leader += f' Avail={human(meminfoKB["MemAvailable"]*1024)}'
-        leader += f' Dirty={human(meminfoKB["Dirty"]*1024)}'
-        leader += f' PIDs: {len(wanted_prcs)}/{total_pids}'
-        self.emit(leader, to_head=True)
-
         # detect changed group on basis of differing PIDs contributing
 
         if grand_summary['number'] == 0:
@@ -847,6 +862,8 @@ class PmemStat:
             sys.exit(0)
 
         # print header and  grand totals
+        pr_top_of_report()
+
         header = ''
         others, exclusions = self.pr_exclusions()
         self.number = 0
@@ -910,13 +927,11 @@ class PmemStat:
                 remainder -= 1
                 self.pr_summary('x', group.o_summary)
 
-        self.prep_new_loop()
-
-    def emit(self, line, to_head=False, attr=None):
+    def emit(self, line, to_head=False, attr=None, resume=False):
         """ Emit a line of the report"""
         if self.window:
             if to_head:
-                self.window.add_header(line, attr)
+                self.window.add_header(line, attr, resume=resume)
                 self.window.calc()
             else:
                 self.window.add_body(line, attr)
@@ -926,6 +941,7 @@ class PmemStat:
     def window_loop(self):
         """ TBD """
         def do_key(key):
+            regroup = False
             # ENSURE keys are in 'keys_we_handle'
             if key in (ord('c'), ):
                 self.opts.cpu = not self.opts.cpu
@@ -934,7 +950,7 @@ class PmemStat:
             elif key in (ord('g'), ):
                 after = {'exe': 'cmd', 'cmd': 'pid', 'pid': 'exe'}
                 self.opts.groupby = after[self.opts.groupby]
-                self.groups = {}
+                regroup = True
             elif key in (ord('o'), ):
                 self.opts.others = not self.opts.others
             elif key in (ord('u'), ):
@@ -948,13 +964,16 @@ class PmemStat:
                 self.opts.sortby = after[self.opts.sortby]
             elif key in (ord('h'), ord('?')):
                 pass # TODO: implement help page
+            return regroup
 
         self.window = Window(head_line=True, keys=self.keys_we_handle)
         is_first = True
+        regroup = True
         for _ in range(1000000000):
-            self.loop(datetime.now(), is_first)
+            self.loop(datetime.now(), is_first=is_first, regroup=regroup)
+            regroup = False
             self.window.render()
-            do_key(self.window.prompt(self.opts.loop_secs))
+            regroup = do_key(self.window.prompt(self.opts.loop_secs))
             self.window.clear()
             is_first = False
 
@@ -965,8 +984,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-D', '--debug', action='count', default=0,
             help='debug mode (the more Ds, the higher the debug level)')
-    parser.add_argument('-c', '--cpu', action='store_true',
-            help='report percent CPU')
+    parser.add_argument('-C', '--no-cpu', action='store_false', dest='cpu',
+            help='do NOT report percent CPU (only in window mode)')
     parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid'),
             default='exe', help='grouping method for presenting rows')
     parser.add_argument('-f', '--fit-to-window', action='store_true',
@@ -1001,11 +1020,12 @@ def main():
             opts.loop_secs = 5
         if opts.fit_to_window:
             opts.top_pct = 100
-        opts.cmdlen = 200
+        opts.cmdlen = 100
         opts.debug = False
         opts.top_pct = 100
     else:
         opts.fit_to_window = False
+        opts.cpu = False
     DebugLevel = opts.debug
     if opts.debug:
         DB(1, 'DebugLevel', DebugLevel)

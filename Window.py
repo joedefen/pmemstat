@@ -71,13 +71,19 @@ class Window:
         self.body_base = self.head_count + self.head_lines
         return not same
 
-    def add_header(self, text, attr):
+    def add_header(self, text, attr, resume=False):
         """Add text to header"""
         if self.head_count < self.head_rows:
             if attr:
-                self.head.addstr(self.head_count, 0, text, attr)
+                if resume:
+                    self.head.addstr(text, attr)
+                else:
+                    self.head.addstr(self.head_count, 0, text, attr)
             else:
-                self.head.addstr(self.head_count, 0, text)
+                if resume:
+                    self.head.addstr(text)
+                else:
+                    self.head.addstr(self.head_count, 0, text)
             self.head_count += 1
 
     def add_body(self, text, attr=None):
