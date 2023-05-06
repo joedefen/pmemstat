@@ -1,0 +1,5 @@
+#!/bin/bash
+set -x
+stickytape pmemstat.py --copy-shebang > pmemstat && chmod +x pmemstat 
+ls -l pmemstat
+
