@@ -546,7 +546,9 @@ class PmemStat:
     """ The singleton class for running the main loop, etc"""
     keys_we_handle =  set([ord('c'), ord('f'), ord('g'), ord('o'),
                     ord('u'), ord('n'), ord('h'), ord('?'),
-                    ord('s'), ord('r'), ord('?'), ord('?'), ])
+                    ord('s'), ord('r'), ord('/'), ord('?'),
+                    curses.KEY_ENTER, 10,
+                      ])
 
     def __init__(self, opts):
         self.opts = opts
@@ -804,6 +806,11 @@ class PmemStat:
             leader += f' Dirty={human(meminfoKB["Dirty"]*1024)}'
             leader += f' PIDs: {len(wanted_prcs)}/{total_pids}'
             self.emit(leader, to_head=True, resume=bool(self.window))
+            if self.opts.search:
+                self.emit(' /', to_head=True, resume=True)
+                self.emit(self.opts.search, to_head=True,
+                          resume=True, attr=curses.A_UNDERLINE)
+                self.emit('/', to_head=True, resume=True)
 
             # pylint: disable=too-many-branches
         self.loop_num += 1
@@ -817,6 +824,13 @@ class PmemStat:
         if self.window and (is_first or regroup):
             pr_top_of_report()
             self.emit('   WORKING .... be patient ;-)', attr=curses.A_REVERSE)
+            self.emit('   HINTS:')
+            self.emit('     - Type "h" to enter Help Screen')
+            self.emit('     - Type "Ctrl-C" to exit program')
+            if os.geteuid != 0:
+                self.emit('     - Run with "sudo" to show all PIDs!',
+                          attr=curses.A_BOLD)
+
             self.window.render()
             self.window.clear()
 
@@ -904,16 +918,19 @@ class PmemStat:
         ptotal_limit = (grand_summary['ptotal'] * self.opts.top_pct / 100) * 1.001
         others_summary = None
         running_summary = ProcMem.make_summary_dict(info='---- RUNNING ----')
-        for idx, key in enumerate(sorted_keys):
+        shown_cnt = 0
+        for key in sorted_keys:
             group = alive_groups[key]
             self.add_to_summary(group.summary, running_summary)
-            if idx < limit-1 and running_summary['ptotal'] <= ptotal_limit:
+            if (self.opts.search in group.summary['info'] and
+              shown_cnt < limit-1 and running_summary['ptotal'] <= ptotal_limit):
                 if group.alive and (group.is_new or group.is_changed or self.window):
                     attr = curses.A_REVERSE if group.is_new or group.is_changed else None
                     attr = None if is_first else attr
                     self.pr_summary('A' if group.is_new
                         else f'{group.delta_pss:+,}K' if group.is_changed
                         else ' ', group.summary, attr=attr)
+                    shown_cnt += 1
                     # DB(0, f'obj: {vars(obj)}')
             elif is_first or self.opts.window:
                 if not others_summary:
@@ -942,7 +959,7 @@ class PmemStat:
     def help_screen(self):
         """Populate help screen"""
         headers = """
-            -- HELP SCREEN (press 'h' to exit) --
+            -- HELP SCREEN ['h' or ENTER return; Ctrl-c exits] --
             Navigation:
                 k, UP:  up one row             H, HOME:  top row
               j, DOWN:  down one row            $, END:  bottom row
@@ -962,6 +979,7 @@ class PmemStat:
                 ['r - raise new/changed to top', 'rise_to_top',  'ON', 'off'],
                 ['s - sort by', 'sortby', 'mem', 'cpu', 'name'],
                 ['u - memory units', 'units', 'MB', 'mB', 'KB', 'human'],
+                ['/ - search string', 'search', self.opts.search],
         ]
         for option in options:
             leader = option[0]
@@ -1005,6 +1023,14 @@ class PmemStat:
             elif key in (ord('h'), ord('?')):
                 after = {'normal': 'help', 'help': 'normal'}
                 self.mode = after[self.mode]
+            elif key in (curses.KEY_ENTER, 10):
+                if self.mode == 'help':
+                    self.mode = 'normal'
+            elif key in (ord('/'), ):
+                self.opts.search = self.window.answer(
+                    prompt='Set search string, then Enter',
+                    seed=self.opts.search)
+
             return regroup
 
         self.window = Window(head_line=True, keys=self.keys_we_handle)
@@ -1059,6 +1085,8 @@ def main():
             help='do NOT raise change/adds to top (only in window mode)')
     parser.add_argument('-s', '--sortby', choices=('mem', 'cpu', 'name'),
             default='mem', help='grouping method for presenting rows')
+    parser.add_argument('-/', '--search', 
+            help='show items with search string in name')
     parser.add_argument('-W', '--no-window', action='store_false', dest='window',
             help='show in "curses" window [disables: -D,-t,-L]')
     parser.add_argument('pids', nargs='*', action='store',

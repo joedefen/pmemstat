@@ -1,5 +1,24 @@
 #!/bin/bash
-set -x
-stickytape pmemstat.py --copy-shebang > pmemstat && chmod +x pmemstat 
-ls -l pmemstat
+# NOTES:
+# * this installs/reinstalls a single file version of pmemstat.py created by 
+#   into ~/local/bin/.
+# * in case, your base is debian 12 or eqivalent where pip may be 
+#   disabled by default, this script forces the install the "old way"
+ 
+PIP_BREAK_SYSTEM_PACKAGES=1
+BIN=$HOME/.local/bin
+TARGET=${BIN}/pmemstat
 
+set -xe
+cd "$(dirname "$0")"
+if ! echo $PATH | grep -q -E "(^|:)${BIN}($|:)"; then
+    echo ERROR: ${BIN} not on '$PATH'
+    exit 1
+fi
+mkdir -p ${BIN}
+echo OK
+
+which stickytape >/dev/null || python3 -m pip install stickytape --user
+
+stickytape pmemstat.py --copy-shebang > ${TARGET} && chmod +x ${TARGET} 
+ls -l ${TARGET}

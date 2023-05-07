@@ -4,10 +4,13 @@
 Custom Wrapper for python curses.
 """
 # pylint: disable=too-many-instance-attributes,too-many-arguments
-# pylint: disable=invalid-name
+# pylint: disable=invalid-name,broad-except
 
+import sys
+import traceback
 import atexit
 import curses
+from curses.textpad import rectangle, Textbox
 
 class Window:
     """ Layer above curses to encapsulate what we need """
@@ -21,13 +24,15 @@ class Window:
         self.body_rows, self.body_cols = body_rows, body_cols
         self.head = curses.newpad(head_rows, body_cols)
         self.body = curses.newpad(body_rows, body_cols)
+        self.popup = curses.newpad(4, body_cols)
+        self.popup_cols = 0  # popup show when positive
         self.head_count = 0
         self.head_lines = 1 if head_line else 0
         self.body_count = 0
         self.scroll_pos = 0  # how far down into body are we?
         self.rows, self.cols = 0, 0
         self.max_body_count, self.max_scroll = 0, 0
-        self.handled_keys = keys if isinstance(keys, set) else []
+        self.handled_keys = set(keys) if isinstance(keys, (set, list)) else []
         self._set_screen_dims()
         self.calc()
 
@@ -71,7 +76,7 @@ class Window:
         self.body_base = self.head_count + self.head_lines
         return not same
 
-    def add_header(self, text, attr, resume=False):
+    def add_header(self, text, attr=None, resume=False):
         """Add text to header"""
         if self.head_count < self.head_rows:
             if attr:
@@ -140,6 +145,41 @@ class Window:
             self.body.refresh(self.scroll_pos, 0,
                   self.body_base, 1 if self.max_scroll > 0 else 0,
                   self.rows-1, self.cols-1)
+        if self.popup_cols > 0 and self.rows >= 4:
+            popup_left = max(0, (self.cols - self.popup_cols)//2)
+            popup_right = min(self.cols-1, popup_left+self.popup_cols)
+            self.popup.refresh(0, 0,
+                               self.rows//2-2, popup_left,
+                               self.rows//2+1, popup_right
+                               )
+
+    def answer(self, prompt='Type string [then Enter]', seed='', width=80):
+        """Popup"""
+        def mod_key(key):
+            return  7 if key == 10 else key
+        
+        # need 3 extra cols for rectangle (so we don't draw in southeast corner)
+        # and 3 extra rows (top/bottom/prompt)
+        #      +---------+
+        #      | Prompt  |
+        #      | Answer  |
+        #      +---------+
+        assert self.rows >= 5 and self.cols >= 30, "window too small for prompt"
+        width = min(width, self.cols-3) # max text width
+        row0, row9 = self.rows//2 - 2, self.rows//2 + 1
+        col0 = (self.cols - (width+2)) // 2
+        col9 = col0 + width + 2 - 1
+        
+        self.scr.clear()
+        win = curses.newwin(1, width, row0+2, col0+1) # input window
+        rectangle(self.scr, row0, col0, row9, col9)
+        self.scr.addstr(row0+1, col0+1, prompt[0:width], curses.A_REVERSE)
+        win.addstr(seed[0:width-1])
+        self.scr.refresh()
+        curses.curs_set(2)
+        answer = Textbox(win).edit(mod_key).strip()
+        curses.curs_set(0)
+        return answer
 
     def clear(self):
         """Clear in prep for new screen"""
@@ -163,6 +203,10 @@ class Window:
                 # self.render()
                 break
 
+            # App keys...
+            if key in self.handled_keys:
+                return key # return for handling
+
             # Navigation Keys...
             was_scroll_pos = self.scroll_pos
             if key in (ord('k'), curses.KEY_UP):
@@ -184,8 +228,41 @@ class Window:
 
             if self.scroll_pos != was_scroll_pos:
                 self.render()
-            # App keys...
-            elif key in self.handled_keys:
-                return key # return for handling
             # ignore unhandled keys
         return None
+
+if __name__ == '__main__':
+    def main():
+        """Test program"""
+        def do_key(key):
+            nonlocal win, name
+            answer = None
+            if key == ord('q'):
+                sys.exit(0)
+            if key == ord('n'):
+                answer = win.answer(prompt='Type Name + Enter',
+                    seed='' if name.startswith('[hit') else name)
+            return answer
+
+        keys_we_handle = [ord('q'), ord('n')]
+
+        win = Window(head_line=True, keys=keys_we_handle)
+        name = "[hit 'n' to enter name]"
+        for loop in range(100000000000):
+            win.add_header(f'Header: {loop} "{name}"')
+            for line in range(win.max_body_count*2):
+                win.add_body(f'Body: {loop}.{line}')
+            win.render()
+            answer = do_key(win.prompt(seconds=5))
+            if answer is not None:
+                name = answer
+            win.clear()
+
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    except Exception as exce:
+        Window.stop_curses()
+        print("exception:", str(exce))
+        print(traceback.format_exc())
