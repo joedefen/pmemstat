@@ -10,13 +10,20 @@ import sys
 import traceback
 import atexit
 import curses
+import textwrap
 from curses.textpad import rectangle, Textbox
 
 class Window:
     """ Layer above curses to encapsulate what we need """
     timeout_ms = 200
     static_scr = None
-    """TBD"""
+    nav_keys = """
+        Navigation:    H/M/L:   top/middle/end-of-page
+            k, UP:  up one row               0, HOME:  first row
+          j, DOWN:  down one row              $, END:  last row
+           Ctrl-u:  half-page up       Ctrl-b, PPAGE:  page up
+               Ctrl-d:  half-page down     Ctrl-f, NPAGE:  page down
+    """
     def __init__(self, head_line=True, head_rows=10, body_rows=200,
                  body_cols=200, keys=None):
         self.scr = self._start_curses()
@@ -39,6 +46,11 @@ class Window:
         self.handled_keys = set(keys) if isinstance(keys, (set, list)) else []
         self._set_screen_dims()
         self.calc()
+        
+    @staticmethod
+    def get_nav_keys_blurb():
+        """For a help screen, describe the nav keys"""
+        return textwrap.dedent(Window.nav_keys)
 
     def _set_screen_dims(self):
         """Recalculate dimensions ... return True if geometry changed."""

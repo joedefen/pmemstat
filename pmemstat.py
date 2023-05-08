@@ -2,48 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 Pending Features:
-  - Ability to kill processes?
-  - Search string
+  - Ability to kill processes:
+      - DONE: highlighting
+      - pressing ENTER kills the highlighted process; when one
+        group is killed, leave kill mode
+      - implement kill_group() which make several tries to kill the group
   - Improved CPU stat (keep list of values for 20s or s)
   - Iffy:
     - PSI Indicator in title?  PSI Page (maybe with a thread)?
-
-Keys:
-    a
-    b
- n  C-b PAGE-UP - page up
-    c: cpu: ON/off
-    d
- n  C-d Half page down
-    e
-    f: fit: ON/off
- n  C-f PAGE-DOWN - page down
-    g: groupby: exe/cmd/pid
-    h : enter/exit help page
-    H HOME:  goto top of list
-    i
- n  j DOWN - one line down
- n  k UP - one line up
-    l
-    m
-    n: line numbers: ON/off
-    o: collapse cols to "others": ON/off
-    p
-    q
-    r: rise to the top: ON/off
-    s
-    t
-    u units: MB/mB/KB/human
- n  C-u Half page up
-    v
-    w
-    x
-    y
-    z
-    $ END: go to end of list
-
-
-
 
 Copyright (c) 2022-2023 Joe Defen
 
@@ -83,7 +49,6 @@ import sys
 import traceback
 import time
 import subprocess
-import textwrap
 import curses
 # from curses.textpad import rectangle
 from types import SimpleNamespace
@@ -546,7 +511,7 @@ class PmemStat:
     """ The singleton class for running the main loop, etc"""
     keys_we_handle =  set([ord('c'), ord('f'), ord('g'), ord('o'),
                     ord('u'), ord('n'), ord('h'), ord('?'),
-                    ord('s'), ord('r'), ord('/'), ord('?'),
+                    ord('s'), ord('r'), ord('/'), ord('z'),
                     curses.KEY_ENTER, 10,
                       ])
 
@@ -560,6 +525,7 @@ class PmemStat:
         self.number = 0  # line number for opts.numbers
         self.units, self.divisor, self.fwidth = 0, 0, 0
         self.mode = 'normal' # (or 'help' or ?'psi')
+        self.kill_mode = False  # set to kill
         self._set_units()
 
     def get_sortby(self):
@@ -958,18 +924,11 @@ class PmemStat:
 
     def help_screen(self):
         """Populate help screen"""
-        headers = """
-            -- HELP SCREEN ['h' or ENTER return; Ctrl-c exits] --
-            Navigation:
-                k, UP:  up one row             0, HOME:  first row
-              j, DOWN:  down one row            $, END:  last row
-               Ctrl-u:  half-page up     Ctrl-b, PPAGE:  page up
-               Ctrl-d:  half-page down   Ctrl-f, NPAGE:  page down
-               H/M/L:   top/middle/end-of-page
-            Type option keys below to rotate choice:
-        """
-        for line in textwrap.dedent(headers).splitlines():
-            self.emit(line, to_head=True)
+        self.emit("-- HELP SCREEN ['h' or ENTER return; Ctrl-c exits] --", to_head=True)
+        for line in Window.get_nav_keys_blurb().splitlines():
+            if line:
+                self.emit(line, to_head=True)
+        self.emit('Type option keys below to rotate choice:', to_head=True)
 
         options = [
                 ['c - show cpu', 'cpu', 'ON', 'off'],
@@ -1024,9 +983,16 @@ class PmemStat:
             elif key in (ord('h'), ord('?')):
                 after = {'normal': 'help', 'help': 'normal'}
                 self.mode = after[self.mode]
+                self.window.set_highlight(False if self.mode == 'help' else self.kill_mode)
+            elif key in (ord('z'), ):
+                self.kill_mode = not self.kill_mode
+                if self.mode == 'normal':
+                    self.window.set_highlight(self.kill_mode)
+
             elif key in (curses.KEY_ENTER, 10):
                 if self.mode == 'help':
                     self.mode = 'normal'
+                    self.window.set_highlight(self.kill_mode)
             elif key in (ord('/'), ):
                 self.opts.search = self.window.answer(
                     prompt='Set search string, then Enter',
@@ -1086,7 +1052,7 @@ def main():
             help='do NOT raise change/adds to top (only in window mode)')
     parser.add_argument('-s', '--sortby', choices=('mem', 'cpu', 'name'),
             default='mem', help='grouping method for presenting rows')
-    parser.add_argument('-/', '--search', 
+    parser.add_argument('-/', '--search', default='',
             help='show items with search string in name')
     parser.add_argument('-W', '--no-window', action='store_false', dest='window',
             help='show in "curses" window [disables: -D,-t,-L]')
