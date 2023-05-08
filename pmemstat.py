@@ -961,10 +961,11 @@ class PmemStat:
         headers = """
             -- HELP SCREEN ['h' or ENTER return; Ctrl-c exits] --
             Navigation:
-                k, UP:  up one row             H, HOME:  top row
-              j, DOWN:  down one row            $, END:  bottom row
+                k, UP:  up one row             0, HOME:  first row
+              j, DOWN:  down one row            $, END:  last row
                Ctrl-u:  half-page up     Ctrl-b, PPAGE:  page up
                Ctrl-d:  half-page down   Ctrl-f, NPAGE:  page down
+               H/M/L:   top/middle/end-of-page
             Type option keys below to rotate choice:
         """
         for line in textwrap.dedent(headers).splitlines():

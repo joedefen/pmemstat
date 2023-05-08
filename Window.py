@@ -34,6 +34,8 @@ class Window:
         self.light_mode = False # whether in highlight mode
         self.rows, self.cols = 0, 0
         self.max_body_count, self.max_scroll = 0, 0
+        self.body_texts = []
+        self.last_light_pos = -1 # last highlighted position
         self.handled_keys = set(keys) if isinstance(keys, (set, list)) else []
         self._set_screen_dims()
         self.calc()
@@ -61,7 +63,10 @@ class Window:
 
     def set_highlight(self, on=True):
         """Set whether in highlight mode."""
+        was_on = self.light_mode
         self.light_mode = bool(on)
+        if self.light_mode and not was_on:
+            self.last_light_pos = -2 # indicates need to clear them all
 
     @staticmethod
     def stop_curses():
@@ -85,32 +90,42 @@ class Window:
     def add_header(self, text, attr=None, resume=False):
         """Add text to header"""
         if self.head_count < self.head_rows:
-            if attr:
-                if resume:
-                    self.head.addstr(text, attr)
-                else:
-                    self.head.addstr(self.head_count, 0, text, attr)
+            if attr is None:
+                attr = curses.A_NORMAL
+            if resume:
+                self.head.addstr(text, attr)
             else:
-                if resume:
-                    self.head.addstr(text)
-                else:
-                    self.head.addstr(self.head_count, 0, text)
-            self.head_count += 0 if resume else 1
+                self.head.addstr(self.head_count, 0, text, attr)
+                self.head_count += 1
 
     def add_body(self, text, attr=None, resume=False):
         """ Add text to body (below header and header line)"""
         if self.body_count < self.body_rows:
-            if attr:
-                if resume:
-                    self.body.addstr(text, attr)
-                else:
-                    self.body.addstr(self.body_count, 0, text, attr)
+            row = max(self.body_count - (1 if resume else 0), 0)
+            if self.light_mode or attr is None:
+                attr = curses.A_NORMAL
+
+            if resume:
+                self.body.addstr(text, attr)
+                self.body_texts[row] += text
             else:
-                if resume:
-                    self.body.addstr(text)
-                else:
-                    self.body.addstr(self.body_count, 0, text)
-            self.body_count += 0 if resume else 1
+                self.body.addstr(row, 0, text, attr)
+                self.body_texts.append(text)
+                self.body_count += 1
+            
+    def highlight_current(self):
+        if not self.light_mode:
+            return
+        pos0, pos1 = self.last_light_pos, self.light_pos
+        if pos0 == -2: # special flag to clear all formatting
+            for row in range(self.body_count):
+                self.body.addstr(row, 0, self.body_texts[row], curses.A_NORMAL)
+        if pos0 != pos1:
+            if 0 <= pos0 < self.body_count:
+                self.body.addstr(pos0, 0, self.body_texts[pos0], curses.A_NORMAL)
+            if 0 <= pos1 < self.body_count:
+                self.body.addstr(pos1, 0, self.body_texts[pos1], curses.A_REVERSE)
+                self.last_light_pos = pos1
 
     def _scroll_indicator_row(self):
         """ Compute the absolute scroll indicator row:
@@ -128,8 +143,8 @@ class Window:
     def render(self):
         """Draw everything added."""
         self.calc()
-        if self.max_scroll <= 0:
-            self.scr.refresh()
+        # if self.max_body_count <= 0:
+            # self.scr.refresh()
         if self.head_count < self.rows:
             # rectangle(self.scr, self.head_count, 0, self.head_count, self.cols-1)
             self.scr.hline(self.head_count, 0, curses.ACS_HLINE, self.cols)
@@ -141,24 +156,24 @@ class Window:
                 if self.scroll_pos > self.light_pos:
                     # light position is below body bottom
                     self.scroll_pos = self.light_pos
-                elif self.scroll_pos < self.light_pos - (self.max_scroll - 1):
+                elif self.scroll_pos < self.light_pos - (self.max_body_count - 1):
                     # light position is above body top
-                    self.scroll_pos = self.light_pos - (self.max_scroll - 1)
+                    self.scroll_pos = self.light_pos - (self.max_body_count - 1)
                 indent = 1
             else:
                 self.scroll_pos = max(self.scroll_pos, 0)
                 self.scroll_pos = min(self.scroll_pos, self.max_scroll)
                 self.light_pos = self.scroll_pos
-                indent = 1 if self.body_count > self.max_scroll else 0
+                indent = 1 if self.body_count > self.max_body_count else 0
 
         if indent > 0:
             if self.light_mode:
-                self.scr.vline(self.body_base, 0, ' ', self.max_scroll)
+                self.scr.vline(self.body_base, 0, ' ', self.max_body_count)
                 pos = self.light_pos - self.scroll_pos + self.body_base
                 self.scr.addstr(pos, 0, '>', curses.A_REVERSE)
             else:
                 pos = self._scroll_indicator_row()
-                self.scr.vline(self.body_base, 0, curses.ACS_VLINE, self.max_scroll)
+                self.scr.vline(self.body_base, 0, curses.ACS_VLINE, self.max_body_count)
                 self.scr.addstr(pos, 0, '|', curses.A_REVERSE)
         self.scr.refresh()
 
@@ -166,6 +181,9 @@ class Window:
             self.head.refresh(0, 0, 0, indent,
                       min(self.head_count, self.rows)-1, self.cols-1)
 
+        if self.body_base < self.rows:
+            if self.light_mode:
+                self.highlight_current()
             self.body.refresh(self.scroll_pos, 0,
                   self.body_base, indent, self.rows-1, self.cols-1)
 
@@ -184,8 +202,8 @@ class Window:
 
         # need 3 extra cols for rectangle (so we don't draw in southeast corner)
         # and 3 extra rows (top/bottom/prompt)
+        #        Prompt   
         #      +---------+
-        #      | Prompt  |
         #      | Answer  |
         #      +---------+
         assert self.rows >= 5 and self.cols >= 30, "window too small for prompt"
@@ -196,8 +214,8 @@ class Window:
 
         self.scr.clear()
         win = curses.newwin(1, width, row0+2, col0+1) # input window
-        rectangle(self.scr, row0, col0, row9, col9)
-        self.scr.addstr(row0+1, col0+1, prompt[0:width], curses.A_REVERSE)
+        self.scr.addstr(row0, col0+1, prompt[0:width], curses.A_REVERSE)
+        rectangle(self.scr, row0+1, col0, row9, col9)
         win.addstr(seed[0:width-1])
         self.scr.refresh()
         curses.curs_set(2)
@@ -210,6 +228,7 @@ class Window:
         self.scr.clear()
         self.head.clear()
         self.body.clear()
+        self.body_texts, self.last_light_pos = [], -1
         self.head_count = self.body_count = 0
 
     def prompt(self, seconds=1.0):
@@ -246,14 +265,22 @@ class Window:
                 pos += self.max_body_count
             elif key in (ctl_d, ):
                 pos += self.max_body_count//2
-            elif key in (ord('H'), curses.KEY_HOME):
+            elif key in (ord('0'), curses.KEY_HOME):
                 pos = 0
             elif key in (ord('$'), curses.KEY_END):
                 pos = self.body_count - 1
+            elif key in (ord('H'), ):
+                pos = self.scroll_pos
+            elif key in (ord('M'), ):
+                pos = self.scroll_pos + self.max_body_count//2
+            elif key in (ord('L'), ):
+                pos = self.scroll_pos + self.max_body_count-1
+                
             if self.light_mode:
                 self.light_pos = pos
             else:
                 self.scroll_pos = pos
+                self.light_pos = pos
 
             if pos != was_pos:
                 self.render()
@@ -272,8 +299,7 @@ if __name__ == '__main__':
                 highlight = not highlight
                 win.set_highlight(on=highlight)
             if key == ord('n'):
-                answer = win.answer(prompt='Type Name + Enter',
-                    seed='' if name.startswith('[hit') else name)
+                answer = win.answer(prompt='Type Name + Enter', seed='' if name.startswith('[hit') else name)
             return answer
 
         keys_we_handle = [ord('q'), ord('n'), ord('h')]
@@ -283,7 +309,7 @@ if __name__ == '__main__':
         name = "[hit 'n' to enter name]"
         for loop in range(100000000000):
             win.add_header(f'Header: {loop} "{name}"')
-            for line in range(win.max_body_count*2):
+            for line in range(win.max_body_count*4):
                 win.add_body(f'Body: {loop}.{line}')
             win.render()
             answer = do_key(win.prompt(seconds=5))
