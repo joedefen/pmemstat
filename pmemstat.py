@@ -526,6 +526,7 @@ class PmemStat:
         self.units, self.divisor, self.fwidth = 0, 0, 0
         self.mode = 'normal' # (or 'help' or ?'psi')
         self.kill_mode = False  # set to kill
+        self.groups_by_line = {}
         self._set_units()
 
     def get_sortby(self):
@@ -885,6 +886,7 @@ class PmemStat:
         others_summary = None
         running_summary = ProcMem.make_summary_dict(info='---- RUNNING ----')
         shown_cnt = 0
+        self.groups_by_line = {}
         for key in sorted_keys:
             group = alive_groups[key]
             self.add_to_summary(group.summary, running_summary)
@@ -893,6 +895,7 @@ class PmemStat:
                 if group.alive and (group.is_new or group.is_changed or self.window):
                     attr = curses.A_REVERSE if group.is_new or group.is_changed else None
                     attr = None if is_first else attr
+                    self.groups_by_line[self.window.body_count] = group
                     self.pr_summary('A' if group.is_new
                         else f'{group.delta_pss:+,}K' if group.is_changed
                         else ' ', group.summary, attr=attr)
@@ -992,6 +995,15 @@ class PmemStat:
             elif key in (curses.KEY_ENTER, 10):
                 if self.mode == 'help':
                     self.mode = 'normal'
+                    self.window.set_highlight(self.kill_mode)
+                elif self.kill_mode:
+                    win = self.window
+                    group = self.groups_by_line.get(win.light_pos, None)
+                    if group:
+                        pids = [x.pid for x in group.prcset]
+                        answer = win.answer(seed='',
+                            prompt=f'Type "y" to kill: {group.summary["info"]} {pids}')
+                    self.kill_mode = False
                     self.window.set_highlight(self.kill_mode)
             elif key in (ord('/'), ):
                 self.opts.search = self.window.answer(

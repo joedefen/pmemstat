@@ -162,6 +162,7 @@ class Window:
             self.scr.hline(self.head_count, 0, curses.ACS_HLINE, self.cols)
         indent = 0
         if self.body_base < self.rows:
+            ind_pos = 0 if self.light_mode else self._scroll_indicator_row()
             if self.light_mode:
                 self.light_pos = max(self.light_pos, 0)
                 self.light_pos = min(self.light_pos, self.body_count-1)
@@ -175,7 +176,7 @@ class Window:
             else:
                 self.scroll_pos = max(self.scroll_pos, 0)
                 self.scroll_pos = min(self.scroll_pos, self.max_scroll)
-                self.light_pos = self.scroll_pos
+                self.light_pos = self.scroll_pos + ind_pos - self.body_base
                 indent = 1 if self.body_count > self.max_body_count else 0
 
         if indent > 0:
@@ -184,9 +185,8 @@ class Window:
                 pos = self.light_pos - self.scroll_pos + self.body_base
                 self.scr.addstr(pos, 0, '>', curses.A_REVERSE)
             else:
-                pos = self._scroll_indicator_row()
                 self.scr.vline(self.body_base, 0, curses.ACS_VLINE, self.max_body_count)
-                self.scr.addstr(pos, 0, '|', curses.A_REVERSE)
+                self.scr.addstr(ind_pos, 0, '|', curses.A_REVERSE)
         self.scr.refresh()
 
         if self.rows > 0:
@@ -218,17 +218,19 @@ class Window:
         #      +---------+
         #      | Answer  |
         #      +---------+
-        assert self.rows >= 5 and self.cols >= 30, "window too small for prompt"
+        #       Press ENTER key when ready.
+        assert self.rows >= 6 and self.cols >= 30, "window too small for prompt"
         width = min(width, self.cols-3) # max text width
-        row0, row9 = self.rows//2 - 2, self.rows//2 + 1
+        row0, row9 = self.rows//2 - 2, self.rows//2 + 2
         col0 = (self.cols - (width+2)) // 2
         col9 = col0 + width + 2 - 1
 
         self.scr.clear()
         win = curses.newwin(1, width, row0+2, col0+1) # input window
-        self.scr.addstr(row0, col0+1, prompt[0:width], curses.A_REVERSE)
-        rectangle(self.scr, row0+1, col0, row9, col9)
+        self.scr.addstr(row0, col0+1, prompt[0:width])
+        rectangle(self.scr, row0+1, col0, row9-1, col9)
         win.addstr(seed[0:width-1])
+        self.scr.addstr(row9, col0+1, 'Press ENTER key when ready.'[:width])
         self.scr.refresh()
         curses.curs_set(2)
         answer = Textbox(win).edit(mod_key).strip()
