@@ -912,7 +912,8 @@ class PmemStat:
                 if group.alive and (group.is_new or group.is_changed or self.window):
                     attr = curses.A_REVERSE if group.is_new or group.is_changed else None
                     attr = None if is_first else attr
-                    self.groups_by_line[self.window.body_row_cnt] = group
+                    if self.window:
+                        self.groups_by_line[self.window.body_row_cnt] = group
                     self.pr_summary('A' if group.is_new
                         else f'{group.delta_pss:+,}K' if group.is_changed
                         else ' ', group.summary, attr=attr)
