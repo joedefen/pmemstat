@@ -22,11 +22,16 @@ class KillThem():
     def do_kill(self):
         """Return True of all gone, else False"""
         sigs = [ signal.SIGTERM, signal.SIGTERM, signal.SIGTERM,
-                    signal.SIGKILL, signal.SIGKILL]
+                 signal.SIGTERM, signal.SIGTERM, signal.SIGTERM,
+                 signal.SIGTERM, signal.SIGTERM, signal.SIGTERM,
+                 signal.SIGTERM, signal.SIGTERM, signal.SIGTERM,
+                 signal.SIGKILL, signal.SIGKILL, signal.SIGKILL]
+        last_sig = '' 
         for sig in sigs:
             for pid in list(self.pids):
                 try:
                     os.kill(int(pid), sig)
+                    last_sig = sig
                 except OSError:
                     self.pids.discard(pid)
             time.sleep(0.5)
@@ -36,7 +41,9 @@ class KillThem():
                     self.pids.discard(pid)
             if not self.pids:
                 break
-        return not bool(self.pids)
+        if self.pids:
+            return False, f'Still running: {self.pids}'
+        return True, f'Gone (w sig {last_sig})'
 
 if __name__ == '__main__':
     def main():

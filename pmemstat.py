@@ -2,12 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 Pending Features:
-  - Ability to kill processes:
-      - DONE: highlighting
-      - pressing ENTER kills the highlighted process; when one
-        group is killed, leave kill mode
-      - implement kill_group() which make several tries to kill the group
-  - Improved CPU stat (keep list of values for 20s or s)
   - Iffy:
     - PSI Indicator in title?  PSI Page (maybe with a thread)?
 
@@ -41,7 +35,7 @@ NOTE: kB is a misnomer ... should be "KB".  Morons.
 # pylint: disable=broad-except,import-outside-toplevel,global-statement
 # pylint: disable=too-many-boolean-expressions,invalid-name
 # pylint: disable=too-many-instance-attributes,too-many-lines
-# pylint: disable=too-many-arguments,too-many-branches
+# pylint: disable=too-many-arguments
 
 import os
 import re
@@ -55,6 +49,7 @@ from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta
 from Window import Window
+from KillThem import KillThem
 
 
 # Trace Levels:
@@ -169,7 +164,7 @@ class ProcMem:
         """Get the Cpu Number for the PID (if possible)"""
         def init_cpu(error=False):
             return SimpleNamespace(error=error, fh=None,
-                base_mono=0, base_ticks=0, percent=0,)
+                percent=0, hists=[])
 
         if ProcMem.clock_tick is None:
             try:
@@ -202,20 +197,36 @@ class ProcMem:
         ticks = user + system
         mono = time.monotonic()
 
-        if self.cpu.base_mono >= 0: # initialized
-            delta_ticks = ticks - self.cpu.base_ticks
-            delta_time = mono - self.cpu.base_mono
+#       if self.cpu.base_mono >= 0: # initialized
+#           delta_ticks = ticks - self.cpu.base_ticks
+#           delta_time = mono - self.cpu.base_mono
+#           self.cpu.percent = 0
+#           if delta_time > 0 and delta_ticks >= 0:
+#               self.cpu.percent = round(100
+#                   * delta_ticks / ProcMem.clock_tick / delta_time, 8)
+#           # print(f'{self.cpu.percent}%')
+#           if delta_time >= 20: # rebase sample
+#               self.cpu.base_mono = mono
+#               self.cpu.base_ticks = ticks
+#       else:
+#           self.cpu.base_mono = mono
+#           self.cpu.base_ticks = ticks
+
+        if self.cpu.hists: # initialized
+            delta_ticks = ticks - self.cpu.hists[0][0]
+            delta_time = mono - self.cpu.hists[0][1]
             self.cpu.percent = 0
             if delta_time > 0 and delta_ticks >= 0:
                 self.cpu.percent = round(100
                     * delta_ticks / ProcMem.clock_tick / delta_time, 8)
             # print(f'{self.cpu.percent}%')
-            if delta_time >= 20: # rebase sample
-                self.cpu.base_mono = mono
-                self.cpu.base_ticks = ticks
+            self.cpu.hists.append((ticks, mono))
+            floor_mono = mono - 20
+            while len(self.cpu.hists) > 1 and self.cpu.hists[0][1] < floor_mono:
+                self.cpu.hists.pop(0)
+
         else:
-            self.cpu.base_mono = mono
-            self.cpu.base_ticks = ticks
+            self.cpu.hists.append((ticks, mono))
 
     def get_cmdline(self):
         """Get the command line of the PID."""
@@ -270,6 +281,9 @@ class ProcMem:
             self.whynot = 'FilteredByArgs'
             # print(f'    >>>> unwanted {pid}')
         ## print(f'DBDB: {self.pid} wanted={self.wanted} whynot={self.whynot}')
+        self.set_key()
+
+    def set_key(self):
         self.key = (self.cmdline_trunc if ProcMem.opts.groupby == 'cmd' else
                 self.exebasename if ProcMem.opts.groupby == 'exe' else self.pid)
 
@@ -511,7 +525,7 @@ class PmemStat:
     """ The singleton class for running the main loop, etc"""
     keys_we_handle =  set([ord('c'), ord('f'), ord('g'), ord('o'),
                     ord('u'), ord('n'), ord('h'), ord('?'),
-                    ord('s'), ord('r'), ord('/'), ord('z'),
+                    ord('s'), ord('r'), ord('/'), ord('K'),
                     curses.KEY_ENTER, 10,
                       ])
 
@@ -525,7 +539,7 @@ class PmemStat:
         self.number = 0  # line number for opts.numbers
         self.units, self.divisor, self.fwidth = 0, 0, 0
         self.mode = 'normal' # (or 'help' or ?'psi')
-        self.kill_mode = False  # set to kill
+        setattr(opts, 'kill_mode', False)
         self.groups_by_line = {}
         self._set_units()
 
@@ -600,6 +614,8 @@ class PmemStat:
 
         for pid in list(self.prcs):
             prc = self.prcs[pid]
+            if regroup:
+                prc.set_key()
             if not prc.alive:
                 del self.prcs[pid]
                 continue
@@ -756,6 +772,7 @@ class PmemStat:
 
     def loop(self, now, is_first, regroup=False):
         """one loop thru all pids"""
+        # pylint: disable=too-many-branches
 
         def pr_top_of_report():
             nonlocal self, meminfoKB, wanted_prcs, total_pids
@@ -794,7 +811,7 @@ class PmemStat:
             self.emit('   HINTS:')
             self.emit('     - Type "h" to enter Help Screen')
             self.emit('     - Type "Ctrl-C" to exit program')
-            if os.geteuid != 0:
+            if os.geteuid() != 0:
                 self.emit('     - Run with "sudo" to show all PIDs!',
                           attr=curses.A_BOLD)
 
@@ -881,7 +898,7 @@ class PmemStat:
                 key=lambda x: (alive_groups[x].is_changed and self.opts.rise_to_top,
                                alive_groups[x].summary['ptotal']), reverse=True)
 
-        limit = self.window.max_body_count if self.is_fit_opted() else 1000000
+        limit = self.window.scroll_view_size if self.is_fit_opted() else 1000000
         ptotal_limit = (grand_summary['ptotal'] * self.opts.top_pct / 100) * 1.001
         others_summary = None
         running_summary = ProcMem.make_summary_dict(info='---- RUNNING ----')
@@ -895,7 +912,7 @@ class PmemStat:
                 if group.alive and (group.is_new or group.is_changed or self.window):
                     attr = curses.A_REVERSE if group.is_new or group.is_changed else None
                     attr = None if is_first else attr
-                    self.groups_by_line[self.window.body_count] = group
+                    self.groups_by_line[self.window.body_row_cnt] = group
                     self.pr_summary('A' if group.is_new
                         else f'{group.delta_pss:+,}K' if group.is_changed
                         else ' ', group.summary, attr=attr)
@@ -908,7 +925,7 @@ class PmemStat:
         if others_summary:
             self.pr_summary('O',  others_summary)
 
-        remainder = limit - self.window.body_count if self.is_fit_opted() else 1000000
+        remainder = limit - self.window.body_row_cnt if self.is_fit_opted() else 1000000
         for group in self.groups.values():
             if not group.alive and group.o_summary and remainder > 0:
                 remainder -= 1
@@ -934,6 +951,8 @@ class PmemStat:
         self.emit('Type option keys below to rotate choice:', to_head=True)
 
         options = [
+                ['K - kill mode', 'kill_mode', 'ON', 'off', None,
+                        'Select line + ENTER to kill selected'],
                 ['c - show cpu', 'cpu', 'ON', 'off'],
                 ['f - fit rows to window', 'fit_to_window', 'ON', 'off'],
                 ['g - group by', 'groupby', 'exe', 'cmd', 'pid'],
@@ -948,14 +967,20 @@ class PmemStat:
             leader = option[0]
             member = option[1]
             choices = option[2:]
+            extras = []
             value = getattr(self.opts, member)
             if isinstance(value, bool):
                 value = "ON" if value else "off"
             self.emit(f'{leader:>30}: ')
-            for choice in choices:
+            for idx, choice in enumerate(choices):
+                if choice is None:
+                    extras = choices[idx+1:]
+                    break
                 self.emit(' ', resume=True)
                 self.emit(f'{choice}', resume=True,
                     attr=curses.A_REVERSE if choice == value else None)
+            for extra in extras:
+                self.emit(f'{"":>30}:  {extra}')
 
     def window_loop(self):
         """ TBD """
@@ -986,25 +1011,29 @@ class PmemStat:
             elif key in (ord('h'), ord('?')):
                 after = {'normal': 'help', 'help': 'normal'}
                 self.mode = after[self.mode]
-                self.window.set_highlight(False if self.mode == 'help' else self.kill_mode)
-            elif key in (ord('z'), ):
-                self.kill_mode = not self.kill_mode
+                self.window.set_pick_mode(False if self.mode == 'help' else self.opts.kill_mode)
+            elif key in (ord('K'), ):
+                self.opts.kill_mode = not self.opts.kill_mode
                 if self.mode == 'normal':
-                    self.window.set_highlight(self.kill_mode)
+                    self.window.set_pick_mode(self.opts.kill_mode)
 
             elif key in (curses.KEY_ENTER, 10):
                 if self.mode == 'help':
                     self.mode = 'normal'
-                    self.window.set_highlight(self.kill_mode)
-                elif self.kill_mode:
+                    self.window.set_pick_mode(self.opts.kill_mode)
+                elif self.opts.kill_mode:
                     win = self.window
-                    group = self.groups_by_line.get(win.light_pos, None)
+                    group = self.groups_by_line.get(win.pick_pos, None)
                     if group:
                         pids = [x.pid for x in group.prcset]
                         answer = win.answer(seed='',
                             prompt=f'Type "y" to kill: {group.summary["info"]} {pids}')
-                    self.kill_mode = False
-                    self.window.set_highlight(self.kill_mode)
+                        if answer.lower().startswith('y'):
+                            killer = KillThem(pids)
+                            ok, message = killer.do_kill()
+                            win.alert(title='OK' if ok else 'FAIL', message=message)
+                    self.opts.kill_mode = False
+                    self.window.set_pick_mode(self.opts.kill_mode)
             elif key in (ord('/'), ):
                 self.opts.search = self.window.answer(
                     prompt='Set search string, then Enter',
@@ -1016,20 +1045,25 @@ class PmemStat:
         is_first = True
         was_groupby, regroup = self.opts.groupby, True
         for _ in range(1000000000):
-            if self.mode == 'normal':
+            if self.mode == 'help':
+                self.help_screen()
+                self.window.render()
+                do_key(self.window.prompt(self.opts.loop_secs))
+                self.window.clear()
+            elif self.mode == 'normal':
                 regroup = bool(was_groupby != self.opts.groupby)
                 self.loop(datetime.now(), is_first=is_first, regroup=regroup)
                 was_groupby, regroup = self.opts.groupby, False
                 regroup = False
                 self.window.render()
                 do_key(self.window.prompt(self.opts.loop_secs))
+                while self.opts.kill_mode:
+                    if self.mode == 'help':
+                        break
+                    self.window.render()
+                    do_key(self.window.prompt(self.opts.loop_secs))
                 self.window.clear()
                 is_first = False
-            elif self.mode == 'help':
-                self.help_screen()
-                self.window.render()
-                do_key(self.window.prompt(self.opts.loop_secs))
-                self.window.clear()
             else:
                 assert False, f'unsupported mode ({self.mode})'
 
