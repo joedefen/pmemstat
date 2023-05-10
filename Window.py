@@ -25,7 +25,7 @@ class Window:
                Ctrl-d:  half-page down     Ctrl-f, NPAGE:  page down
     """
     def __init__(self, head_line=True, head_rows=10, body_rows=200,
-                 body_cols=200, keys=None, pick_mode=False):
+                 body_cols=200, keys=None, pick_mode=False, pick_size=1):
         self.scr = self._start_curses()
         self.head_rows = head_rows
         self.body_rows, self.body_cols = body_rows, body_cols
@@ -38,6 +38,7 @@ class Window:
         self.scroll_pos = 0  # how far down into body are we?
         self.pick_pos = 0 # in highlight mode, where are we?
         self.pick_mode = pick_mode # whether in highlight mode
+        self.pick_size = pick_size # whether in highlight mode
         self.rows, self.cols = 0, 0
         self.scroll_view_size = 0  # no. viewable lines of the body
         self.max_scroll_pos = 0
@@ -46,7 +47,7 @@ class Window:
         self.handled_keys = set(keys) if isinstance(keys, (set, list)) else []
         self._set_screen_dims()
         self.calc()
-        
+
     @staticmethod
     def get_nav_keys_blurb():
         """For a help screen, describe the nav keys"""
@@ -73,10 +74,11 @@ class Window:
         scr.clear()
         return scr
 
-    def set_pick_mode(self, on=True):
+    def set_pick_mode(self, on=True, pick_size=1):
         """Set whether in highlight mode."""
         was_on = self.pick_mode
         self.pick_mode = bool(on)
+        self.pick_size = max(pick_size, 1)
         if self.pick_mode and not was_on:
             self.last_pick_pos = -2 # indicates need to clear them all
 
@@ -124,8 +126,9 @@ class Window:
                 self.body.addstr(row, 0, text, attr)
                 self.body_texts.append(text)
                 self.body_row_cnt += 1
-            
+
     def highlight_picked(self):
+        """Highlight the current pick and un-highlight the previous pick."""
         if not self.pick_mode:
             return
         pos0, pos1 = self.last_pick_pos, self.pick_pos
@@ -134,9 +137,11 @@ class Window:
                 self.body.addstr(row, 0, self.body_texts[row], curses.A_NORMAL)
         if pos0 != pos1:
             if 0 <= pos0 < self.body_row_cnt:
-                self.body.addstr(pos0, 0, self.body_texts[pos0], curses.A_NORMAL)
+                for i in range(self.pick_size):
+                    self.body.addstr(pos0+i, 0, self.body_texts[pos0+i], curses.A_NORMAL)
             if 0 <= pos1 < self.body_row_cnt:
-                self.body.addstr(pos1, 0, self.body_texts[pos1], curses.A_REVERSE)
+                for i in range(self.pick_size):
+                    self.body.addstr(pos1+i, 0, self.body_texts[pos1+i], curses.A_REVERSE)
                 self.last_pick_pos = pos1
 
     def _scroll_indicator_row(self):
@@ -160,10 +165,9 @@ class Window:
         if self.pick_mode:
             return self._calc_indicator(
                 self.pick_pos, 0, self.body_row_cnt-1, 0, self.cols-1)
-        else:
-            return self._calc_indicator(
-                self.scroll_pos, 0, self.max_scroll_pos, 0, self.cols-1)
-    
+        return self._calc_indicator(
+            self.scroll_pos, 0, self.max_scroll_pos, 0, self.cols-1)
+
     @staticmethod
     def _calc_indicator(pos, pos0, pos9, ind0, ind9):
         if pos9 - pos0 <= 0:
@@ -186,12 +190,13 @@ class Window:
             if self.pick_mode:
                 self.pick_pos = max(self.pick_pos, 0)
                 self.pick_pos = min(self.pick_pos, self.body_row_cnt-1)
+                self.pick_pos -= (self.pick_pos % self.pick_size)
                 if self.scroll_pos > self.pick_pos:
                     # light position is below body bottom
                     self.scroll_pos = self.pick_pos
-                elif self.scroll_pos < self.pick_pos - (self.scroll_view_size - 1):
+                elif self.scroll_pos < self.pick_pos - (self.scroll_view_size - self.pick_size):
                     # light position is above body top
-                    self.scroll_pos = self.pick_pos - (self.scroll_view_size - 1)
+                    self.scroll_pos = self.pick_pos - (self.scroll_view_size - self.pick_size)
                 indent = 1
             else:
                 self.scroll_pos = max(self.scroll_pos, 0)
@@ -318,11 +323,12 @@ class Window:
 
             # Navigation Keys...
             pos = self.pick_pos if self.pick_mode else self.scroll_pos
+            delta = self.pick_size if self.pick_mode else 1
             was_pos = pos
             if key in (ord('k'), curses.KEY_UP):
-                pos -= 1
+                pos -= delta
             elif key in (ord('j'), curses.KEY_DOWN):
-                pos += 1
+                pos += delta
             elif key in (ctl_b, curses.KEY_PPAGE):
                 pos -= self.scroll_view_size
             elif key in (ctl_u, ):
@@ -341,7 +347,7 @@ class Window:
                 pos = self.scroll_pos + self.scroll_view_size//2
             elif key in (ord('L'), ):
                 pos = self.scroll_pos + self.scroll_view_size-1
-                
+
             if self.pick_mode:
                 self.pick_pos = pos
             else:
@@ -363,9 +369,10 @@ if __name__ == '__main__':
                 sys.exit(0)
             if key == ord('h'):
                 highlight = not highlight
-                win.set_highlight(on=highlight)
+                win.set_pick_mode(on=highlight, pick_size=2)
             if key == ord('n'):
-                answer = win.answer(prompt='Provide Your Name:', seed='' if name.startswith('[hit') else name)
+                answer = win.answer(prompt='Provide Your Name:',
+                                    seed='' if name.startswith('[hit') else name)
                 win.alert(title='Info', message=f'got: {answer}')
             return answer
 
@@ -377,8 +384,9 @@ if __name__ == '__main__':
         name = "[hit 'n' to enter name]"
         for loop in range(100000000000):
             win.add_header(f'Header: {loop} "{name}"')
-            for line in range(body_size):
+            for line in range(body_size//2):
                 win.add_body(f'Body: {loop}.{line}')
+                win.add_body(f'  Body: {loop}.{line}')
             win.render()
             answer = do_key(win.prompt(seconds=5))
             if answer is not None:
