@@ -22,7 +22,7 @@ class Window:
             k, UP:  up one row               0, HOME:  first row
           j, DOWN:  down one row              $, END:  last row
            Ctrl-u:  half-page up       Ctrl-b, PPAGE:  page up
-               Ctrl-d:  half-page down     Ctrl-f, NPAGE:  page down
+           Ctrl-d:  half-page down     Ctrl-f, NPAGE:  page down
     """
     def __init__(self, head_line=True, head_rows=10, body_rows=200,
                  body_cols=200, keys=None, pick_mode=False, pick_size=1):

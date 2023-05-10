@@ -4,39 +4,57 @@ pmemstat is a tool to show the detailed **proportional** memory use of Linux pro
 * `/proc/{PID}/smaps_rollup`
 * `/proc/{PID}/smaps`
 
-Reporting on proportional use avoids double counting memory and overestimating the memory expense of a program or collection of programs.
+Reporting proportional memory avoids overstated memory use by double counting memory that is shared between processes.
 
-The grouping features of this tool make it easier to attribute memory pressure to the real "memory hogs" because memory use is not obscured by splitting the cost among many processes that would otherwise have to aggregated visually/manually.
+`pmemstat`'s grouping feature rolls up the resources of multiple processes of a feature (e.g., a browser) to make the total impact much more apparent.
 
-The looping features of this tool allow monitoring for changes and memory growth which may be "leaks".  Since most memory leaks are leaks of heap memory, segregating memory by types makes identifying leaks faster and more certain.
+Its looping features allow monitoring for changes and memory growth which may be "leaks".  Since most memory leaks are leaks of heap memory, segregating memory by types makes identifying leaks faster and more certain.
 
+**In version 2.0, `pmemstat` has many new features including**:
+* In its "window" mode, `pmemstat` updates the terminal in place (using "curses") rather than scrolling.
+* Showing CPU usage, too, which makes `pmemstat` a viable alternative to `top` for regular us (although more specialized and still focused on accurate memory representation).
+* Enables killing processes selected visually and confirmation when they are really gone.
+* And a number of new options that can be changed while still running if in window mode.
+
+## Installation
+Installation is left to user ingenuity, mostly.  There is an included script designed to install a single-file version of `pmemstat` to `~/.local/bin/.` if that directory is on your path.  View the `deploy` script and use (possibly with modification) if it is useful.
+> If not already installed, `deploy` will install `stickytape` to create the single-file version of `pmemstat`.
 ## Usage
 ```
-usage: pmemstat [-h] [-D] [-g {exe,cmd,pid}] [-k MIN_DELTA_KB] [-l LOOP_SECS]
-                [-L CMDLEN] [-t TOP_PCT] [-u {MB,mB,KB}]
-                [pids [pids ...]]
+usage: pmemstat [-h] [-D] [-C] [-g {exe,cmd,pid}] [-f] [-k MIN_DELTA_KB] [-l LOOP_SECS]
+                   [-L CMDLEN] [-t TOP_PCT] [-n] [-o] [-u {MB,mB,KB,human}] [-R]
+                   [-s {mem,cpu,name}] [-/ SEARCH] [-W]
+                   [pids ...]
 
 positional arguments:
-  pids                  list of pids/groupings (none means all we can read)
+  pids                  list of pids/groups (none means every accessible pid)
 
-optional arguments:
+options:
   -h, --help            show this help message and exit
   -D, --debug           debug mode (the more Ds, the higher the debug level)
+  -C, --no-cpu          do NOT report percent CPU (only in window mode)
   -g {exe,cmd,pid}, --groupby {exe,cmd,pid}
                         grouping method for presenting rows
+  -f, --fit-to-window   do not overflow window [if -w]
   -k MIN_DELTA_KB, --min-delta-kb MIN_DELTA_KB
-                        minimum percent KB to show again [dflt=100 if DB else
-                        1000
+                        minimum delta KB to show again [dflt=100 if DB else 1000
   -l LOOP_SECS, --loop LOOP_SECS
-                        loop interval in seconds [dflt=0]
+                        loop interval in secs [dflt=5 if -w else 0]
   -L CMDLEN, --cmdlen CMDLEN
-                        max command line length for reporting/grouping
-                        [dflt=36]
+                        max shown command length [dflt=36 if not -w]
   -t TOP_PCT, --top-pct TOP_PCT
-                        report grouping contributing to top pct of ptotal
-                        [dflt=100]
-  -u {MB,mB,KB}, --units {MB,mB,KB}
+                        report group contributing to top pct of ptotal [dflt=100]
+  -n, --numbers         show line numbers in report
+  -o, --others          collapse shSYSV, shOth, stack, text into "other"
+  -u {MB,mB,KB,human}, --units {MB,mB,KB,human}
                         units of memory [dflt=MB]
+  -R, --no-rise         do NOT raise change/adds to top (only in window mode)
+  -s {mem,cpu,name}, --sortby {mem,cpu,name}
+                        grouping method for presenting rows
+  -/ SEARCH, --search SEARCH
+                        show items with search string in name
+  -W, --no-window       show in "curses" window [disables: -D,-t,-L]
+
 ```
 Explanation of some options and arguments:
 * `-g {exe,cmd,pid}, --groupby {exe,cmd,pid}` -  select the grouping of memory stats for reporting.
@@ -50,13 +68,14 @@ Explanation of some options and arguments:
 
 
 # Example Usage with Explanation of Output
-![pmemstat example](images/pmemstat_2022-03-18.png)
+![pmemstat example](images/pmemstat_2023-05-10.png)
 
-On every loop, we see
+On in window loop, we see
 * a **leader line** with:
     * the current time
     * from `/proc/meminfo` in MB, MemTotal, MemAvailable, and Dirty
-    * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads; if `pmemstat` is run as root, then all  PIDs can be seen; otherwise, you will be restrict to those for which you have permissions.
+    * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads;
+        * **to see ALL pids, run:** `sudo pmemstat` 
 * a **header line with the reported fields** including:
     * **pswap** - proportional use of swap (per smaps_rollup)
     * **shSYSV** - proprotional use of System V shared memory (per smaps)
@@ -74,6 +93,31 @@ On every loop, we see
     * **key/info** which is a quantifier plus the grouping key. The quantifier may be:
         * **{PID}** - when the grouping line represents one process (for option `-gexe`).
         * **{num}x** - where {num} is the number of processes in the grouping.
+        
+## Help Screen (Window Mode)
+In window mode, press 'h' to enter the help screen which looks like:
+
+![helpscreen example](images/help-screen_2023-05-10.png)
+
+**Notes:**
+* There are a number of navigation keys (mostly following vim conventions); in the help screen, they apply to help screen; otherwise, they apply to main screen.
+* Below the line, there are a number of keys/options; when you type an option key (e.g, "c"), it will highlight the next option value (e.g., "off"); when you change options, they will be applied to the next loop of the main menu.
+    * These option keys can be used in the main menu (e.g., pressing "c" will change hide or reveal the CPU column w/o entering the help screen).
+    
+## Kill Mode (Window Mode)
+Pressing "K" enter "Kill Mode" where you use the navigation keys to highlight a row, and then press ENTER to kill the process(es) represented by that row.
+
+## Scroll Position (Window Mode)
+
+Sometimes, the horizontal line between the header and scrollable region has a reverse video block (under the "27" in this case):
+![scroll-pos example](images/scroll-pos_2023-05-10.png)
+
+**Notes:**
+* When there is no block, the scrolled document does not overflow the scrollable region.
+* When there is a block, its position indicates:
+    * **Leftmost** - At the top of the document.
+    * **Rightmost** - At the bottom of the document.
+    * **Between Leftmost and Rightmost** - At percentage of the document approximated by its position from Left (0%) to Right (100%).
 
 # Quirks and Details
 * **pmapstat** shows only the processes you have permission to see; to see all processes, run as *root*.
@@ -81,6 +125,7 @@ On every loop, we see
 * the **ptotal** (from 'smaps') and **pss** (from `smaps_rollups` and usually hiddent) seem differ more than expected but they seem to be very close.
 * after the first loop, **pss** is used to initially filter groupings that will not qualify for display (and then **ptotal** is checked.  This means subsequent loops to be very efficient by avoid reading the `smaps`).
 * the "exe" value comes from the command line (based `/proc/{PID}/cmdline` which is a bit funky). Firstly, the leading path is stripped; secondly, if the resulting executable is a script interpreter (e.g., python, perl, bash, ...) AND the first argument seems to be a full path (i.e., starts with "/"), then the "exe" will be represented as "{interpreter}->{basename(script)}".  For example, "python3->memstat" in the example above.
+
 
 # Test Program and Test Suggestions
 The C program, `memtest.c` is included and can be compiled by running `cc memtest.c -o memtest`.  This program:

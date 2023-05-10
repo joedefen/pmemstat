@@ -809,7 +809,7 @@ class PmemStat:
             pr_top_of_report()
             self.emit('   WORKING .... be patient ;-)', attr=curses.A_REVERSE)
             self.emit('   HINTS:')
-            self.emit('     - Type "h" to enter Help Screen')
+            self.emit('     - Type "h" to open Help Screen')
             self.emit('     - Type "Ctrl-C" to exit program')
             if os.geteuid() != 0:
                 self.emit('     - Run with "sudo" to show all PIDs!',
@@ -945,7 +945,7 @@ class PmemStat:
 
     def help_screen(self):
         """Populate help screen"""
-        self.emit("-- HELP SCREEN ['h' or ENTER return; Ctrl-c exits] --", to_head=True)
+        self.emit("-- HELP SCREEN ['h' or ENTER closes Help; Ctrl-c exits program] --", to_head=True)
         for line in Window.get_nav_keys_blurb().splitlines():
             if line:
                 self.emit(line, to_head=True)
