@@ -9,9 +9,11 @@ Custom Wrapper for python curses.
 import sys
 import traceback
 import atexit
+import time
 import curses
 import textwrap
 from curses.textpad import rectangle, Textbox
+dump_str = None
 
 class Window:
     """ Layer above curses to encapsulate what we need """
@@ -36,14 +38,14 @@ class Window:
         self.hor_line_cnt = 1 if head_line else 0 # no. h-lines in header
         self.body_row_cnt = 0
         self.scroll_pos = 0  # how far down into body are we?
+        self.max_scroll_pos = 0
         self.pick_pos = 0 # in highlight mode, where are we?
+        self.last_pick_pos = -1 # last highlighted position
         self.pick_mode = pick_mode # whether in highlight mode
         self.pick_size = pick_size # whether in highlight mode
         self.rows, self.cols = 0, 0
         self.scroll_view_size = 0  # no. viewable lines of the body
-        self.max_scroll_pos = 0
         self.body_texts = []
-        self.last_pick_pos = -1 # last highlighted position
         self.handled_keys = set(keys) if isinstance(keys, (set, list)) else []
         self._set_screen_dims()
         self.calc()
@@ -180,6 +182,36 @@ class Window:
         return min(max(ind, ind0+1), ind9-1)
 
     def render(self):
+        for i in range(128):
+            try:
+                self.render_once()
+                return
+            except curses.error:
+                time.sleep(0.16)
+                self._set_screen_dims()
+                continue
+        try:
+            self.render_once()
+        except Exception:
+            Window.stop_curses()
+            print(f"""curses err: 
+    head_row_cnt={self.head_row_cnt}
+    head_view_cnt={self.head_view_cnt}
+    hor_line_cnt={self.hor_line_cnt}
+    body_row_cnt={self.body_row_cnt}
+    scroll_pos={self.scroll_pos}
+    max_scroll_pos={self.max_scroll_pos}
+    pick_pos={self.pick_pos}
+    last_pick_pos={self.last_pick_pos}
+    pick_mode={self.pick_mode}
+    pick_size={self.pick_size}
+    rows={self.rows}
+    cols={self.cols}
+""")
+            raise
+
+
+    def render_once(self):
         """Draw everything added."""
         self.calc()
         # if self.scroll_view_size <= 0:
@@ -242,7 +274,8 @@ class Window:
         #      +Prompt---    -----------------+
         #      | Seed-for-answer              |
         #      +---------Press ENTER to submit+
-        assert self.rows >= 3 and self.cols >= 30, "window too small for prompt"
+        if self.rows < 3 or self.cols < 30:
+            return seed
         width = min(width, self.cols-3) # max text width
         row0, row9 = self.rows//2 - 1, self.rows//2 + 1
         col0 = (self.cols - (width+2)) // 2
@@ -272,7 +305,8 @@ class Window:
         #      | First line for message...    |
         #      | Last line for message.       |
         #      +-----------Press ENTER  to ack+
-        assert self.rows >= 2+height and self.cols >= 30, "window too small for prompt"
+        if self.rows < 2+height or self.cols < 30:
+            return 
         width = min(width, self.cols-3) # max text width
         row0 = (self.rows+height-1)//2 - 1
         row9 = row0 + height + 1
@@ -291,8 +325,8 @@ class Window:
         self.scr.addstr(row9, col0+1+width-len(ending), ending)
         self.scr.refresh()
         pad.refresh(0, 0, row0+1, col0+1, row9-1, col9-1)
-        answer = Textbox(win).edit(mod_key).strip()
-        return answer
+        Textbox(win).edit(mod_key).strip()
+        return
 
     def clear(self):
         """Clear in prep for new screen"""
@@ -401,3 +435,6 @@ if __name__ == '__main__':
         Window.stop_curses()
         print("exception:", str(exce))
         print(traceback.format_exc())
+        if dump_str:
+            print(dump_str)
+
