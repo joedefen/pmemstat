@@ -197,22 +197,11 @@ class ProcMem:
         ticks = user + system
         mono = time.monotonic()
 
-#       if self.cpu.base_mono >= 0: # initialized
-#           delta_ticks = ticks - self.cpu.base_ticks
-#           delta_time = mono - self.cpu.base_mono
-#           self.cpu.percent = 0
-#           if delta_time > 0 and delta_ticks >= 0:
-#               self.cpu.percent = round(100
-#                   * delta_ticks / ProcMem.clock_tick / delta_time, 8)
-#           # print(f'{self.cpu.percent}%')
-#           if delta_time >= 20: # rebase sample
-#               self.cpu.base_mono = mono
-#               self.cpu.base_ticks = ticks
-#       else:
-#           self.cpu.base_mono = mono
-#           self.cpu.base_ticks = ticks
-
         if self.cpu.hists: # initialized
+            self.cpu.hists.append((ticks, mono))
+            floor_mono = mono - ProcMem.opts.cpu_avg_secs
+            while len(self.cpu.hists) > 1 and self.cpu.hists[0][1] < floor_mono:
+                self.cpu.hists.pop(0)
             delta_ticks = ticks - self.cpu.hists[0][0]
             delta_time = mono - self.cpu.hists[0][1]
             self.cpu.percent = 0
@@ -220,10 +209,6 @@ class ProcMem:
                 self.cpu.percent = round(100
                     * delta_ticks / ProcMem.clock_tick / delta_time, 8)
             # print(f'{self.cpu.percent}%')
-            self.cpu.hists.append((ticks, mono))
-            floor_mono = mono - 20
-            while len(self.cpu.hists) > 1 and self.cpu.hists[0][1] < floor_mono:
-                self.cpu.hists.pop(0)
 
         else:
             self.cpu.hists.append((ticks, mono))
@@ -526,7 +511,7 @@ class PmemStat:
     keys_we_handle =  set([ord('c'), ord('f'), ord('g'), ord('o'),
                     ord('u'), ord('n'), ord('h'), ord('?'),
                     ord('s'), ord('r'), ord('/'), ord('K'),
-                    curses.KEY_ENTER, 10,
+                    ord('a'), curses.KEY_ENTER, 10,
                       ])
 
     def __init__(self, opts):
@@ -539,7 +524,8 @@ class PmemStat:
         self.number = 0  # line number for opts.numbers
         self.units, self.divisor, self.fwidth = 0, 0, 0
         self.mode = 'normal' # (or 'help' or ?'psi')
-        setattr(opts, 'kill_mode', False)
+        setattr(opts, 'kill_mode', False) # pseudo option
+        setattr(opts, 'cpu_avg_secs', 20) # pseudo option
         self.groups_by_line = {}
         self._set_units()
 
@@ -888,11 +874,12 @@ class PmemStat:
                     DB(0, 'no summary:', str(group))
 
         if self.get_sortby() == 'cpu':
-            sorted_keys = sorted(alive_groups.keys(),
-                key=lambda x: alive_groups[x].summary['cpu_pct'], reverse=True)
+            sorted_keys = sorted(alive_groups.keys(), key=lambda x:
+                (-round(alive_groups[x].summary['cpu_pct'], 1),
+                    str(alive_groups[x].key).lower()))
         elif self.get_sortby() == 'name':
             sorted_keys = sorted(alive_groups.keys(),
-                key=lambda x: str(alive_groups[x].key))
+                key=lambda x: str(alive_groups[x].key).lower())
         else:
             sorted_keys = sorted(alive_groups.keys(),
                 key=lambda x: (alive_groups[x].is_changed and self.opts.rise_to_top,
@@ -954,7 +941,6 @@ class PmemStat:
         options = [
                 ['K - kill mode', 'kill_mode', 'ON', 'off', None,
                         'Select line + ENTER to kill selected'],
-                ['c - show cpu', 'cpu', 'ON', 'off'],
                 ['f - fit rows to window', 'fit_to_window', 'ON', 'off'],
                 ['g - group by', 'groupby', 'exe', 'cmd', 'pid'],
                 ['n - line numbers', 'numbers',  'ON', 'off'],
@@ -962,6 +948,8 @@ class PmemStat:
                 ['r - raise new/changed to top', 'rise_to_top',  'ON', 'off'],
                 ['s - sort by', 'sortby', 'mem', 'cpu', 'name'],
                 ['u - memory units', 'units', 'MB', 'mB', 'KB', 'human'],
+                ['c - show cpu', 'cpu', 'ON', 'off'],
+                ['a - cpu moving avg secs', 'cpu_avg_secs', 5, 10, 20, 45, 90],
                 ['/ - search string', 'search', self.opts.search],
         ]
         for option in options:
@@ -990,6 +978,9 @@ class PmemStat:
             # ENSURE keys are in 'keys_we_handle'
             if key in (ord('c'), ):
                 self.opts.cpu = not self.opts.cpu
+            if key in (ord('a'), ):
+                after = {5: 10, 10: 20, 20: 45, 45: 90, 90: 5}
+                self.opts.cpu_avg_secs = after[self.opts.cpu_avg_secs]
             elif key in (ord('f'), ):
                 self.opts.fit_to_window = not self.opts.fit_to_window
             elif key in (ord('g'), ):

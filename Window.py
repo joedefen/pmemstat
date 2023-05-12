@@ -170,8 +170,9 @@ class Window:
         return self._calc_indicator(
             self.scroll_pos, 0, self.max_scroll_pos, 0, self.cols-1)
 
-    @staticmethod
-    def _calc_indicator(pos, pos0, pos9, ind0, ind9):
+    def _calc_indicator(self, pos, pos0, pos9, ind0, ind9):
+        if self.max_scroll_pos <= 0:
+            return -1 # not scrollable
         if pos9 - pos0 <= 0:
             return -1 # not scrollable
         if pos <= pos0:
@@ -229,6 +230,7 @@ class Window:
                 elif self.scroll_pos < self.pick_pos - (self.scroll_view_size - self.pick_size):
                     # light position is above body top
                     self.scroll_pos = self.pick_pos - (self.scroll_view_size - self.pick_size)
+                self.scroll_pos = min(self.scroll_pos, self.max_scroll_pos)
                 indent = 1
             else:
                 self.scroll_pos = max(self.scroll_pos, 0)
