@@ -1,24 +1,29 @@
 # pmemstat - Proportional Memory Status
 
-pmemstat is a tool to show the detailed **proportional** memory use of Linux process by digesting:
-* `/proc/{PID}/smaps_rollup`
+`pmemstat` shows detailed **proportional** memory use of **Linux** processes by digesting:
 * `/proc/{PID}/smaps`
+* `/proc/{PID}/smaps_rollup`
 
-Reporting proportional memory avoids overstated memory use by double counting memory that is shared between processes.
+Computing proportional memory avoids overstating memory use as most programs do (e.g., `top`). Specifically, proportional memory splits the cost of common memory to the processes sharing it (rather than counting common memory multiple times). And, it does not include uninstantiated virtual memory. 
+
+ Digging out the proportional memory numbers is comparatively hard and slow; thus, `pmemstat` may take a few seconds to start, but, in its loop mode, refreshes are relatively fast and efficient by avoiding recomputing unchanged numbers.
 
 `pmemstat`'s grouping feature rolls up the resources of multiple processes of a feature (e.g., a browser) to make the total impact much more apparent.
 
-Its looping features allow monitoring for changes and memory growth which may be "leaks".  Since most memory leaks are leaks of heap memory, segregating memory by types makes identifying leaks faster and more certain.
+Its looping features allow monitoring for changes in memory growth which may be "leaks".  Its precision numbers and segregating memory by types makes identifying leaks faster and more certain.
 
 **In version 2.0, `pmemstat` has many new features including**:
-* In its "window" mode, `pmemstat` updates the terminal in place (using "curses") rather than scrolling.
-* Showing CPU usage, too, which makes `pmemstat` a viable alternative to `top` for regular us (although more specialized and still focused on accurate memory representation).
-* Enables killing processes selected visually and confirmation when they are really gone.
-* And a number of new options that can be changed while still running if in window mode.
+* In its **window mode**, `pmemstat` updates the terminal in place (using "curses") rather than scrolling.
+* Showing **CPU use**, too, which makes `pmemstat` a viable alternative to `top` for regular use (although more specialized and still focused on accurate memory representation).
+* Supports **killing processes** that are selected visually with confirmation they are really gone (or not).
+* And several **new options** that can be **controlled dynamically** if in window mode.
 
 ## Installation
-Installation is left to user ingenuity, mostly.  There is an included script designed to install a single-file version of `pmemstat` to `~/.local/bin/.` if that directory is on your path.  View the `deploy` script and use (possibly with modification) if it is useful.
-> If not already installed, `deploy` will install `stickytape` to create the single-file version of `pmemstat`.
+Install as you please. At your discretion, the included `deploy` script installs a single-file `pmemstat` to `~/.local/bin/` if on your PATH; `deploy` installs `stickytape` if not present, too. This is a way to install/update `pmemstat` w/o leftovers (except `stickytape`):
+```
+    cd /tmp; rm -rf pmemstat; git clone https://github.com/joedefen/pmemstat.git
+    ./pmemstat/deploy; rm -rf pmemstat
+```
 ## Usage
 ```
 usage: pmemstat [-h] [-D] [-C] [-g {exe,cmd,pid}] [-f] [-k MIN_DELTA_KB] [-l LOOP_SECS]
@@ -68,9 +73,9 @@ Explanation of some options and arguments:
 
 
 # Example Usage with Explanation of Output
-![pmemstat example](images/pmemstat_2023-05-10.png)
+![pmemstat example](images/pmemstat_2023-05-15.png)
 
-On in window loop, we see
+In the default refreshed window loop, we see
 * a **leader line** with:
     * the current time
     * from `/proc/meminfo` in MB, MemTotal, MemAvailable, and Dirty
@@ -94,10 +99,10 @@ On in window loop, we see
         * **{PID}** - when the grouping line represents one process (for option `-gexe`).
         * **{num}x** - where {num} is the number of processes in the grouping.
         
-## Help Screen (Window Mode)
-In window mode, press 'h' to enter the help screen which looks like:
+## Help Screen (in Window Mode, Press '?')
+In window mode, press '?' to enter the help screen which looks like:
 
-![helpscreen example](images/help-screen_2023-05-10.png)
+![helpscreen example](images/help-screen_2023-05-15.png)
 
 **Notes:**
 * There are a number of navigation keys (mostly following vim conventions); in the help screen, they apply to help screen; otherwise, they apply to main screen.
@@ -109,8 +114,8 @@ Pressing "K" enter "Kill Mode" where you use the navigation keys to highlight a 
 
 ## Scroll Position (Window Mode)
 
-Sometimes, the horizontal line between the header and scrollable region has a reverse video block (under the "27" in this case):
-![scroll-pos example](images/scroll-pos_2023-05-10.png)
+Sometimes, the horizontal line between the header and scrollable region has a reverse video block:
+![scroll-pos example](images/scroll-pos_2023-05-15.png)
 
 **Notes:**
 * When there is no block, the scrolled document does not overflow the scrollable region.
@@ -118,19 +123,21 @@ Sometimes, the horizontal line between the header and scrollable region has a re
     * **Leftmost** - At the top of the document.
     * **Rightmost** - At the bottom of the document.
     * **Between Leftmost and Rightmost** - At percentage of the document approximated by its position from Left (0%) to Right (100%).
+* Its length indicates, roughly, how much of the entire document you can see.
+* Again, you can press 'f' to fit the document to the screen with a "rollup" line summarizing the lines that would not fit.
 
 # Quirks and Details
 * **pmapstat** shows only the processes you have permission to see; to see all processes, run as *root*.
 * **pswap** seems to be only provided by the `smaps_rollups` file, and thus it may be slightly out of sync with the data gathered by `smaps`.
-* the **ptotal** (from 'smaps') and **pss** (from `smaps_rollups` and usually hiddent) seem differ more than expected but they seem to be very close.
+* the **ptotal** (from 'smaps') and **pss** (from `smaps_rollups` and usually hidden) seem differ more than expected but they seem to be very close.
 * after the first loop, **pss** is used to initially filter groupings that will not qualify for display (and then **ptotal** is checked.  This means subsequent loops to be very efficient by avoid reading the `smaps`).
-* the "exe" value comes from the command line (based `/proc/{PID}/cmdline` which is a bit funky). Firstly, the leading path is stripped; secondly, if the resulting executable is a script interpreter (e.g., python, perl, bash, ...) AND the first argument seems to be a full path (i.e., starts with "/"), then the "exe" will be represented as "{interpreter}->{basename(script)}".  For example, "python3->memstat" in the example above.
+* the "exe" value comes from the command line (based `/proc/{PID}/cmdline` which is a bit funky). Firstly, the leading path is stripped; secondly, if the resulting executable is a script interpreter (e.g., python, perl, bash, ...) AND the first argument seems to be a full path (i.e., starts with "/"), then the "exe" will be represented as "{interpreter}->{basename(script)}".  For example, "python3->pmemstat.py" in the example above.
 
 
 # Test Program and Test Suggestions
 The C program, `memtest.c` is included and can be compiled by running `cc memtest.c -o memtest`.  This program:
 * regularly allocates more memory of all types
-* can be run several times simultaneous,
+* can be run several times simultaneously,
 * will share SysV shared memory and memory mapped files,
 
 When running `pmemstat` to monitor its memory use and changes, you should use `-uKB` and `-k{small-number}` so that you can "see" the very modest memory use of the test program and its changes.

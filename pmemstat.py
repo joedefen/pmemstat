@@ -48,7 +48,7 @@ import curses
 from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta
-from Window import Window
+from Window import Window, OptionSpinner
 from KillThem import KillThem
 
 
@@ -269,6 +269,7 @@ class ProcMem:
         self.set_key()
 
     def set_key(self):
+        """ TBD """
         self.key = (self.cmdline_trunc if ProcMem.opts.groupby == 'cmd' else
                 self.exebasename if ProcMem.opts.groupby == 'exe' else self.pid)
 
@@ -508,11 +509,6 @@ class ProcMem:
 
 class PmemStat:
     """ The singleton class for running the main loop, etc"""
-    keys_we_handle =  set([ord('c'), ord('f'), ord('g'), ord('o'),
-                    ord('u'), ord('n'), ord('h'), ord('?'),
-                    ord('s'), ord('r'), ord('/'), ord('K'),
-                    ord('a'), curses.KEY_ENTER, 10,
-                      ])
 
     def __init__(self, opts):
         self.opts = opts
@@ -521,6 +517,7 @@ class PmemStat:
         self.prcs = {}
         self.groups = {} # indexed by group key (e.g., cmd)
         self.window = None
+        self.spin = OptionSpinner()
         self.number = 0  # line number for opts.numbers
         self.units, self.divisor, self.fwidth = 0, 0, 0
         self.mode = 'normal' # (or 'help' or ?'psi')
@@ -795,7 +792,7 @@ class PmemStat:
             pr_top_of_report()
             self.emit('   WORKING .... be patient ;-)', attr=curses.A_REVERSE)
             self.emit('   HINTS:')
-            self.emit('     - Type "h" to open Help Screen')
+            self.emit('     - Type "?" to open Help Screen')
             self.emit('     - Type "Ctrl-C" to exit program')
             if os.geteuid() != 0:
                 self.emit('     - Run with "sudo" to show all PIDs!',
@@ -900,7 +897,7 @@ class PmemStat:
                     attr = curses.A_REVERSE if group.is_new or group.is_changed else None
                     attr = None if is_first else attr
                     if self.window:
-                        self.groups_by_line[self.window.body_row_cnt] = group
+                        self.groups_by_line[self.window.body.row_cnt] = group
                     self.pr_summary('A' if group.is_new
                         else f'{group.delta_pss:+,}K' if group.is_changed
                         else ' ', group.summary, attr=attr)
@@ -913,7 +910,7 @@ class PmemStat:
         if others_summary:
             self.pr_summary('O',  others_summary)
 
-        remainder = limit - self.window.body_row_cnt if self.is_fit_opted() else 1000000
+        remainder = limit - self.window.body.row_cnt if self.is_fit_opted() else 1000000
         for group in self.groups.values():
             if not group.alive and group.o_summary and remainder > 0:
                 remainder -= 1
@@ -932,87 +929,35 @@ class PmemStat:
 
     def help_screen(self):
         """Populate help screen"""
-        self.emit("-- HELP SCREEN ['h' or ENTER closes Help; Ctrl-c exits program] --", to_head=True)
-        for line in Window.get_nav_keys_blurb().splitlines():
-            if line:
-                self.emit(line, to_head=True)
-        self.emit('Type option keys below to rotate choice:', to_head=True)
-
-        options = [
-                ['K - kill mode', 'kill_mode', 'ON', 'off', None,
-                        'Select line + ENTER to kill selected'],
-                ['f - fit rows to window', 'fit_to_window', 'ON', 'off'],
-                ['g - group by', 'groupby', 'exe', 'cmd', 'pid'],
-                ['n - line numbers', 'numbers',  'ON', 'off'],
-                ['o - less memory detail', 'others',  'ON', 'off'],
-                ['r - raise new/changed to top', 'rise_to_top',  'ON', 'off'],
-                ['s - sort by', 'sortby', 'mem', 'cpu', 'name'],
-                ['u - memory units', 'units', 'MB', 'mB', 'KB', 'human'],
-                ['c - show cpu', 'cpu', 'ON', 'off'],
-                ['a - cpu moving avg secs', 'cpu_avg_secs', 5, 10, 20, 45, 90],
-                ['/ - search string', 'search', self.opts.search],
-        ]
-        for option in options:
-            leader = option[0]
-            member = option[1]
-            choices = option[2:]
-            extras = []
-            value = getattr(self.opts, member)
-            if isinstance(value, bool):
-                value = "ON" if value else "off"
-            self.emit(f'{leader:>30}: ')
-            for idx, choice in enumerate(choices):
-                if choice is None:
-                    extras = choices[idx+1:]
-                    break
-                self.emit(' ', resume=True)
-                self.emit(f'{choice}', resume=True,
-                    attr=curses.A_REVERSE if choice == value else None)
-            for extra in extras:
-                self.emit(f'{"":>30}:  {extra}')
+        self.emit("-- HELP SCREEN ['?' or ENTER closes Help; Ctrl-C exits ] --",
+                   to_head=True, attr=curses.A_BOLD)
+        self.spin.show_help_nav_keys(self.window)
+        if os.geteuid() != 0:
+            self.emit('Hint: restart "sudo" to show all PIDs',
+                       attr=curses.A_BOLD)
+        self.spin.show_help_body(self.window)
 
     def window_loop(self):
         """ TBD """
         def do_key(key):
             regroup = False
             # ENSURE keys are in 'keys_we_handle'
-            if key in (ord('c'), ):
-                self.opts.cpu = not self.opts.cpu
-            if key in (ord('a'), ):
-                after = {5: 10, 10: 20, 20: 45, 45: 90, 90: 5}
-                self.opts.cpu_avg_secs = after[self.opts.cpu_avg_secs]
-            elif key in (ord('f'), ):
-                self.opts.fit_to_window = not self.opts.fit_to_window
-            elif key in (ord('g'), ):
-                after = {'exe': 'cmd', 'cmd': 'pid', 'pid': 'exe'}
-                self.opts.groupby = after[self.opts.groupby]
-                regroup = True
-            elif key in (ord('n'), ):
-                self.opts.numbers = not self.opts.numbers
-            elif key in (ord('o'), ):
-                self.opts.others = not self.opts.others
-            elif key in (ord('r'), ):
-                self.opts.rise_to_top = not self.opts.rise_to_top
-            elif key in (ord('s'), ):
-                after = {'mem': 'cpu', 'cpu': 'name', 'name': 'mem'}
-                self.opts.sortby = after[self.opts.sortby]
-            elif key in (ord('u'), ):
-                after = {'MB': 'mB', 'mB': 'KB', 'KB': 'human', 'human': 'MB'}
-                self.opts.units = after[self.opts.units]
-                self._set_units()
-            elif key in (ord('h'), ord('?')):
-                after = {'normal': 'help', 'help': 'normal'}
-                self.mode = after[self.mode]
-                self.window.set_pick_mode(False if self.mode == 'help' else self.opts.kill_mode)
-            elif key in (ord('K'), ):
-                self.opts.kill_mode = not self.opts.kill_mode
-                if self.mode == 'normal':
-                    self.window.set_pick_mode(self.opts.kill_mode)
+            if key in (ord('/'), ):
+                pass
+            if key in self.spin.keys:
+                self.spin.do_key(key, self.window)
+                if key in (ord('u'), ):
+                    self._set_units()
+                elif key in (ord('?'), ):
+                    self.window.set_pick_mode(False if self.mode == 'help'
+                                           else self.opts.kill_mode)
+                elif key in (ord('K'), ):
+                    if self.mode == 'normal':
+                        self.window.set_pick_mode(self.opts.kill_mode)
 
             elif key in (curses.KEY_ENTER, 10):
                 if self.mode == 'help':
                     self.mode = 'normal'
-                    self.window.set_pick_mode(self.opts.kill_mode)
                 elif self.opts.kill_mode:
                     win = self.window
                     group = self.groups_by_line.get(win.pick_pos, None)
@@ -1026,18 +971,41 @@ class PmemStat:
                             win.alert(title='OK' if ok else 'FAIL', message=message)
                     self.opts.kill_mode = False
                     self.window.set_pick_mode(self.opts.kill_mode)
-            elif key in (ord('/'), ):
-                self.opts.search = self.window.answer(
-                    prompt='Set search string, then Enter',
-                    seed=self.opts.search)
-
             return regroup
 
-        self.window = Window(head_line=True, keys=self.keys_we_handle)
+        self.spin = OptionSpinner()
+        self.spin.add_key('mode', '? - help screen',
+                          vals=['normal', 'help'], obj=self)
+        self.spin.add_key('kill_mode', 'K - kill mode', vals=[False, True],
+                comments='Select line + ENTER to kill selected', obj=self.opts)
+        self.spin.add_key('fit_to_window', 'f - fit rows to window',
+                          vals=[False, True], obj=self.opts)
+        self.spin.add_key('groupby', 'g - group by',
+                          vals=['exe', 'cmd', 'pid'], obj=self.opts)
+        self.spin.add_key('numbers', 'n - line numbers',
+                          vals=[False, True], obj=self.opts)
+        self.spin.add_key('others', 'o - less memory detail',
+                          vals=[False, True], obj=self.opts)
+        self.spin.add_key('rise_to_top', 'r - raise new/changed to top',
+                          vals=[False, True], obj=self.opts)
+        self.spin.add_key('sortby', 's - sort by',
+                          vals=['mem', 'cpu', 'name'], obj=self.opts)
+        self.spin.add_key('units', 'u - memory units',
+                          vals=['MB', 'mB', 'KB', 'human'], obj=self.opts)
+        self.spin.add_key('cpu', 'c - show cpu',
+                          vals=[False, True], obj=self.opts)
+        self.spin.add_key('cpu_avg_secs', 'a - cpu moving avg secs',
+                          vals=[5, 10, 20, 45, 90], obj=self.opts)
+        self.spin.add_key('search', '/ - search string',
+                          prompt='Set search string, then Enter', obj=self.opts)
+
+        keys_we_handle =  [ord('K'), curses.KEY_ENTER, 10] + list(self.spin.keys)
+        self.window = Window(head_line=True, keys=keys_we_handle)
         is_first = True
         was_groupby, regroup = self.opts.groupby, True
         for _ in range(1000000000):
             if self.mode == 'help':
+                self.window.set_pick_mode(False)
                 self.help_screen()
                 self.window.render()
                 do_key(self.window.prompt(self.opts.loop_secs))
@@ -1047,6 +1015,7 @@ class PmemStat:
                 self.loop(datetime.now(), is_first=is_first, regroup=regroup)
                 was_groupby, regroup = self.opts.groupby, False
                 regroup = False
+                self.window.set_pick_mode(self.opts.kill_mode)
                 self.window.render()
                 do_key(self.window.prompt(self.opts.loop_secs))
                 while self.opts.kill_mode:
