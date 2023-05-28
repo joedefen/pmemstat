@@ -143,6 +143,7 @@ class ProcMem:
             'item': '',
             }
     clock_tick = None
+    parse_err_cnt = 0
 
     def __init__(self, pid):
         self.pid = pid
@@ -362,7 +363,9 @@ class ProcMem:
             match = self.junk_pat.match(line)
             if match:
                 continue
-            print(f'ERROR: cannot parse "{line}" [{self.smaps_file}:{idx+1}]')
+            if not self.parse_err_cnt:
+                print(f'ERROR: cannot parse "{line}" [{self.smaps_file}:{idx+1}]')
+            self.parse_err_cnt += 1
         if chunk:
             self.chunks.append(chunk)
 
