@@ -114,7 +114,7 @@ class ProcMem:
             + r'\s+kb$'  # kB
             , re.IGNORECASE)
     junk_pat = re.compile(
-            r'^(THPeligible|VmFlags)'
+            r'^(THPeligible|VmFlags|ProtectionKey)'
             , re.IGNORECASE)
     opts = None
     # debug = 0
