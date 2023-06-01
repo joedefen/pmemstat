@@ -24,6 +24,8 @@ Install as you please. At your discretion, the included `deploy` script installs
     cd /tmp; rm -rf pmemstat; git clone https://github.com/joedefen/pmemstat.git
     ./pmemstat/deploy; rm -rf pmemstat
 ```
+Or, from the Releases page, download `pmemstat` (e.g, to `~/.local/bin/.`) and make it executable.
+
 ## Usage
 ```
 usage: pmemstat.py [-h] [-D] [-C] [-g {exe,cmd,pid}] [-f] [-k MIN_DELTA_KB] [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-n] [--run-as-user] [-o] [-u {MB,mB,KB,human}] [-R] [-s {mem,cpu,name}]
