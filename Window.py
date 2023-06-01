@@ -141,7 +141,7 @@ class OptionSpinner:
     def do_key(self, key, win):
         """Do the automated processing of a key."""
         ns = self.key_to_option.get(key, None)
-        if key is None:
+        if ns is None:
             return None
         value = self.get_value(ns.attr)
         if ns.vals:

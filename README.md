@@ -26,9 +26,8 @@ Install as you please. At your discretion, the included `deploy` script installs
 ```
 ## Usage
 ```
-usage: pmemstat [-h] [-D] [-C] [-g {exe,cmd,pid}] [-f] [-k MIN_DELTA_KB] [-l LOOP_SECS]
-                   [-L CMDLEN] [-t TOP_PCT] [-n] [-o] [-u {MB,mB,KB,human}] [-R]
-                   [-s {mem,cpu,name}] [-/ SEARCH] [-W]
+usage: pmemstat.py [-h] [-D] [-C] [-g {exe,cmd,pid}] [-f] [-k MIN_DELTA_KB] [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-n] [--run-as-user] [-o] [-u {MB,mB,KB,human}] [-R] [-s {mem,cpu,name}]
+                   [-/ SEARCH] [-W]
                    [pids ...]
 
 positional arguments:
@@ -50,6 +49,7 @@ options:
   -t TOP_PCT, --top-pct TOP_PCT
                         report group contributing to top pct of ptotal [dflt=100]
   -n, --numbers         show line numbers in report
+  --run-as-user         run as user (NOT as root)
   -o, --others          collapse shSYSV, shOth, stack, text into "other"
   -u {MB,mB,KB,human}, --units {MB,mB,KB,human}
                         units of memory [dflt=MB]
@@ -79,8 +79,7 @@ In the default refreshed window loop, we see
 * a **leader line** with:
     * the current time
     * from `/proc/meminfo` in MB, MemTotal, MemAvailable, and Dirty
-    * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads;
-        * **to see ALL pids, run:** `sudo pmemstat` 
+    * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads (you run as root to see them all, which is the default).
 * a **header line with the reported fields** including:
     * **pswap** - proportional use of swap (per smaps_rollup)
     * **shSYSV** - proprotional use of System V shared memory (per smaps)
@@ -127,7 +126,7 @@ Sometimes, the horizontal line between the header and scrollable region has a re
 * Again, you can press 'f' to fit the document to the screen with a "rollup" line summarizing the lines that would not fit.
 
 # Quirks and Details
-* **pmapstat** shows only the processes you have permission to see; to see all processes, run as *root*.
+* **pmapstat** shows only the processes you have permission to see; to see all processes, run as *root* (which is automatically attempted unless you opt `--run-as-user`).
 * **pswap** seems to be only provided by the `smaps_rollups` file, and thus it may be slightly out of sync with the data gathered by `smaps`.
 * the **ptotal** (from 'smaps') and **pss** (from `smaps_rollups` and usually hidden) seem differ more than expected but they seem to be very close.
 * after the first loop, **pss** is used to initially filter groupings that will not qualify for display (and then **ptotal** is checked.  This means subsequent loops to be very efficient by avoid reading the `smaps`).
