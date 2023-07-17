@@ -19,9 +19,9 @@ Its looping features allow monitoring for changes in memory growth which may be 
 * And several **new options** that can be **controlled dynamically** if in window mode.
 
 ## Installation
-Install as you please. At your discretion, the included `deploy` script installs a single-file `pmemstat` to `~/.local/bin/` if on your PATH (**it requires `pip`**); `deploy` installs `stickytape` if not present, too. This is a way to install/update `pmemstat` w/o leftovers (except `stickytape`):
+Install as you please. At your discretion, the included `deploy` script installs a single-file `pmemstat` to `~/.local/bin/` if on your PATH (**it requires `git` and `pip`**); `deploy` installs `stickytape` if not present, too. This is a way to install/update `pmemstat` w/o leftovers (except `stickytape`):
 ```
-    # NOTE: requires "pip" (e.g., "sudo apt install python3-pip")
+    # NOTE: requires "git" and "pip" (e.g., "sudo apt install git python3-pip")
     cd /tmp; rm -rf pmemstat; git clone https://github.com/joedefen/pmemstat.git
     ./pmemstat/deploy; rm -rf pmemstat
 ```
