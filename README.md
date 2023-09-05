@@ -76,13 +76,14 @@ Explanation of some options and arguments:
 
 
 # Example Usage with Explanation of Output
-![pmemstat example](images/pmemstat_2023-05-15.png)
+![pmemstat example](images/pmemstat_2023-09-05.png)
 
 In the default refreshed window loop, we see
 * a **leader line** with:
     * the current time
     * from `/proc/meminfo` in MB, MemTotal, MemAvailable, and Dirty
-    * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads (you run as root to see them all, which is the default).
+    * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads;
+        * **to see ALL pids, run:** `sudo pmemstat` 
 * a **header line with the reported fields** including:
     * **pswap** - proportional use of swap (per smaps_rollup)
     * **shSYSV** - proprotional use of System V shared memory (per smaps)
@@ -116,8 +117,8 @@ Pressing "K" enter "Kill Mode" where you use the navigation keys to highlight a 
 
 ## Scroll Position (Window Mode)
 
-Sometimes, the horizontal line between the header and scrollable region has a reverse video block:
-![scroll-pos example](images/scroll-pos_2023-05-15.png)
+Sometimes, the horizontal line between the header and scrollable region has a reverse video block (under the "351" in this case):
+![scroll-pos example](images/scroll-pos_2023-09-05.png)
 
 **Notes:**
 * When there is no block, the scrolled document does not overflow the scrollable region.

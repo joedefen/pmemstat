@@ -760,7 +760,7 @@ class PmemStat:
         """one loop thru all pids"""
         # pylint: disable=too-many-branches
 
-        def pr_top_of_report():
+        def pr_top_of_report(appKB):
             nonlocal self, meminfoKB, wanted_prcs, total_pids
             # print timestamp of report
             if not self.window:
@@ -773,6 +773,9 @@ class PmemStat:
 
             leader += f' Mem={human(meminfoKB["MemTotal"]*1024)}'
             leader += f' Avail={human(meminfoKB["MemAvailable"]*1024)}'
+            if appKB:
+                other = meminfoKB["MemTotal"] - meminfoKB["MemAvailable"] - appKB
+                leader += f' Oth={human(other*1024)}'
             leader += f' Dirty={human(meminfoKB["Dirty"]*1024)}'
             leader += f' PIDs: {len(wanted_prcs)}/{total_pids}'
             self.emit(leader, to_head=True, resume=bool(self.window))
@@ -792,7 +795,7 @@ class PmemStat:
         self.prep_new_loop(regroup)
 
         if self.window and (is_first or regroup):
-            pr_top_of_report()
+            pr_top_of_report(appKB=0)
             self.emit('   WORKING .... be patient ;-)', attr=curses.A_REVERSE)
             self.emit('   HINTS:')
             self.emit('     - Type "?" to open Help Screen')
@@ -847,7 +850,7 @@ class PmemStat:
             sys.exit(0)
 
         # print header and  grand totals
-        pr_top_of_report()
+        pr_top_of_report(appKB=grand_summary['ptotal'])
 
         header = ''
         others, exclusions = self.pr_exclusions()
