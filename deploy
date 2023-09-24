@@ -18,7 +18,7 @@ fi
 mkdir -p ${BIN}
 echo OK
 
-which stickytape >/dev/null || python3 -m pip install stickytape --user
+python3 -m pip install stickytape --user
 
 stickytape pmemstat.py --copy-shebang > ${TARGET} && chmod +x ${TARGET} 
 ls -l ${TARGET}
