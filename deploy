@@ -6,19 +6,16 @@
 #   disabled by default, this script forces the install the "old way"
  
 PIP_BREAK_SYSTEM_PACKAGES=1
-BIN=$HOME/.local/bin
-TARGET=${BIN}/pmemstat
+LBIN=$HOME/.local/bin
+UBIN=/usr/bin
+TARGET=${UBIN}/pmemstat
 
 set -xe
 cd "$(dirname "$0")"
-if ! echo $PATH | grep -q -E "(^|:)${BIN}($|:)"; then
-    echo ERROR: ${BIN} not on '$PATH'
-    exit 1
-fi
-mkdir -p ${BIN}
-echo OK
 
 python3 -m pip install stickytape --user
 
-stickytape pmemstat.py --copy-shebang > ${TARGET} && chmod +x ${TARGET} 
+sudo bash -c "rm -f ${UBIN}/pmemstat ${LBIN}/pmemstat"
+stickytape pmemstat.py --copy-shebang > pmemstat
+sudo bash -c "cp ./pmemstat ${TARGET} && chmod +x ${TARGET}"
 ls -l ${TARGET}
