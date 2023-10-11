@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pmemstat"
+version = "2.3.4"
+authors = [
+    {name = "Joe Defen", email = "joedef@gmail.com"},
+]
+description = "Report Proportion Memory on Linux"
+readme = "README.md"
+requires-python = ">=3.8"
+keywords = ["proportional memory"]
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux"
+]
+dependencies = [
+    "requests",
+    'importlib-metadata; python_version<"3.8"',
+]
+
+[project.scripts]
+pmemstat = "pmemstat.pmemstat:run"
+
+[project.urls]
+"Homepage" = "https://github.com/joedef/pmemstat"
+"Bug Tracker" = "https://github.com/joedef/pmemstat/issues"
