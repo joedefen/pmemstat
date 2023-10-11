@@ -28,7 +28,7 @@ Install as you please. At your discretion, the included `deploy` script installs
 
 ## Usage
 ```
-usage: pmemstat.py [-h] [-D] [-C] [-g {exe,cmd,pid}] [-f] [-k MIN_DELTA_KB] [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-n] [--run-as-user] [-o] [-u {MB,mB,KB,human}] [-R] [-s {mem,cpu,name}]
+usage: pmemstat [-h] [-D] [-C] [-g {exe,cmd,pid}] [-f] [-k MIN_DELTA_KB] [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-n] [--run-as-user] [-o] [-u {MB,mB,KB,human}] [-R] [-s {mem,cpu,name}]
                    [-/ SEARCH] [-W]
                    [pids ...]
 
@@ -75,7 +75,7 @@ Explanation of some options and arguments:
 
 
 # Example Usage with Explanation of Output
-![pmemstat example](images/pmemstat_2023-09-05.png)
+![pmemstat example](https://github.com/joedefen/pmemstat/blob/main/images/pmemstat_2023-09-05.png?raw=true)
 
 In the default refreshed window loop, we see
 * a **leader line** with:
@@ -104,7 +104,7 @@ In the default refreshed window loop, we see
 ## Help Screen (in Window Mode, Press '?')
 In window mode, press '?' to enter the help screen which looks like:
 
-![helpscreen example](images/help-screen_2023-05-15.png)
+![helpscreen example](https://github.com/joedefen/pmemstat/blob/main/images/help-screen_2023-05-15.png?raw=true)
 
 **Notes:**
 * There are a number of navigation keys (mostly following vim conventions); in the help screen, they apply to help screen; otherwise, they apply to main screen.
@@ -117,7 +117,7 @@ Pressing "K" enter "Kill Mode" where you use the navigation keys to highlight a 
 ## Scroll Position (Window Mode)
 
 Sometimes, the horizontal line between the header and scrollable region has a reverse video block (under the "351" in this case):
-![scroll-pos example](images/scroll-pos_2023-09-05.png)
+![scroll-pos example](https://github.com/joedefen/pmemstat/blob/main/images/scroll-pos_2023-09-05.png?raw=true)
 
 **Notes:**
 * When there is no block, the scrolled document does not overflow the scrollable region.

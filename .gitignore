@@ -1,2 +1,4 @@
-*/*
-pmemstat
+pmemstat.bundle
+dist/*
+__pycache__/*
+*/__pycache__/*

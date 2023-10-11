@@ -48,8 +48,8 @@ import curses
 from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta
-from Window import Window, OptionSpinner
-from KillThem import KillThem
+from pmemstat.Window import Window, OptionSpinner
+from pmemstat.KillThem import KillThem
 
 
 # Trace Levels:
@@ -1119,8 +1119,8 @@ def main():
                 time.sleep(seconds)
             is_first = False
 
-
-if __name__ == '__main__':
+def run():
+    """Wrap main in try/except."""
     try:
         main()
     except KeyboardInterrupt:
@@ -1129,3 +1129,7 @@ if __name__ == '__main__':
         Window.stop_curses()
         print("exception:", str(exce))
         print(traceback.format_exc())
+
+
+if __name__ == '__main__':
+    run()

@@ -16,6 +16,6 @@ cd "$(dirname "$0")"
 python3 -m pip install stickytape --user
 
 sudo bash -c "rm -f ${UBIN}/pmemstat ${LBIN}/pmemstat"
-stickytape pmemstat.py --copy-shebang > pmemstat
-sudo bash -c "cp ./pmemstat ${TARGET} && chmod +x ${TARGET}"
+stickytape pmemstat/pmemstat.py  --add-python-path . > pmemstat.bundle
+sudo bash -c "cp ./pmemstat.bundle ${TARGET} && chmod +x ${TARGET}"
 ls -l ${TARGET}
