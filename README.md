@@ -34,7 +34,7 @@ Note: `PIP_BREAK_SYSTEM_PACKAGES=1` may be required on some distros.
     # to uninstall: python -m pip uninstall pmemstat
 ```
 ### From GitHub, scripted Install (using sudo to see all processes)
-The included `deploy` script installs a single-file `pmemstat` to `/usr/bin/pmemstat` if on your PATH ; `deploy` installs/reinstalls `stickytape`, too. This is a way to install/update `pmemstat` w/o leftovers (except `stickytape`):
+The included `deploy` script installs a single-file `pmemstat` to `/usr/bin/pmemstat`; `deploy` installs/reinstalls `stickytape`, too. This is a way to install/update `pmemstat` w/o leftovers (except `stickytape`):
 ```
     # NOTE: requires "git" and "python3" to be installed beforehand
     cd /tmp; rm -rf pmemstat; git clone https://github.com/joedefen/pmemstat.git;
