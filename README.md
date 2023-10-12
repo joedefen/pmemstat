@@ -18,13 +18,30 @@ Its looping features allow monitoring for changes in memory growth which may be 
 * Supports **killing processes** that are selected visually with confirmation they are really gone (or not).
 * And several **new options** that can be **controlled dynamically** if in window mode.
 
-## Installation
-Install as you please. At your discretion, the included `deploy` script installs a single-file `pmemstat` to `~/.local/bin/` if on your PATH (**it requires `git` and `python3`**); `deploy` installs/reinstalls `stickytape`, too. This is a way to install/update `pmemstat` w/o leftovers (except `stickytape`):
+## Installation Options
+`pmemstat` needs to run as root to read the memory statistics for all processes.
+If you do a local install (with `--user` or as non-root),
+then it will only show the proportional memory of processes of user.
+### From PyPi as Root (to see all processes)
 ```
-    # NOTE: requires "git" and "python3"
+    PIP_BREAK_SYSTEM_PACKAGES=1 sudo python -m pip install pmemstat
+    # to uninstall: sudo python -m pip uninstall pmemstat
+```
+Note: `PIP_BREAK_SYSTEM_PACKAGES=1` may be required on some distros.
+### From PyPi as Non-Root (to see only user processes)
+```
+    python -m pip install --user pmemstat
+    # to uninstall: python -m pip uninstall pmemstat
+```
+### From GitHub, scripted Install (using sudo to see all processes)
+The included `deploy` script installs a single-file `pmemstat` to `/usr/bin/pmemstat` if on your PATH ; `deploy` installs/reinstalls `stickytape`, too. This is a way to install/update `pmemstat` w/o leftovers (except `stickytape`):
+```
+    # NOTE: requires "git" and "python3" to be installed beforehand
     cd /tmp; rm -rf pmemstat; git clone https://github.com/joedefen/pmemstat.git;
     ./pmemstat/deploy; rm -rf pmemstat
+    # to uninstall run: rm /usr/bin/pmemstat
 ```
+If you manually clone `pmemstat` from GitHub, then you may run its `deploy` from the cloned project to have the same effect; or you may run `pip install .` in its various forms.
 
 ## Usage
 ```

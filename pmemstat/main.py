@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
 Pending Features:
@@ -37,6 +37,7 @@ NOTE: kB is a misnomer ... should be "KB".  Morons.
 # pylint: disable=too-many-instance-attributes,too-many-lines
 # pylint: disable=too-many-arguments
 
+
 import os
 import re
 import sys
@@ -48,9 +49,12 @@ import curses
 from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta
-from pmemstat.Window import Window, OptionSpinner
-from pmemstat.KillThem import KillThem
-
+try:
+    from Window import Window, OptionSpinner
+    from KillThem import KillThem
+except:
+    from pmemstat.Window import Window, OptionSpinner
+    from pmemstat.KillThem import KillThem
 
 # Trace Levels:
 #  0 - forced, temporary debugging (comment it out)
@@ -801,7 +805,7 @@ class PmemStat:
             self.emit('     - Type "?" to open Help Screen')
             self.emit('     - Type "Ctrl-C" to exit program')
             if os.geteuid() != 0:
-                self.emit('     - Run with "sudo" to show all PIDs!',
+                self.emit('     - Install with "sudo" to show all PIDs!',
                           attr=curses.A_BOLD)
 
             self.window.render()
@@ -939,7 +943,7 @@ class PmemStat:
                    to_head=True, attr=curses.A_BOLD)
         self.spin.show_help_nav_keys(self.window)
         if os.geteuid() != 0:
-            self.emit('Hint: restart "sudo" to show all PIDs',
+            self.emit('Hint: install with "sudo" to show all PIDs',
                        attr=curses.A_BOLD)
         self.spin.show_help_body(self.window)
 
@@ -1076,7 +1080,10 @@ def main():
     opts = parser.parse_args()
     # DB(0, f'opts={opts}')
 
-    if not opts.run_as_user and os.geteuid() != 0: # Re-run the script with sudo
+    if (not opts.run_as_user and os.geteuid() != 0
+            and sys.argv[0].startswith('/usr')):
+        # Re-run the script with sudo only if installed in /usr and
+        # needed and opted
         os.execvp('sudo', ['sudo', sys.executable] + sys.argv)
 
 

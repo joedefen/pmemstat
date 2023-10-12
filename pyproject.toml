@@ -1,10 +1,33 @@
+# HOW TO PUBLISH...
+#
+# Prep Work (ensure need modules are up-to-date):
+#   python3 -m pip install --upgrade pip
+#   python3 -m pip install --upgrade build
+#   python3 -m pip install --upgrade twine
+#
+# Build and test (from main directory):
+#   ## BUMP the version 
+#   rm -r dist; python3 -m build
+#   python3 -m twine upload --repository testpypi dist/*
+#     ## Enter __token__ and the saved TOKEN (in bitwarden)
+#   sudo python3 -m pip install --index-url https://test.pypi.org/simple/ --no-deps pmemstat
+#   ## VISIT  https://test.pypi.org/project/pmemstat and delete old versions
+# 
+# Build and deploy (from main directory):
+#   ## BUMP the version 
+#   rm -r dist; python3 -m build
+#   python3 -m twine upload dist/*
+#     ## Enter __token__ and the saved TOKEN (in bitwarden)
+#   sudo python3 -m pip install pmemstat
+#   ## VISIT  https://pypi.org/project/pmemstat and delete old versions
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
+version = "2.3.14"
 name = "pmemstat"
-version = "2.3.4"
 authors = [
     {name = "Joe Defen", email = "joedef@gmail.com"},
 ]
@@ -12,7 +35,7 @@ description = "Report Proportion Memory on Linux"
 readme = "README.md"
 requires-python = ">=3.8"
 keywords = ["proportional memory"]
-license = {text = "MIT"}
+license = "MIT"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -24,7 +47,15 @@ dependencies = [
 ]
 
 [project.scripts]
-pmemstat = "pmemstat.pmemstat:run"
+pmemstat = "pmemstat.main:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pmemstat"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/pmemstat/__pycache__",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/joedef/pmemstat"
