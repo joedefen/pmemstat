@@ -19,35 +19,43 @@ Its looping features allow monitoring for changes in memory growth which may be 
 * And several **new options** that can be **controlled dynamically** if in window mode.
 
 ## Installation Options
-`pmemstat` needs to run as root to read the memory statistics for all processes.
-If you do a local install (with `--user` or as non-root),
-then it will only show the proportional memory of processes of user.
-### From PyPi as Root (to see all processes)
+Note that:
+* `pmemstat` needs to run as root to read the memory statistics for all processes
+  (which is normally desired).
+* By default, `pmemstat` reruns itself as with `sudo` (thus you need `sudo` privileges).
+* To defeat re-running with `sudo`, use the `--run-as-user` or `-U` option.
+
+Choose the best way to install:
+* **From PyPi as non-root**. You need `~/.local/bin` on your `$PATH`.
 ```
-    PIP_BREAK_SYSTEM_PACKAGES=1 sudo python -m pip install pmemstat
-    # to uninstall: sudo python -m pip uninstall pmemstat
+        python -m pip install --user pmemstat
+        # to uninstall: python -m pip uninstall pmemstat
 ```
-Note: `PIP_BREAK_SYSTEM_PACKAGES=1` may be required on some distros.
-### From PyPi as Non-Root (to see only user processes)
+* Or **from PyPi as root**. This makes `pememstat` available to all users
+   with `/usr/local/bin` on `$PATH`. Note: `PIP_BREAK_SYSTEM_PACKAGES=1`
+   may be required on some distros.
 ```
-    python -m pip install --user pmemstat
-    # to uninstall: python -m pip uninstall pmemstat
+        PIP_BREAK_SYSTEM_PACKAGES=1 sudo python -m pip install pmemstat
+        # to uninstall: sudo python -m pip uninstall pmemstat
 ```
-### From GitHub, scripted Install (using sudo to see all processes)
-The included `deploy` script installs a single-file `pmemstat` to `/usr/bin/pmemstat`; `deploy` installs/reinstalls `stickytape`, too. This is a way to install/update `pmemstat` w/o leftovers (except `stickytape`):
+* Or **from GitHub, scripted install**. The included `deploy` script installs
+   a single-file `pmemstat` to `/usr/bin/pmemstat`;
+   `deploy` installs/reinstalls `stickytape`, too.
+   These commands install/update `pmemstat` w/o leftovers (except `stickytape`):
 ```
-    # NOTE: requires "git" and "python3" to be installed beforehand
-    cd /tmp; rm -rf pmemstat; git clone https://github.com/joedefen/pmemstat.git;
-    ./pmemstat/deploy; rm -rf pmemstat
-    # to uninstall run: rm /usr/bin/pmemstat
+        # NOTE: requires "git" to be installed beforehand
+        cd /tmp; rm -rf pmemstat;
+        git clone https://github.com/joedefen/pmemstat.git;
+        ./pmemstat/deploy; rm -rf pmemstat
+        # to uninstall run: sudo rm /usr/bin/pmemstat
 ```
-If you manually clone `pmemstat` from GitHub, then you may run its `deploy` from the cloned project to have the same effect; or you may run `pip install .` in its various forms.
+* Or **from GitHub, manual install**: If you clone `pmemstat` from GitHub, then you may run its `deploy` script OR run "`pip install .`" as root or not OR just directly run `pmemstat/main.py`.
 
 ## Usage
 ```
-usage: pmemstat [-h] [-D] [-C] [-g {exe,cmd,pid}] [-f] [-k MIN_DELTA_KB] [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-n] [--run-as-user] [-o] [-u {MB,mB,KB,human}] [-R] [-s {mem,cpu,name}]
-                   [-/ SEARCH] [-W]
-                   [pids ...]
+usage: pmemstat [-h] [-D] [-C] [-g {exe,cmd,pid}] [-f] [-k MIN_DELTA_KB]
+        [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-n] [-U] [-o]
+        [-u {MB,mB,KB,human}] [-R] [-s {mem,cpu,name}] [-/ SEARCH] [-W] [pids ...]
 
 positional arguments:
   pids                  list of pids/groups (none means every accessible pid)
@@ -68,7 +76,7 @@ options:
   -t TOP_PCT, --top-pct TOP_PCT
                         report group contributing to top pct of ptotal [dflt=100]
   -n, --numbers         show line numbers in report
-  --run-as-user         run as user (NOT as root)
+  -U, --run-as-user     run as user (NOT as root)
   -o, --others          collapse shSYSV, shOth, stack, text into "other"
   -u {MB,mB,KB,human}, --units {MB,mB,KB,human}
                         units of memory [dflt=MB]
@@ -146,10 +154,9 @@ Sometimes, the horizontal line between the header and scrollable region has a re
 * Again, you can press 'f' to fit the document to the screen with a "rollup" line summarizing the lines that would not fit.
 
 # Quirks and Details
-* **pmapstat** shows only the processes you have permission to see; to see all processes, run as *root* (which is automatically attempted unless you opt `--run-as-user`).
 * **pswap** seems to be only provided by the `smaps_rollups` file, and thus it may be slightly out of sync with the data gathered by `smaps`.
-* the **ptotal** (from 'smaps') and **pss** (from `smaps_rollups` and usually hidden) seem differ more than expected but they seem to be very close.
-* after the first loop, **pss** is used to initially filter groupings that will not qualify for display (and then **ptotal** is checked.  This means subsequent loops to be very efficient by avoid reading the `smaps`).
+* the **ptotal** (from 'smaps') and **pss** (from `smaps_rollups` and usually hidden) seem differ more than expected but still close.
+* after the first loop, **pss** is read and only groups with sufficient aggregate change are probed for the details.  Thus, subsequent loops are more efficient by avoiding the reading of `smaps` in many cases (with some loss of accuracy).
 * the "exe" value comes from the command line (based `/proc/{PID}/cmdline` which is a bit funky). Firstly, the leading path is stripped; secondly, if the resulting executable is a script interpreter (e.g., python, perl, bash, ...) AND the first argument seems to be a full path (i.e., starts with "/"), then the "exe" will be represented as "{interpreter}->{basename(script)}".  For example, "python3->pmemstat.py" in the example above.
 
 

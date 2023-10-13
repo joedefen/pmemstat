@@ -15,7 +15,7 @@
 # 
 # Build and deploy (from main directory):
 #   ## BUMP the version 
-#   rm -r dist; python3 -m build
+#   rm -r dist; python3 -m build; ls dist/.
 #   python3 -m twine upload dist/*
 #     ## Enter __token__ and the saved TOKEN (in bitwarden)
 #   sudo python3 -m pip install pmemstat
@@ -26,7 +26,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-version = "2.3.14"
+version = "2.3.15"
 name = "pmemstat"
 authors = [
     {name = "Joe Defen", email = "joedef@gmail.com"},

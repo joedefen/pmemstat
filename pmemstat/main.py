@@ -1061,7 +1061,7 @@ def main():
             help='report group contributing to top pct of ptotal [dflt=100]')
     parser.add_argument('-n', '--numbers', action='store_true',
             help='show line numbers in report')
-    parser.add_argument('--run-as-user', action='store_true',
+    parser.add_argument('-U', '--run-as-user', action='store_true',
             help='run as user (NOT as root)')
     parser.add_argument('-o', '--others', action='store_true',
             help='collapse shSYSV, shOth, stack, text into "other"')
@@ -1080,10 +1080,9 @@ def main():
     opts = parser.parse_args()
     # DB(0, f'opts={opts}')
 
-    if (not opts.run_as_user and os.geteuid() != 0
-            and sys.argv[0].startswith('/usr')):
-        # Re-run the script with sudo only if installed in /usr and
-        # needed and opted
+    if not opts.run_as_user and os.geteuid() != 0:
+        # Re-run the script with sudo needed and opted
+        sys.argv[0] = __file__
         os.execvp('sudo', ['sudo', sys.executable] + sys.argv)
 
 
