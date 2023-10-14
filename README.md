@@ -105,12 +105,15 @@ Explanation of some options and arguments:
 In the default refreshed window loop, we see
 * a **leader line** with:
     * the current time
-    * from `/proc/meminfo` in MB, MemTotal, MemAvailable, and Dirty
-    * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads;
-        * **to see ALL pids, run:** `sudo pmemstat` 
+    * from `/proc/meminfo` in MemTotal (Mem), MemAvailable (Avail), and Dirty.
+    * 'Oth' is the unaccounted for memory belonging to the kernel, reserve,
+       drivers, imprecision, etc.; it is computed from 'Mem'-'Avail'-'ptotal'.
+       Features such as ZFS and zRAM can cause 'Oth' to be significant, but
+       w/o such features, 'Oth' is often below 10% of 'Mem'.
+    * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads
 * a **header line with the reported fields** including:
     * **pswap** - proportional use of swap (per smaps_rollup)
-    * **shSYSV** - proprotional use of System V shared memory (per smaps)
+    * **shSYSV** - proportional use of System V shared memory (per smaps)
     * **shOth** - proportional use of other shared memory (per smaps)
     * **stack** - exclusive use of stack memory per smaps
     * **text** - proportional use of memory for text (i.e., the read-only binary code, per smaps)
