@@ -100,16 +100,41 @@ Explanation of some options and arguments:
 
 
 # Example Usage with Explanation of Output
-![pmemstat example](https://github.com/joedefen/pmemstat/blob/main/images/pmemstat_2023-09-05.png?raw=true)
+```
+13:37:37 Tot=31.3G Avail=21.3G Oth=2.3G Tmp=348.9M Dirty=24.0K PIDs: 195/195
+ cpu_pct   pswap  shSYSV   shOth   stack    text    data  ptotal   key/info (exe by mem)
+    29.5       0       1     301      16   1,300   5,954   7,572 T 197x --TOTALS in MB --
+──────────────────────────────────────────────────────────────────────────────────────────
+     1.8       0       0     154       6     297   2,108   2,566   45x chrome
+     1.6       0       0       3       1      83     632     718   8x code
+     0.2       0       0      14       0      17     599     629   1x java
+     2.6       0       0       5       0     102     410     517   7x Code
+     0.1       0       0      15       0      47     391     453   1x plasmashell
+    17.8       0       0       0       0       1     422     424   1x python->main.py
+     0.5       0       0       6       0      45     200     251   2x app
+     0.0       0       0       0       0      17     200     217   1x DiscoverNotifier
+     0.4       0       0       3       0     100      67     170   6x vripper-electron
+     0.0       0       0       0       0       5     159     165   2x python->lsp_server.py
+     0.4       0       0       1       0      27     121     149   1x kwin_x11
+     0.0       0       0      22       0      52      69     144   3x dolphin
+     1.3       0       0      26       0      19      62     108   1x Xorg
+     0.1       0       0       2       0      47      45      94   1x app.asar
+     0.3       0       0       1       0      53      33      88   4x copyq
+     0.0       0       0       0       0      55      18      73   1x dockerd
+     0.0       0       0       4       0      25      23      52   1x kate
+     2.3       0       0      45       7     309     392     754 O 111x ---- OTHERS ----
+
+```
 
 In the default refreshed window loop, we see
 * a **leader line** with:
     * the current time
-    * from `/proc/meminfo` in MemTotal (Mem), MemAvailable (Avail), and Dirty.
+    * from `/proc/meminfo` in MemTotal (Tot), MemAvailable (Avail), Tmp (Shmem), and Dirty.
     * 'Oth' is the unaccounted for memory belonging to the kernel, reserve,
-       drivers, imprecision, etc.; it is computed from 'Mem'-'Avail'-'ptotal'.
-       Features such as ZFS and zRAM can cause 'Oth' to be significant, but
-       w/o such features, 'Oth' is often below 10% of 'Mem'.
+       drivers, imprecision, etc.; `Oth=Tot-Avail-Tmp-ptotal`.
+       * Features such as BTRFS, ZFS, zRAM, unattached SysV Shared Memory,
+       etc., can cause 'Oth' to be significant.
+       * Determining the contributors can be difficult, but start with `sudo slabtop -sc` and feature specific tools (e.g., `zpool list`).
     * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads
 * a **header line with the reported fields** including:
     * **pswap** - proportional use of swap (per smaps_rollup)

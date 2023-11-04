@@ -742,7 +742,7 @@ class PmemStat:
     def get_meminfo():
         """Get most vital stats from /proc/meminfo'"""
         meminfofile = '/proc/meminfo'
-        meminfoKB = {'MemTotal': 0, 'MemAvailable': 0, 'Dirty':0}
+        meminfoKB = {'MemTotal': 0, 'MemAvailable': 0, 'Dirty':0, 'Shmem':0}
         keys = list(meminfoKB.keys())
 
         with open(meminfofile, encoding='utf-8') as fileh:
@@ -775,11 +775,13 @@ class PmemStat:
                           attr=curses.A_BOLD if self.loop_num % 2 else None)
                 leader = ''
 
-            leader += f' Mem={human(meminfoKB["MemTotal"]*1024)}'
+            leader += f' Tot={human(meminfoKB["MemTotal"]*1024)}'
             leader += f' Avail={human(meminfoKB["MemAvailable"]*1024)}'
             if appKB:
-                other = meminfoKB["MemTotal"] - meminfoKB["MemAvailable"] - appKB
+                other = (meminfoKB["MemTotal"] - appKB
+                         - meminfoKB["MemAvailable"] - meminfoKB["Shmem"])
                 leader += f' Oth={human(other*1024)}'
+            leader += f' Tmp={human(meminfoKB["Shmem"]*1024)}'
             leader += f' Dirty={human(meminfoKB["Dirty"]*1024)}'
             leader += f' PIDs: {len(wanted_prcs)}/{total_pids}'
             self.emit(leader, to_head=True, resume=bool(self.window))
