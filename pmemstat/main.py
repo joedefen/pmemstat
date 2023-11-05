@@ -84,6 +84,8 @@ def DB(level, *opts, **kwargs):
 ##############################################################################
 def human(number):
     """ Return a concise number description."""
+    if number <= 0:
+        return 0
     suffixes = ['K', 'M', 'G', 'T']
     while suffixes:
         suffix = suffixes.pop(0)
