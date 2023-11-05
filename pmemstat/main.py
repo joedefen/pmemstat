@@ -998,7 +998,7 @@ class PmemStat:
                           vals=['exe', 'cmd', 'pid'], obj=self.opts)
         self.spin.add_key('numbers', 'n - line numbers',
                           vals=[False, True], obj=self.opts)
-        self.spin.add_key('others', 'o - less memory detail',
+        self.spin.add_key('others', 'o - less category detail',
                           vals=[False, True], obj=self.opts)
         self.spin.add_key('rise_to_top', 'r - raise new/changed to top',
                           vals=[False, True], obj=self.opts)
@@ -1067,8 +1067,8 @@ def main():
             help='show line numbers in report')
     parser.add_argument('-U', '--run-as-user', action='store_true',
             help='run as user (NOT as root)')
-    parser.add_argument('-o', '--others', action='store_true',
-            help='collapse shSYSV, shOth, stack, text into "other"')
+    parser.add_argument('-o', '--others', action='store_false',
+            help='expand "other" into shSYSV, shOth, stack, text')
     parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'),
             default='MB', help='units of memory [dflt=MB]')
     parser.add_argument('-R', '--no-rise', action='store_false', dest='rise_to_top',

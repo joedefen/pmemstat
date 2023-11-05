@@ -1,3 +1,9 @@
+> **Quick Start**: from the CLI:
+> * `sudo python3 -m pip install pmemstat # to install`
+> * `pmemstat # to run`
+> * `? # within pmemstat, show help screen`
+
+
 # pmemstat - Proportional Memory Status
 
 `pmemstat` shows detailed **proportional** memory use of **Linux** processes by digesting:
@@ -101,28 +107,23 @@ Explanation of some options and arguments:
 
 # Example Usage with Explanation of Output
 ```
-13:37:37 Tot=31.3G Avail=21.3G Oth=2.3G Tmp=348.9M Dirty=24.0K PIDs: 195/195
- cpu_pct   pswap  shSYSV   shOth   stack    text    data  ptotal   key/info (exe by mem)
-    29.5       0       1     301      16   1,300   5,954   7,572 T 197x --TOTALS in MB --
-──────────────────────────────────────────────────────────────────────────────────────────
-     1.8       0       0     154       6     297   2,108   2,566   45x chrome
-     1.6       0       0       3       1      83     632     718   8x code
-     0.2       0       0      14       0      17     599     629   1x java
-     2.6       0       0       5       0     102     410     517   7x Code
-     0.1       0       0      15       0      47     391     453   1x plasmashell
-    17.8       0       0       0       0       1     422     424   1x python->main.py
-     0.5       0       0       6       0      45     200     251   2x app
-     0.0       0       0       0       0      17     200     217   1x DiscoverNotifier
-     0.4       0       0       3       0     100      67     170   6x vripper-electron
-     0.0       0       0       0       0       5     159     165   2x python->lsp_server.py
-     0.4       0       0       1       0      27     121     149   1x kwin_x11
-     0.0       0       0      22       0      52      69     144   3x dolphin
-     1.3       0       0      26       0      19      62     108   1x Xorg
-     0.1       0       0       2       0      47      45      94   1x app.asar
-     0.3       0       0       1       0      53      33      88   4x copyq
-     0.0       0       0       0       0      55      18      73   1x dockerd
-     0.0       0       0       4       0      25      23      52   1x kate
-     2.3       0       0      45       7     309     392     754 O 111x ---- OTHERS ----
+10:38:17 Tot=31.3G Avail=21.8G Oth=2.4G Tmp=326.7M Dirty=1.2M PIDs: 202/202
+ cpu_pct   pswap   other    data  ptotal   key/info (exe by mem)
+    37.9       0   1,670   5,193   6,862 T 202x --TOTALS in MB --
+──────────────────────────────────────────────────────────────────────────────
+     2.1       0     452   1,830   2,282   41x chrome
+    18.5       0       2     827     830   2x python->main.py
+     0.1       0      87     470     557   8x code
+     0.7       0      63     393     456   1x plasmashell
+     0.7       0     106     281     389   7x Code
+     0.2       0      52     176     227   2x app
+     0.0       0      17     200     217   1x DiscoverNotifier
+     0.0       0      80     114     194   1x app.asar
+     0.0       0      94      76     170   3x signal-desktop
+     0.0       0       4     160     165   2x python->lsp_server.py
+     2.9       0      29     101     129   1x kwin_x11
+     0.0       0      94       9     102   2x Signal
+    12.8       0     590     555   1,145 O 131x ---- OTHERS ----
 
 ```
 
@@ -138,10 +139,11 @@ In the default refreshed window loop, we see
     * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads
 * a **header line with the reported fields** including:
     * **pswap** - proportional use of swap (per smaps_rollup)
-    * **shSYSV** - proportional use of System V shared memory (per smaps)
-    * **shOth** - proportional use of other shared memory (per smaps)
-    * **stack** - exclusive use of stack memory per smaps
-    * **text** - proportional use of memory for text (i.e., the read-only binary code, per smaps)
+    * **other** - sums these categories (shown by the key, `o`):
+      * **shSYSV** - proportional use of System V shared memory (per smaps)
+      * **shOth** - proportional use of other shared memory (per smaps)
+      * **stack** - exclusive use of stack memory per smaps
+      * **text** - proportional use of memory for text (i.e., the read-only binary code, per smaps)
     * **data** - exclusive use of memory for data (i.e., exclusively used of "heap" memory, per smaps)
     * **ptotal** - proportional use of memory of all categories (i.e, sum of all columns to the left except **pswap**, per smaps)
     * (sometimes) **pss** - proportional use of memory (per smaps_rollup)
