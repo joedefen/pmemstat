@@ -26,12 +26,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-version = "2.3.18"
+version = "2.3.19"
 name = "pmemstat"
 authors = [
     {name = "Joe Defen", email = "joedef@gmail.com"},
 ]
-description = "Report Proportion Memory on Linux"
+description = "Report Proportional Memory on Linux"
 readme = "README.md"
 requires-python = ">=3.8"
 keywords = ["proportional memory"]
@@ -58,5 +58,5 @@ exclude = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/joedef/pmemstat"
-"Bug Tracker" = "https://github.com/joedef/pmemstat/issues"
+"Homepage" = "https://github.com/joedefen/pmemstat"
+"Bug Tracker" = "https://github.com/joedefen/pmemstat/issues"
