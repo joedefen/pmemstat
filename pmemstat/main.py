@@ -160,9 +160,6 @@ class ProcMem:
         self.whynot = None # populate me with why unwanted
         self.smaps_file = f'/proc/{self.pid}/smaps'
         self.rollup_file = f'/proc/{self.pid}/smaps_rollup'
-        self.rollup_lines = []
-        self.smaps_lines = []
-        self.chunks = []
         self.cpu = None
         self.exebasename = None, None
         self.key, self.cmdline, self.cmdline_trunc = None, None, None
@@ -299,49 +296,49 @@ class ProcMem:
 
     def get_rollup_lines(self):
         """Get the lines of the 'smaps_rollup' file for this PID"""
-        self.rollup_lines = []
+        rollup_lines = []
         try:
-            self.rollup_lines = self.read_lines(self.rollup_file)
+            rollup_lines = self.read_lines(self.rollup_file)
         except Exception as exc:
-            self.rollup_lines = []
+            rollup_lines = []
             if DebugLevel:
                 DB(1, f'skip pid={self.pid} no-rollup-lines exc={type(exc).__name__}')
 
-        if not self.rollup_lines:
+        if not rollup_lines:
             self.wanted = False
             self.whynot = 'CannotReadRollups'
         elif DebugLevel:
-            DB(3, f'pid={self.pid} {self.exebasename} #rollup_lines={len(self.rollup_lines)}')
+            DB(3, f'pid={self.pid} {self.exebasename} #rollup_lines={len(rollup_lines)}')
 
-        return bool(self.rollup_lines)
+        return rollup_lines
 
     def get_smaps_lines(self):
         """Get the lines of the 'smaps' file for this PID"""
-        self.smaps_lines = []
+        smaps_lines = []
         try:
-            self.smaps_lines = self.read_lines(self.smaps_file)
+            smaps_lines = self.read_lines(self.smaps_file)
         except Exception as exc:
-            self.smaps_lines = []
+            smaps_lines = []
             if DebugLevel:
                 DB(1, f'skip pid={self.pid} no-smap-lines exc={type(exc).__name__}')
 
-        if not self.smaps_lines:
+        if not smaps_lines:
             self.wanted = False
             self.whynot = 'CannotReadSmaps'
         else:
             if DebugLevel:
-                DB(1, f'pid={self.pid} {self.exebasename} #smaps_lines={len(self.smaps_lines)}')
-        return bool(self.smaps_lines)
+                DB(1, f'pid={self.pid} {self.exebasename} #smaps_lines={len(smaps_lines)}')
+        return smaps_lines
 
     def make_chunks(self, lines):
         """ Parse the already smaps read lines."""
-        self.chunks = []
+        chunks = []
         chunk = None
         for idx, line in enumerate(lines):
             match = self.section_pat.match(line)
             if match:
                 if chunk:
-                    self.chunks.append(chunk)
+                    chunks.append(chunk)
                 chunk = SimpleNamespace(**ProcMem.chunk_dict)
                 chunk.beg = int(match.group(1), 16)
                 chunk.end = int(match.group(2), 16)
@@ -373,7 +370,8 @@ class ProcMem:
                 print(f'ERROR: cannot parse "{line}" [{self.smaps_file}:{idx+1}]')
             self.parse_err_cnt += 1
         if chunk:
-            self.chunks.append(chunk)
+            chunks.append(chunk)
+        return chunks
 
     @staticmethod
     def make_summary_dict(pid=0, info=''):
@@ -419,9 +417,9 @@ class ProcMem:
         summary['pss'] = summary['ptotal'] # for consistency
         return summary
 
-    def categorize_chunks(self):
+    def categorize_chunks(self, chunks):
         """ Analyze the chunks to categorize the memory """
-        for idx, chunk in enumerate(self.chunks):
+        for idx, chunk in enumerate(chunks):
             chunk.eSize = chunk.size
             if chunk.cat: # if already done, don't do again
                 continue
@@ -437,14 +435,14 @@ class ProcMem:
             elif chunk.item and '[stack]' in chunk.item:
                 chunk.cat = 'stack'
                 chunk.eSize = chunk.private
-            elif (chunk.size == 4 and idx < len(self.chunks) - 1
+            elif (chunk.size == 4 and idx < len(chunks) - 1
                     and chunk.offset == chunk.beg and not chunk.item
                     and '---p' in chunk.perms):
                     # stack seems to be 4K unwriteable immediately followed
                     # by something very huge like 10240 or 10236.
                     # The size is bogus ... replace the 'Size' with
                     # the 'Private' plus swapped
-                nchunk = self.chunks[idx+1]
+                nchunk = chunks[idx+1]
                 if (chunk.end == nchunk.end
                         and 'w' in nchunk.perms
                         and not nchunk.item
@@ -466,14 +464,14 @@ class ProcMem:
                     chunk.cat = 'text'
                     chunk.eSize = chunk.pss + chunk.swap
         if DebugLevel:
-            for chunk in self.chunks:
+            for chunk in chunks:
                 DB(6, '{self.pid} {self.exebasename} CHUNK:', chunk)
 
-    def summarize_chunks(self):
+    def summarize_chunks(self, chunks):
         """ Accumulate the chunks into the summary of memory use for the PID """
         summary = self.make_summary_dict(self.pid)
 
-        for chunk in self.chunks:
+        for chunk in chunks:
             if DebugLevel:
                 DB(5, f'{self.pid} {self.exebasename} BLK: {chunk.cat} eSize={chunk.eSize}'
                     + f' size={chunk.size} {chunk.perms} {chunk.item}')
@@ -491,13 +489,14 @@ class ProcMem:
             self.get_cmdline()
             if not self.cmdline:
                 return
+        rollup_lines = []
         if not self.whynot:
-            self.get_rollup_lines()
+            rollup_lines = self.get_rollup_lines()
         if self.whynot:
             DB(4, f'pid={self.pid} {self.exebasename} whynot={self.whynot}')
             return
         self.is_changed = False
-        rollup_summary = self.parse_rollups(self.rollup_lines)
+        rollup_summary = self.parse_rollups(rollup_lines)
         if self.opts.cpu:
             self.refresh_cpu()
             rollup_summary['cpu_pct'] = self.cpu.percent
@@ -657,13 +656,13 @@ class PmemStat:
                     else f'{prc.cmdline_trunc}' if self.opts.groupby == 'cmd'
                     else f'{prc.pid} {prc.cmdline_trunc}')
             if do_smaps:
-                prc.get_smaps_lines()
+                smaps_lines = prc.get_smaps_lines()
                 if prc.whynot:
                     group.prcset.remove(prc)
                     continue
-                prc.make_chunks(prc.smaps_lines)
-                prc.categorize_chunks()
-                summary = prc.summarize_chunks()
+                chunks = prc.make_chunks(smaps_lines)
+                prc.categorize_chunks(chunks)
+                summary = prc.summarize_chunks(chunks)
                 self.add_to_summary(summary, group.summary)
         group.summary['pss'] = group.rollup_summary['ptotal']
         group.summary['pswap'] = group.rollup_summary['pswap']
