@@ -62,6 +62,8 @@ except:
 
 DebugLevel = 0
 
+read_smaps = 0
+
 def DB(level, *opts, **kwargs):
     """Debug message printer.
     - printing is conditional on DebugLevel being no smaller than the passed level
@@ -568,7 +570,7 @@ class PmemStat:
                     is_new=True,
                     alive=False,
                     whynot=None,
-                    changed=False,
+                    is_changed=False,
                     o_prcset=set(),
                     prcset=set(),
                     o_rollup_summary=None,
@@ -650,12 +652,16 @@ class PmemStat:
                     group, group.rollup_summary, group.o_rollup_summary)
         else:
             do_smaps = True
+        if self.opts.others:
+            do_smaps = False
 
         for prc in list(group.prcset):
             group.summary['info'] = (f'{prc.exebasename}' if self.opts.groupby == 'exe'
                     else f'{prc.cmdline_trunc}' if self.opts.groupby == 'cmd'
                     else f'{prc.pid} {prc.cmdline_trunc}')
             if do_smaps:
+                global read_smaps
+                read_smaps += 1
                 smaps_lines = prc.get_smaps_lines()
                 if prc.whynot:
                     group.prcset.remove(prc)
@@ -664,6 +670,8 @@ class PmemStat:
                 prc.categorize_chunks(chunks)
                 summary = prc.summarize_chunks(chunks)
                 self.add_to_summary(summary, group.summary)
+        if self.opts.others:
+            self.add_to_summary(group.rollup_summary, group.summary)
         group.summary['pss'] = group.rollup_summary['ptotal']
         group.summary['pswap'] = group.rollup_summary['pswap']
         group.summary['cpu_pct'] = group.rollup_summary['cpu_pct']
@@ -671,6 +679,9 @@ class PmemStat:
         if not group.prcset:
             group.alive = False
             do_smaps = False
+
+        if self.opts.others:
+            return
         if not do_smaps:
             group.summary = group.o_summary
             if group.summary and group.rollup_summary:
@@ -784,7 +795,7 @@ class PmemStat:
                 leader += f' Oth={human(other*1024)}'
             leader += f' Tmp={human(meminfoKB["Shmem"]*1024)}'
             leader += f' Dirty={human(meminfoKB["Dirty"]*1024)}'
-            leader += f' PIDs: {len(wanted_prcs)}/{total_pids}'
+            leader += f' PIDs: {len(wanted_prcs)}/{total_pids} {read_smaps}'
             self.emit(leader, to_head=True, resume=bool(self.window))
             if self.opts.search:
                 self.emit(' /', to_head=True, resume=True)
@@ -1016,6 +1027,7 @@ class PmemStat:
         self.window = Window(head_line=True, keys=keys_we_handle)
         is_first = True
         was_groupby, regroup = self.opts.groupby, True
+        was_others = self.opts.others
         for _ in range(1000000000):
             if self.mode == 'help':
                 self.window.set_pick_mode(False)
@@ -1025,8 +1037,10 @@ class PmemStat:
                 self.window.clear()
             elif self.mode == 'normal':
                 regroup = bool(was_groupby != self.opts.groupby)
+                if not regroup:
+                    regroup = bool(was_others != self.opts.others)
                 self.loop(datetime.now(), is_first=is_first, regroup=regroup)
-                was_groupby, regroup = self.opts.groupby, False
+                was_groupby, was_others, regroup = self.opts.groupby, self.opts.others, False
                 regroup = False
                 self.window.set_pick_mode(self.opts.kill_mode)
                 self.window.render()

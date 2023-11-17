@@ -10,9 +10,9 @@
 * `/proc/{PID}/smaps`
 * `/proc/{PID}/smaps_rollup`
 
-Computing proportional memory avoids overstating memory use as most programs do (e.g., `top`). Specifically, proportional memory splits the cost of common memory to the processes sharing it (rather than counting common memory multiple times). And, it does not include uninstantiated virtual memory. 
+Computing proportional memory avoids overstating memory use as many programs do (e.g., `top`). Specifically, proportional memory splits the cost of common memory to the processes sharing it (rather than counting common memory multiple times). And, it does not include uninstantiated virtual memory. 
 
- Digging out the proportional memory numbers is comparatively hard and slow; thus, `pmemstat` may take a few seconds to start, but, in its loop mode, refreshes are relatively fast and efficient by avoiding recomputing unchanged numbers.
+Without `-o`, `pmemstat` show less details and is much faster and sometimes less accurate (e.g., it will not report classes of memory such as SysV shared memory which often are not present). With `-o` providing full detail, digging out the numbers is slower; thus, `pmemstat -o` may take a few seconds to start, but, in its loop mode, refreshes are relatively fast and efficient by avoiding recomputing unchanged numbers. When in it window mode, typing `o` toggles low/high detail.
 
 `pmemstat`'s grouping feature rolls up the resources of multiple processes of a feature (e.g., a browser) to make the total impact much more apparent.
 
@@ -139,7 +139,7 @@ In the default refreshed window loop, we see
     * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads
 * a **header line with the reported fields** including:
     * **pswap** - proportional use of swap (per smaps_rollup)
-    * **other** - sums these categories (shown by the key, `o`):
+    * **other** - partly sums these categories (shown by the key, `o`):
       * **shSYSV** - proportional use of System V shared memory (per smaps)
       * **shOth** - proportional use of other shared memory (per smaps)
       * **stack** - exclusive use of stack memory per smaps
