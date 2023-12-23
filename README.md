@@ -1,5 +1,7 @@
 > **Quick Start**: from the CLI:
-> * `sudo python3 -m pip install pmemstat # to install`
+> * `python3 -m pip install --user pipx # if pipx not installed`
+> * `python3 -m pipx ensurepath # if needed (restart terminal)`
+> * `pipx upgrade pmemstat || pipx install pmemstat # to install/upgrade`
 > * `pmemstat # to run`
 > * `? # within pmemstat, show help screen`
 
@@ -12,11 +14,11 @@
 
 Computing proportional memory avoids overstating memory use as many programs do (e.g., `top`). Specifically, proportional memory splits the cost of common memory to the processes sharing it (rather than counting common memory multiple times). And, it does not include uninstantiated virtual memory. 
 
-Without `-o`, `pmemstat` show less details and is much faster and sometimes less accurate (e.g., it will not report classes of memory such as SysV shared memory which often are not present). With `-o` providing full detail, digging out the numbers is slower; thus, `pmemstat -o` may take a few seconds to start, but, in its loop mode, refreshes are relatively fast and efficient by avoiding recomputing unchanged numbers. When in it window mode, typing `o` toggles low/high detail.
+Without `-o`, `pmemstat` show less details and is much faster and sometimes less accurate (e.g., it will not report classes of memory such as SysV shared memory which are often are not present anyhow). With `-o` providing full detail, digging out the numbers is slower; thus, `pmemstat -o` may take a few seconds to start, but, in its loop mode, refreshes are relatively fast and efficient by avoiding recomputing unchanged numbers. When in its window mode, typing `o` toggles low/high detail.
 
-`pmemstat`'s grouping feature rolls up the resources of multiple processes of a feature (e.g., a browser) to make the total impact much more apparent.
+`pmemstat`'s grouping feature rolls up the resources of multiple processes of a feature (e.g., a browser) to make the total memory/cpu impact much more apparent.
 
-Its looping features allow monitoring for changes in memory growth which may be "leaks".  Its precision numbers and segregating memory by types makes identifying leaks faster and more certain.
+Its looping features allow monitoring for changes in memory growth which may be "leaks".  Segregating memory by types can make identifying leaks faster and more certain.
 
 **In version 2.0, `pmemstat` has many new features including**:
 * In its **window mode**, `pmemstat` updates the terminal in place (using "curses") rather than scrolling.
@@ -31,31 +33,8 @@ Note that:
 * By default, `pmemstat` reruns itself as with `sudo` (thus you need `sudo` privileges).
 * To defeat re-running with `sudo`, use the `--run-as-user` or `-U` option.
 
-Choose the best way to install:
-* **From PyPi as non-root**. You need `~/.local/bin` on your `$PATH`.
-```
-        python -m pip install --user pmemstat
-        # to uninstall: python -m pip uninstall pmemstat
-```
-* Or **from PyPi as root**. This makes `pememstat` available to all users
-   with `/usr/local/bin` on `$PATH`. Note: `PIP_BREAK_SYSTEM_PACKAGES=1`
-   may be required on some distros.
-```
-        PIP_BREAK_SYSTEM_PACKAGES=1 sudo python -m pip install pmemstat
-        # to uninstall: sudo python -m pip uninstall pmemstat
-```
-* Or **from GitHub, scripted install**. The included `deploy` script installs
-   a single-file `pmemstat` to `/usr/bin/pmemstat`;
-   `deploy` installs/reinstalls `stickytape`, too.
-   These commands install/update `pmemstat` w/o leftovers (except `stickytape`):
-```
-        # NOTE: requires "git" to be installed beforehand
-        cd /tmp; rm -rf pmemstat;
-        git clone https://github.com/joedefen/pmemstat.git;
-        ./pmemstat/deploy; rm -rf pmemstat
-        # to uninstall run: sudo rm /usr/bin/pmemstat
-```
-* Or **from GitHub, manual install**: If you clone `pmemstat` from GitHub, then you may run its `deploy` script OR run "`pip install .`" as root or not OR just directly run `pmemstat/main.py`.
+See the Quick Start at the top for preferred install instructions using `pipx`. If not acceptable, see the "Alternative Installation Options" section below.
+
 
 ## Usage
 ```
@@ -105,7 +84,7 @@ Explanation of some options and arguments:
 * `pids` - the positional arguments may be pids (i.e., numbers) or the names of executables (as shown by `-gexe`) 
 
 
-# Example Usage with Explanation of Output
+## Example Usage with Explanation of Output
 ```
 10:38:17 Tot=31.3G Avail=21.8G Oth=2.4G Tmp=326.7M Dirty=1.2M PIDs: 202/202
  cpu_pct   pswap   other    data  ptotal   key/info (exe by mem)
@@ -183,14 +162,14 @@ Sometimes, the horizontal line between the header and scrollable region has a re
 * Its length indicates, roughly, how much of the entire document you can see.
 * Again, you can press 'f' to fit the document to the screen with a "rollup" line summarizing the lines that would not fit.
 
-# Quirks and Details
+## Quirks and Details
 * **pswap** seems to be only provided by the `smaps_rollups` file, and thus it may be slightly out of sync with the data gathered by `smaps`.
 * the **ptotal** (from 'smaps') and **pss** (from `smaps_rollups` and usually hidden) seem differ more than expected but still close.
 * after the first loop, **pss** is read and only groups with sufficient aggregate change are probed for the details.  Thus, subsequent loops are more efficient by avoiding the reading of `smaps` in many cases (with some loss of accuracy).
 * the "exe" value comes from the command line (based `/proc/{PID}/cmdline` which is a bit funky). Firstly, the leading path is stripped; secondly, if the resulting executable is a script interpreter (e.g., python, perl, bash, ...) AND the first argument seems to be a full path (i.e., starts with "/"), then the "exe" will be represented as "{interpreter}->{basename(script)}".  For example, "python3->pmemstat.py" in the example above.
 
 
-# Test Program and Test Suggestions
+## Test Program and Test Suggestions
 The C program, `memtest.c` is included and can be compiled by running `cc memtest.c -o memtest`.  This program:
 * regularly allocates more memory of all types
 * can be run several times simultaneously,
@@ -199,3 +178,30 @@ The C program, `memtest.c` is included and can be compiled by running `cc memtes
 When running `pmemstat` to monitor its memory use and changes, you should use `-uKB` and `-k{small-number}` so that you can "see" the very modest memory use of the test program and its changes.
 
 Running a number of sleeps of various durations in the background in a loop, plus one foreground sleep, can make for a robustness tests with lots of processes coming and going.  There are many "races" (i.e., a process may appear in `/proc`, but its`smaps` is gone), and this test helps ensure the races are handled properly.
+
+## Alternative Installation Options
+If the `pipx` install is not acceptable, choose the best way to install:
+* **From PyPi as non-root**. You need `~/.local/bin` on your `$PATH`.
+```
+        python -m pip install --user pmemstat
+        # to uninstall: python -m pip uninstall pmemstat
+```
+* Or **from PyPi as root**. This makes `pememstat` available to all users
+   with `/usr/local/bin` on `$PATH`. Note: `PIP_BREAK_SYSTEM_PACKAGES=1`
+   may be required on some distros.
+```
+        PIP_BREAK_SYSTEM_PACKAGES=1 sudo python -m pip install pmemstat
+        # to uninstall: sudo python -m pip uninstall pmemstat
+```
+* Or **from GitHub, scripted install**. The included `deploy` script installs
+   a single-file `pmemstat` to `/usr/bin/pmemstat`;
+   `deploy` installs/reinstalls `stickytape`, too.
+   These commands install/update `pmemstat` w/o leftovers (except `stickytape`):
+```
+        # NOTE: requires "git" to be installed beforehand
+        cd /tmp; rm -rf pmemstat;
+        git clone https://github.com/joedefen/pmemstat.git;
+        ./pmemstat/deploy; rm -rf pmemstat
+        # to uninstall run: sudo rm /usr/bin/pmemstat
+```
+* Or **from GitHub, manual install**: If you clone `pmemstat` from GitHub, then you may run its `deploy` script OR run "`pip install .`" as root or not OR just directly run `pmemstat/main.py`.

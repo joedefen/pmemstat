@@ -1,9 +1,13 @@
 # HOW TO PUBLISH...
 #
 # Prep Work (ensure need modules are up-to-date):
-#   python3 -m pip install --upgrade pip
-#   python3 -m pip install --upgrade build
-#   python3 -m pip install --upgrade twine
+#   sudo pacman -Syu python-pip
+#   sudo pacman -Syu python-build
+#   sudo pacman -Syu python-twine
+#   -- antiquated way
+#      python3 -m pip install --upgrade pip
+#      python3 -m pip install --upgrade build
+#      python3 -m pip install --upgrade twine
 #
 # Build and test (from project directory):
 #   ## BUMP the version (below in [project])
@@ -26,7 +30,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-version = "2.3.20"
+version = "2.3.21"
 name = "pmemstat"
 authors = [
     {name = "Joe Defen", email = "joedef@gmail.com"},
