@@ -1,9 +1,13 @@
-> **Quick Start**: from the CLI:
-> * `python3 -m pip install --user pipx # if pipx not installed`
-> * `python3 -m pipx ensurepath # if needed (restart terminal)`
-> * `pipx upgrade pmemstat || pipx install pmemstat # to install/upgrade`
-> * `pmemstat # to run`
-> * `? # within pmemstat, show help screen`
+> **Quick Start**: from the CLI
+> * **If `python3 -V` shows v3.11 or later, install using `pipx`**:
+>   * `python3 -m pip install --user pipx # if pipx not installed`
+>   * `python3 -m pipx ensurepath # if needed (restart terminal)`
+>   * `pipx upgrade pmemstat || pipx install pmemstat # to install/upgrade`
+> * **Else for python3.10 and lesser versions, install using `pip`**:
+>   * `python3 -m pip install --user --upgrade pmemstat`
+> * **To run**:
+>   * `pmemstat # to run`
+>   * Type "?" within pmemstat, show help screen.
 
 
 # pmemstat - Proportional Memory Status
@@ -14,7 +18,7 @@
 
 Computing proportional memory avoids overstating memory use as many programs do (e.g., `top`). Specifically, proportional memory splits the cost of common memory to the processes sharing it (rather than counting common memory multiple times). And, it does not include uninstantiated virtual memory. 
 
-Without `-o`, `pmemstat` show less details and is much faster and sometimes less accurate (e.g., it will not report classes of memory such as SysV shared memory which are often are not present anyhow). With `-o` providing full detail, digging out the numbers is slower; thus, `pmemstat -o` may take a few seconds to start, but, in its loop mode, refreshes are relatively fast and efficient by avoiding recomputing unchanged numbers. When in its window mode, typing `o` toggles low/high detail.
+Without `-o`, `pmemstat` shows less details and is much faster and sometimes less accurate (e.g., it will not report classes of memory such as SysV shared memory which are often are not present anyhow). With `-o` providing full detail, digging out the numbers is slower; thus, `pmemstat -o` may take a few seconds to start, but, in its loop mode, refreshes are relatively fast and efficient by avoiding recomputing unchanged numbers. When in its window mode, typing `o` toggles low/high detail.
 
 `pmemstat`'s grouping feature rolls up the resources of multiple processes of a feature (e.g., a browser) to make the total memory/cpu impact much more apparent.
 
@@ -28,8 +32,7 @@ Its looping features allow monitoring for changes in memory growth which may be 
 
 ## Installation Options
 Note that:
-* `pmemstat` needs to run as root to read the memory statistics for all processes
-  (which is normally desired).
+* `pmemstat` needs to run as root to read the memory statistics for all processes (which is normally desired).
 * By default, `pmemstat` reruns itself as with `sudo` (thus you need `sudo` privileges).
 * To defeat re-running with `sudo`, use the `--run-as-user` or `-U` option.
 
@@ -109,11 +112,10 @@ Explanation of some options and arguments:
 In the default refreshed window loop, we see
 * a **leader line** with:
     * the current time
-    * from `/proc/meminfo` in MemTotal (Tot), MemAvailable (Avail), Tmp (Shmem), and Dirty.
+    * from `/proc/meminfo` in MemTotal (Tot), MemAvailable (Avail), Tmp (Shmem+TmpFS), and Dirty.
     * 'Oth' is the unaccounted for memory belonging to the kernel, reserve,
-       drivers, imprecision, etc.; `Oth=Tot-Avail-Tmp-ptotal`.
-       * Features such as BTRFS, ZFS, zRAM, unattached SysV Shared Memory,
-       etc., can cause 'Oth' to be significant.
+       drivers, imprecision, etc.; `Oth = Tot - Avail - Tmp - ptotal`.
+       * Features such as BTRFS, ZFS, zRAM, unattached SysV Shared Memory, etc., can cause 'Oth' to be significant.
        * Determining the contributors can be difficult, but start with `sudo slabtop -sc` and feature specific tools (e.g., `zpool list`).
     * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads
 * a **header line with the reported fields** including:

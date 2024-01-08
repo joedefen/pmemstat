@@ -8,29 +8,30 @@
 #      python3 -m pip install --upgrade pip
 #      python3 -m pip install --upgrade build
 #      python3 -m pip install --upgrade twine
+# 
+# PUBLIC Build and deploy (from project directory):
+#   ## BUMP the version (below in [project])
+#   rm -r dist; python3 -m build; ls dist/.
+#   python3 -m twine upload dist/*
+#     ## Enter __token__ and the saved TOKEN (in bitwarden)
+#   pipx upgrade pmemstat || pipx install pmemstat # >= python3.11
+#   --OR-- sudo python3 -m pip install pmemstat # <= python3.10
+#   ## VISIT  https://pypi.org/project/pmemstat and delete old versions
 #
-# Build and test (from project directory):
+# TEST Build and test (from project directory):
 #   ## BUMP the version (below in [project])
 #   rm -r dist; python3 -m build
 #   python3 -m twine upload --repository testpypi dist/*
 #     ## Enter __token__ and the saved TOKEN (in bitwarden)
 #   sudo python3 -m pip install --index-url https://test.pypi.org/simple/ --no-deps pmemstat
 #   ## VISIT  https://test.pypi.org/project/pmemstat and delete old versions
-# 
-# Build and deploy (from project directory):
-#   ## BUMP the version (below in [project])
-#   rm -r dist; python3 -m build; ls dist/.
-#   python3 -m twine upload dist/*
-#     ## Enter __token__ and the saved TOKEN (in bitwarden)
-#   sudo python3 -m pip install pmemstat
-#   ## VISIT  https://pypi.org/project/pmemstat and delete old versions
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-version = "2.3.21"
+version = "2.3.22"
 name = "pmemstat"
 authors = [
     {name = "Joe Defen", email = "joedef@gmail.com"},
