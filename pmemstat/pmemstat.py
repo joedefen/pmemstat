@@ -35,7 +35,8 @@ NOTE: kB is a misnomer ... should be "KB".  Morons.
 # pylint: disable=broad-except,import-outside-toplevel,global-statement
 # pylint: disable=too-many-boolean-expressions,invalid-name
 # pylint: disable=too-many-instance-attributes,too-many-lines
-# pylint: disable=too-many-arguments
+# pylint: disable=too-many-arguments,too-many-branches
+# pylint: disable=too-many-statements,too-many-locals
 
 
 import os
@@ -43,7 +44,6 @@ import re
 import sys
 import traceback
 import time
-import subprocess
 import curses
 # from curses.textpad import rectangle
 from types import SimpleNamespace
@@ -52,9 +52,11 @@ from datetime import datetime, timedelta
 try:
     from Window import Window, OptionSpinner
     from KillThem import KillThem
-except:
+    from CpuSmooth import CpuSmooth
+except Exception:
     from pmemstat.Window import Window, OptionSpinner
     from pmemstat.KillThem import KillThem
+    from pmemstat.CpuSmooth import CpuSmooth
 
 # Trace Levels:
 #  0 - forced, temporary debugging (comment it out)
@@ -94,6 +96,7 @@ def human(number):
         number /= 1024
         if number < 999.95 or not suffixes:
             return f'{number:.1f}{suffix}'
+    return '' # impossible, but make pylint happy
 
 ######
 ####################################################################################
@@ -168,56 +171,9 @@ class ProcMem:
 
     def refresh_cpu(self):
         """Get the Cpu Number for the PID (if possible)"""
-        def init_cpu(error=False):
-            return SimpleNamespace(error=error, fh=None,
-                percent=0, hists=[])
-
-        if ProcMem.clock_tick is None:
-            try:
-                ProcMem.clock_tick = 0
-                rv = subprocess.run(['getconf', 'CLK_TCK'],
-                            capture_output=True, text=True, check=True)
-                ProcMem.clock_tick = int(rv.stdout.strip())
-            except Exception:
-                pass
-            if self.clock_tick <= 0:
-                ProcMem.clock_tick = 100
-
         if not self.cpu:
-            self.cpu = init_cpu()
-            try:
-                # pylint: disable=consider-using-with
-                self.cpu.fh = open(f'/proc/{self.pid}/stat', encoding='utf-8')
-            except (PermissionError, FileNotFoundError):
-                self.cpu = init_cpu(error=True)
-                return
-        if self.cpu.error:
-            return
-        try:
-            self.cpu.fh.seek(0)
-            data = self.cpu.fh.read().split()
-            user, system = int(data[13]), int(data[14])
-        except Exception:
-            self.cpu = init_cpu(error=True)
-            return
-        ticks = user + system
-        mono = time.monotonic()
-
-        if self.cpu.hists: # initialized
-            self.cpu.hists.append((ticks, mono))
-            floor_mono = mono - ProcMem.opts.cpu_avg_secs
-            while len(self.cpu.hists) > 1 and self.cpu.hists[0][1] < floor_mono:
-                self.cpu.hists.pop(0)
-            delta_ticks = ticks - self.cpu.hists[0][0]
-            delta_time = mono - self.cpu.hists[0][1]
-            self.cpu.percent = 0
-            if delta_time > 0 and delta_ticks >= 0:
-                self.cpu.percent = round(100
-                    * delta_ticks / ProcMem.clock_tick / delta_time, 8)
-            # print(f'{self.cpu.percent}%')
-
-        else:
-            self.cpu.hists.append((ticks, mono))
+            self.cpu = CpuSmooth(self.pid, avg_secs= ProcMem.opts.cpu_avg_secs)
+        self.cpu.refresh_cpu() # sets self.cpu.percent
 
     def get_cmdline(self):
         """Get the command line of the PID."""
