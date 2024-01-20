@@ -52,11 +52,11 @@ from datetime import datetime, timedelta
 try:
     from Window import Window, OptionSpinner
     from KillThem import KillThem
-    from CpuSmooth import CpuSmooth
+    from CpuSmooth import CpuSmooth, SysStat
 except Exception:
     from pmemstat.Window import Window, OptionSpinner
     from pmemstat.KillThem import KillThem
-    from pmemstat.CpuSmooth import CpuSmooth
+    from pmemstat.CpuSmooth import CpuSmooth, SysStat
 
 # Trace Levels:
 #  0 - forced, temporary debugging (comment it out)
@@ -456,7 +456,6 @@ class ProcMem:
         self.is_changed = False
         rollup_summary = self.parse_rollups(rollup_lines)
         if self.opts.cpu:
-            self.refresh_cpu()
             rollup_summary['cpu_pct'] = self.cpu.percent
         group = self.pmemstat.get_group(self.key)
         if not group.alive:
@@ -787,6 +786,8 @@ class PmemStat:
                 if entry.name.isdigit():
                     allpids.append(entry.name)
 
+
+        prcs = []
         for pid in allpids:
             ## print(f'DBDB pid={pid} self.opts.pids={opts.pids}')
             prc = self.prcs.get(pid, None)
@@ -795,6 +796,15 @@ class PmemStat:
                 self.prcs[pid] = prc
             else:
                 prc.is_new = False
+            prcs.append(prc)
+
+        # do cpu together that stats are consistent
+        if self.opts.cpu:
+            SysStat.refresh()
+            for prc in prcs:
+                prc.cpu.refresh_cpu()
+        
+        for prc in prcs:
             prc.prc_pid()
             ## if str(pid) in opts.pids:
                 ## print(f'DBDB pid={pid} dir={vars(prc)}')
