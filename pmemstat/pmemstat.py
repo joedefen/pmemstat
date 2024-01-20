@@ -802,7 +802,7 @@ class PmemStat:
         if self.opts.cpu:
             SysStat.refresh()
             for prc in prcs:
-                prc.cpu.refresh_cpu()
+                prc.refresh_cpu()
         
         for prc in prcs:
             prc.prc_pid()
