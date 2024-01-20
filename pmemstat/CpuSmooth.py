@@ -1,13 +1,15 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Class for fetching CPU usage from processes.
 """
 # pylint: disable=invalid-name,broad-exception-caught,too-many-instance-attributes
+# pylint: disable=import-outside-toplevel,too-many-branches,too-many-locals
 import os
 import time
 import re
 import traceback
+import math
 from types import SimpleNamespace
 
 class Term:
@@ -19,6 +21,8 @@ class Term:
     # pylint: disable=missing-function-docstring,multiple-statements
     @staticmethod
     def erase_line(): return f'{Term.esc}[2K'
+    @staticmethod
+    def erase_to_eol(): return f'{Term.esc}[0K'
     @staticmethod
     def bold(): return f'{Term.esc}[1m'
     @staticmethod
@@ -38,6 +42,8 @@ class Term:
 class CpuSmooth:
     """Class that get smoothed CPU percent of given process"""
     clock_tick = None  # number of clock ticks/sec
+    prev_system_stats = None
+    pid_ticks = 0 # recent delta ticks from all pids
 
     def __init__(self, pid, avg_secs=0, error=False, DB=False):
         self.pid = pid
@@ -51,6 +57,8 @@ class CpuSmooth:
         self.hists = []
         self.nickname = '' # crudely fetched on demand (for test)
         self._set_clock_tick()
+        if not CpuSmooth.prev_system_stats:
+            CpuSmooth.prev_system_stats = self.get_system_stats()
 
     def __del__(self):
         if self.fh:
@@ -122,7 +130,8 @@ class CpuSmooth:
             self.fh.seek(0)
             data = self.fh.read().split()
             self.stat_ns = SimpleNamespace(exec=data[1],
-                             user=int(data[13]), system=int(data[14]))
+                             user=int(data[13]), system=int(data[14]),
+                             nthr=int(data[19]))
         except Exception:
             self._set_error()
         return self.stat_ns
@@ -138,30 +147,92 @@ class CpuSmooth:
                     * delta_ticks / self.clock_tick / delta_mono, 8)
             return percent, delta_ticks, delta_mono
         def pct_str(triple):
-            return f'{triple[0]:7.3f}%,{triple[1]:5d},{triple[2]:7.4}s'
-
-
+            return f'{triple[0]:7.3f}%,{triple[1]:5d},{triple[2]:7.4f}s'
+        def adjust_down(delta_ticks):
+            """ Lower current ticks by amount ... meaning add to all
+                previous ticks"""
+            for hist in self.hists[:-1]:
+                hist[0] += delta_ticks
 
         if self.error or not self._get_stat():
             return self.percent
         ticks = self.stat_ns.user + self.stat_ns.system
         mono = time.monotonic()
+        self.hists.append([ticks, mono, self.stat_ns.nthr])
 
-        if not self.hists: # not initialized, takes two to tango
-            self.hists.append((ticks, mono))
+        if len(self.hists) < 2: # takes two to tango
             return 0
-        self.hists.append((ticks, mono))
         floor_mono = mono - self.avg_secs
         while len(self.hists) > 1 and self.hists[0][1] < floor_mono:
             self.hists.pop(0)
+        percent, delta_ticks, delta_mono = pct(self.hists[-1], self.hists[-2])
+        if delta_mono <= 0.0:
+            self.hists.pop()
+            return 0
+        max_percent = 100.0 * self.stat_ns.nthr
+        if percent > max_percent:
+            new_delta_ticks = int(round(delta_ticks * max_percent / percent))
+            adjust_down(delta_ticks - new_delta_ticks)
+            CpuSmooth.pid_ticks += new_delta_ticks
+        else:
+            CpuSmooth.pid_ticks += delta_ticks
+
+            
         self.percent, _, _ = pct(self.hists[-1], self.hists[0])
+
         # print(f'{self.percent}%')
         if self.DB:
-            self.db_info = ' '.join([
-                  f'{self.get_nickname()[:16]:>16} {self.pid:>6d}',
-                  pct_str(pct(self.hists[-1], self.hists[-2])),
-                  '//', pct_str(pct(self.hists[-1], self.hists[0]))])
+            deltas = []
+            hists = self.hists
+            for idx in range(len(hists)-1, 0, -1):
+                hist, prev = hists[idx], hists[idx-1]
+                deltas.append(f'{hist[0]-prev[0]}'
+                               + f'/{hist[1]-prev[1]:.2f}'
+                               # + ('' if hist[2] <= 1 else f'#{hist[2]}')
+                               )
+            self.db_info = ' '
+            if len(hists) >= 2:
+                self.db_info = ' '.join([
+                      f'{self.get_nickname()[:16]:>16} {self.pid:>6d}',
+                      pct_str(pct(self.hists[-1], self.hists[-2])),
+                      '//', pct_str(pct(self.hists[-1], self.hists[0])),
+                        ' '.join(deltas)])
         return self.percent
+    
+    @staticmethod
+    def get_system_stats():
+        """ TBD """
+        pathname = '/proc/stat'
+        ns = SimpleNamespace(mono=time.monotonic(),
+                    cpu_cnt=0, percent=0, ticks=0)
+        delta = SimpleNamespace(**vars(ns))
+        with open(pathname, "r", encoding='utf-8') as fh:
+            for line in fh:
+                wds = line.split()
+                keyword = wds[0]
+                if keyword == 'cpu':
+                    ns.ticks = int(wds[1])
+                    ns.ticks += int(wds[3])
+                elif keyword.startswith('cpu'):
+                    ns.cpu_cnt += 1
+#               elif keyword == 'swap':
+#                   ns.swap_in, ns.swap_out = int(wds[1]), int(wds[2])
+        delta.pid_ticks, CpuSmooth.pid_ticks = CpuSmooth.pid_ticks, 0
+        if CpuSmooth.prev_system_stats:
+            prev = CpuSmooth.prev_system_stats
+            delta.mono = round(ns.mono - prev.mono, 4)
+            delta.ticks = ns.ticks - prev.ticks
+            delta.cpu_cnt = ns.cpu_cnt
+            delta.max_ticks = math.ceil(CpuSmooth.clock_tick
+                                * delta.mono * ns.cpu_cnt)
+            if delta.mono > 0:
+                delta.percent = round(100
+                    * delta.ticks / CpuSmooth.clock_tick / delta.mono, 4)
+#           delta.swap_in -= prev.swap_in
+#           delta.swap_out -= prev.swap_out
+        CpuSmooth.prev_system_stats = ns
+        return delta
+
 
 if __name__ == '__main__':
     def main():
@@ -175,11 +246,11 @@ if __name__ == '__main__':
         parser.add_argument('-l', '--loop', type=float, default=1.0, dest='loop_secs',
                         help='loop interval in secs [dflt=1.0]')
         opts = parser.parse_args()
-        
+
         loop_secs = opts.loop_secs if opts.loop_secs >= 0.25 else 0.25
         loop_secs = opts.loop_secs if opts.loop_secs <= 120.0 else 120.0
-        
-        
+
+        spots = [] # where to put the top items
         cpus = {}
         losers = set()
         pids = set()
@@ -208,14 +279,30 @@ if __name__ == '__main__':
             top_cpus = sorted(cpus.values(), key=lambda x: x.percent, reverse=True)
             top_cpus = top_cpus[:opts.top]
             top_cpus = sorted(top_cpus, key=lambda x: x.pid)
-            run_time = f'{time.monotonic()-start_mono:.3f}'
-            print(f'--------- {run_time}----------- ')
+            run_time = time.monotonic()-start_mono
+            total_pct = 0
+            for cpu in cpus.values():
+                total_pct += cpu.percent
+            print(f'--------- {run_time:6.1f}s {total_pct:7.2f}% ----------- ',
+                  f'{CpuSmooth.get_system_stats()}' + Term.erase_to_eol())
+            CpuSmooth.pid_ticks = 0
+            old_spots, spots, todo = spots, [None]*opts.top, set()
             for cpu in top_cpus:
-                print(cpu.db_info)
+                try:
+                    idx = old_spots.index(cpu)
+                    spots[idx] = cpu
+                except Exception:
+                    todo.add(cpu)
+            for idx, cpu in enumerate(spots):
+                if not cpu:
+                    cpu = todo.pop()
+                    spots[idx] = cpu
+                print(cpu.db_info + Term.erase_to_eol())
 
             time.sleep(loop_secs)
             up_one = Term.pos_up(1) + '\r'
             print(up_one * (2+len(top_cpus)))
+
 
     try:
         main()
