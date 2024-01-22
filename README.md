@@ -88,7 +88,7 @@ Explanation of some options and arguments:
 
 
 ## Example Usage with Explanation of Output
-![pmemstat](https://github.com/joedefen/pmemstat/blob/main/images/pmemstat.png?raw=true
+![pmemstat](https://github.com/joedefen/pmemstat/blob/main/images/pmemstat.png?raw=true)
 
 In the default refreshed window loop, we see
 * a **leader line** with:
