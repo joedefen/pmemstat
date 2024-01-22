@@ -216,9 +216,6 @@ class ZramProjector:
         self.e_avail = e_max_used - e_used
 
 
-
-
-
 ####################################################################################
 ###### ProcMem class
 ####################################################################################
@@ -487,6 +484,8 @@ class ProcMem:
                     summary['ptotal'] += val
                 elif tag == 'SwapPss':
                     summary['pswap'] += val
+                    if self.pmemstat.has_zram():
+                        summary['ptotal'] += val
                 continue
             print(f'ERROR: cannot parse "{line}" [{self.rollup_file}:{idx+1}]')
         summary['pss'] = summary['ptotal'] # for consistency
@@ -608,6 +607,10 @@ class PmemStat:
         self.groups_by_line = {}
         self._set_units()
         self.zram_projector = ZramProjector()
+
+    def has_zram(self):
+        """Have zRAM actual? """
+        return bool(self.zram_projector and self.zram_projector.devs)
 
     def get_sortby(self):
         """Make sort_by sensible."""
@@ -884,7 +887,7 @@ class PmemStat:
                 self.emit(leader, to_head=True, resume=resume)
 
             # second line only if zRAM
-            if not self.zram_projector.devs:
+            if not self.has_zram():
                 return
             resume = False
             proj = self.zram_projector
