@@ -37,6 +37,7 @@ NOTE: kB is a misnomer ... should be "KB".  Morons.
 # pylint: disable=too-many-instance-attributes,too-many-lines
 # pylint: disable=too-many-arguments,too-many-branches
 # pylint: disable=too-many-statements,too-many-locals
+# pylint: disable=multiple-statements,too-few-public-methods
 
 
 import os
@@ -98,13 +99,129 @@ def human(number):
             return f'{number:.1f}{suffix}'
     return '' # impossible, but make pylint happy
 
-######
 ####################################################################################
-######
-######
+###### ZramProjector class
 ####################################################################################
-######
+class ZramProjector:
+    """ Guess the zram numbers """
+    def __init__(self):
+        self.meminfo = None
+        self.e_total = 0
+        self.e_avail = 0
+        self.e_used = 0
+        self.e_max_used = 0
+        self.limit_pct = 80
+        self.devs = {}
+        self.DB = False
 
+    def human_pct(self, number):
+        """ Return the number in human form and as pct total memory. """
+        rv = human(number)
+        if number > 0 and self.meminfo.MemTotal > 0:
+            fraction = number/self.meminfo.MemTotal
+            pct = int(round(100*fraction))
+            rv += f'/{pct}%'
+        return rv
+
+    def _get_zram_stats(self):
+        """ Get only what we want
+         orig_data_size   uncompressed size of data stored in this disk.
+         compr_data_size  compressed size of data stored in this disk
+         mem_used_total   the amount of memory allocated for this disk.
+         mem_limit        max RAM ZRAM can use to store (0 means unlimited)
+         mem_used_max     max RAM zram has consumed to store the data
+        """
+        fields = ('orig_data_size compr_data_size mem_used_total'
+                 + ' mem_limit mem_used_max').split()
+        infos = {}
+        zram_devices = sorted([device for device in os.listdir('/sys/class/block/')
+                    if device.startswith('zram')])
+        for device in zram_devices:
+            pathname = f'/sys/class/block/{device}/mm_stat'
+            if not os.path.exists(pathname):
+                continue # not active
+            with open(pathname, encoding='utf-8') as fh:
+                ns = SimpleNamespace()
+                for line in fh: # all the goodies are on 1st line
+                    nums = line.split()
+                    for idx, field in enumerate(fields):
+                        setattr(ns, field, int(nums[idx]))
+                    break
+                infos[device] = ns
+            for param in ('disksize', ):
+                pathname = f'/sys/class/block/{device}/{param}'
+                with open(pathname, encoding='utf-8') as fh:
+                    for line in fh: # one value, one line
+                        setattr(ns, param, int(line.strip()))
+                        break
+            if self.DB: print(f'DB: {device}: {ns}')
+
+        self.devs = infos
+        return infos
+
+    def compute_effective(self, meminfoKB):
+        """ Compute the effective values """
+        def seed(meminfoKB):
+            nonlocal self
+            meminfo = self.meminfo = SimpleNamespace()
+            for key, value in meminfoKB.items():
+                setattr(meminfo, key, value*1024)
+            # artificial stats
+            meminfo.MemUsed = meminfo.MemTotal - meminfo.MemAvailable
+            meminfo.MemZram=0
+            self.e_total = meminfo.MemTotal
+            self.e_avail = meminfo.MemAvailable
+            self.e_used = self.e_total - self.e_avail
+            self.e_max_used = self.e_used
+            return meminfo
+
+        meminfo = seed(meminfoKB)
+        devs = self._get_zram_stats()
+        if not devs:
+            return
+        stats = None
+        for stat in devs.values():
+            # NOTE: generalization for more than one weak unless all
+            #        are identically configured
+            if not stats:
+                stats = vars(stat).copy()
+                continue
+            for key, value in vars(stat).items():
+                stats[key] += value
+        stats = SimpleNamespace(**stats)
+        self.meminfo.MemZram = stats.mem_used_total 
+
+        e_used = meminfo.MemUsed - stats.mem_used_total + stats.orig_data_size
+        ratio = None
+        if e_used <= self.e_used: # zram hurts. assume not enuf data to project
+            e_used = self.e_used
+            ratio = 3.5 # wild guess for projection
+            # if self.DB: dump_effective(ns, '(unchg)')
+            # return ns
+        self.e_used = e_used
+        limit_pct = self.limit_pct
+        if stats.mem_limit > 0:
+            stats_limit_pct = (stats.limit / meminfo.MemTotal)*100
+            limit_pct = min(1.0, limit_pct, stats_limit_pct)
+            # projected amount of orig used memory that fits in limit
+        if ratio is None: # hopefully about 4 ;-)
+            ratio = stats.orig_data_size / stats.mem_used_total
+        e_max_used = ratio * meminfo.MemTotal * limit_pct/100
+            # now limit by disksize
+        e_max_used = min(e_max_used, stats.disksize)
+            # now add uncompressed memory
+        e_max_used += meminfo.MemTotal - e_max_used/ratio
+        self.e_max_used = e_max_used
+        # self.e_max_used = max(e_max_total, e_used) # TODO: uncomment
+        self.e_avail = e_max_used - e_used
+
+
+
+
+
+####################################################################################
+###### ProcMem class
+####################################################################################
 class ProcMem:
     """Represents the memory map summation for processes and groups.
       - the ProcMem object represents one process (or pid)
@@ -161,8 +278,9 @@ class ProcMem:
         self.alive = True
         self.is_new = True
         self.wanted = True # until proven otherwise
+        self.kernel = False # until proven otherwise
         self.is_changed = False
-        self.whynot = None # populate me with why unwanted
+        self.why_not = None # populate me with why unwanted
         self.smaps_file = f'/proc/{self.pid}/smaps'
         self.rollup_file = f'/proc/{self.pid}/smaps_rollup'
         self.cpu = None
@@ -173,7 +291,7 @@ class ProcMem:
         """Get the Cpu Number for the PID (if possible)"""
         if not self.cpu:
             self.cpu = CpuSmooth(self.pid, avg_secs= ProcMem.opts.cpu_avg_secs)
-        self.cpu.refresh_cpu() # sets self.cpu.percent
+        return self.cpu.refresh_cpu() # sets self.cpu.percent
 
     def get_cmdline(self):
         """Get the command line of the PID."""
@@ -191,8 +309,7 @@ class ProcMem:
                 return
             arguments = line.split('\0')
             if not arguments or not arguments[0]: # kernel process
-                self.wanted = False
-                self.whynot = 'KernelProcess'
+                self.wanted, self.kernel = False, True
                 # print(f'{self.pid}: kernel thread')
                 return
             # DB(0, f'{self.pid}: {arguments}')
@@ -216,8 +333,8 @@ class ProcMem:
             # not really expecting this ... probably a bug
             print(f'  WARNING: skip pid={self.pid} no-basename exc={exc}')
             print(traceback.format_exc())
-            self.wanted = False
-            self.whynot = 'CannotGetCmdline'
+            self.wanted = self.kernel = False
+            self.why_not = 'CannotGetCmdline'
             return
 
         ## print(f'DBDB: {self.pid} {ProcMem.opts.pids}')
@@ -225,7 +342,7 @@ class ProcMem:
         if (ProcMem.opts.pids and str(self.pid) not in ProcMem.opts.pids
                 and self.exebasename not in ProcMem.opts.pids):
             self.wanted = False
-            self.whynot = 'FilteredByArgs'
+            self.why_not = 'FilteredByArgs'
             # print(f'    >>>> unwanted {pid}')
         ## print(f'DBDB: {self.pid} wanted={self.wanted} whynot={self.whynot}')
         self.set_key()
@@ -243,13 +360,13 @@ class ProcMem:
                 lines = fhandle.read().splitlines()
         except (PermissionError, FileNotFoundError) as exc:
             # normal cases: not permitted or this is a race where the pid is terminating
-            self.whynot = f'CannotReadLines({type(exc).__name__})'
+            self.why_not = f'CannotReadLines({type(exc).__name__})'
         except Exception as exc:
             # unexpected cases (probably a bug)
             if not self.opts.window:
                 print(f'ERROR: skip pid={self.pid}',
                       f'no-smaps-or-rollup-lines exc={type(exc).__name__}')
-            self.whynot = f'CannotReadLines({type(exc).__name__})'
+            self.why_not = f'CannotReadLines({type(exc).__name__})'
         return lines
 
     def get_rollup_lines(self):
@@ -264,7 +381,7 @@ class ProcMem:
 
         if not rollup_lines:
             self.wanted = False
-            self.whynot = 'CannotReadRollups'
+            self.why_not = 'CannotReadRollups'
         elif DebugLevel:
             DB(3, f'pid={self.pid} {self.exebasename} #rollup_lines={len(rollup_lines)}')
 
@@ -282,7 +399,7 @@ class ProcMem:
 
         if not smaps_lines:
             self.wanted = False
-            self.whynot = 'CannotReadSmaps'
+            self.why_not = 'CannotReadSmaps'
         else:
             if DebugLevel:
                 DB(1, f'pid={self.pid} {self.exebasename} #smaps_lines={len(smaps_lines)}')
@@ -443,15 +560,15 @@ class ProcMem:
         """Process one PID"""
         self.alive = True
         self.is_changed = False
-        if not self.whynot and not self.cmdline:
+        if not self.why_not and not self.cmdline:
             self.get_cmdline()
             if not self.cmdline:
                 return
         rollup_lines = []
-        if not self.whynot:
+        if not self.why_not:
             rollup_lines = self.get_rollup_lines()
-        if self.whynot:
-            DB(4, f'pid={self.pid} {self.exebasename} whynot={self.whynot}')
+        if self.why_not:
+            DB(4, f'pid={self.pid} {self.exebasename} whynot={self.why_not}')
             return
         self.is_changed = False
         rollup_summary = self.parse_rollups(rollup_lines)
@@ -490,6 +607,7 @@ class PmemStat:
         setattr(opts, 'cpu_avg_secs', 20) # pseudo option
         self.groups_by_line = {}
         self._set_units()
+        self.zram_projector = ZramProjector()
 
     def get_sortby(self):
         """Make sort_by sensible."""
@@ -732,37 +850,66 @@ class PmemStat:
         # pylint: disable=too-many-branches
 
         def pr_top_of_report(appKB):
-            nonlocal self, meminfoKB, wanted_prcs, total_pids
+            nonlocal self, meminfoKB, wanted_prcs, total_user_pids, kernel_cpu
+            windowed = bool(self.window)
+            resume = False
             # print timestamp of report
-            if not self.window:
-                leader = f'\n---- {now.strftime("%H:%M:%S")}'
-            else:
-                leader = f'{now.strftime("%H:%M:%S")}'
-                self.emit(leader, to_head=True,
-                          attr=curses.A_BOLD if self.loop_num % 2 else None)
-                leader = ''
+            leader = '' if windowed else '--- '
+            leader += f'{now.strftime("%H:%M:%S")}'
+            self.emit(leader, to_head=True, resume=resume,
+                      attr=curses.A_BOLD if self.loop_num % 2 else None)
+            leader = ''
+            resume = True
 
+            used = meminfoKB["MemTotal"] - meminfoKB["MemAvailable"]
             leader += f' Tot={human(meminfoKB["MemTotal"]*1024)}'
+            leader += f' Used={human(used*1024)}'
             leader += f' Avail={human(meminfoKB["MemAvailable"]*1024)}'
             if appKB:
                 other = (meminfoKB["MemTotal"] - appKB
                          - meminfoKB["MemAvailable"] - meminfoKB["Shmem"])
                 leader += f' Oth={human(other*1024)}'
-            leader += f' Tmp={human(meminfoKB["Shmem"]*1024)}'
-            leader += f' Dirty={human(meminfoKB["Dirty"]*1024)}'
-            leader += f' PIDs: {len(wanted_prcs)}/{total_pids} {read_smaps}'
-            self.emit(leader, to_head=True, resume=bool(self.window))
+            leader += f' Sh+Tmp={human(meminfoKB["Shmem"]*1024)}'
+            if len(wanted_prcs) < total_user_pids:
+                leader += f' PIDs={len(wanted_prcs)}/{total_user_pids}'
+            else:
+                leader += f' PIDs={total_user_pids}'
             if self.opts.search:
-                self.emit(' /', to_head=True, resume=True)
+                self.emit(leader +' /', to_head=True, resume=resume)
+                resume = True
                 self.emit(self.opts.search, to_head=True,
-                          resume=True, attr=curses.A_UNDERLINE)
-                self.emit('/', to_head=True, resume=True)
+                          resume=resume, attr=curses.A_UNDERLINE)
+                self.emit('/', to_head=True, resume=resume)
+            else:
+                self.emit(leader, to_head=True, resume=resume)
+
+            # second line only if zRAM
+            if not self.zram_projector.devs:
+                return
+            resume = False
+            proj = self.zram_projector
+            if self.opts.cpu:
+                leader = f'{kernel_cpu:8.1f}/ker '
+                self.emit(leader, to_head=True, resume=resume)
+                resume = True
+            self.emit(f' zRAM={human(self.zram_projector.meminfo.MemZram)}',
+                      to_head=True, attr=curses.A_BOLD, resume=resume)
+            resume = True
+            leader = ''
+            leader += f' eTot:{proj.human_pct(proj.e_max_used)}'
+            leader += f' eUsed:{proj.human_pct(proj.e_used)}'
+            leader += f' eAvail:{proj.human_pct(proj.e_avail)}'
+            # leader += f' Dirty={human(meminfoKB["Dirty"]*1024)}'
+            self.emit(leader, to_head=True, resume=resume)
 
             # pylint: disable=too-many-branches
         self.loop_num += 1
         meminfoKB = self.get_meminfo()
-        total_pids = 0
-        allpids = []
+        self.zram_projector.compute_effective(meminfoKB)
+        total_user_pids = 0
+        total_kernel_pids = 0
+        kernel_cpu = total_user_pids
+        all_pids = []
         wanted_prcs = {}
 
         self.prep_new_loop(regroup)
@@ -784,11 +931,10 @@ class PmemStat:
             for entry in it:
                 # if re.match(r'^\d+$', entry.name):
                 if entry.name.isdigit():
-                    allpids.append(entry.name)
-
+                    all_pids.append(entry.name)
 
         prcs = []
-        for pid in allpids:
+        for pid in all_pids:
             ## print(f'DBDB pid={pid} self.opts.pids={opts.pids}')
             prc = self.prcs.get(pid, None)
             if not prc:
@@ -802,13 +948,19 @@ class PmemStat:
         if self.opts.cpu:
             SysStat.refresh()
             for prc in prcs:
-                prc.refresh_cpu()
-        
+                if prc.wanted or prc.kernel:
+                    percent = prc.refresh_cpu()
+                if prc.kernel:
+                    kernel_cpu += percent
+                    total_kernel_pids += 1
+                else:
+                    total_user_pids += 1
+
         for prc in prcs:
             prc.prc_pid()
+            pid = prc.pid
             ## if str(pid) in opts.pids:
                 ## print(f'DBDB pid={pid} dir={vars(prc)}')
-            total_pids += 0 if prc.whynot == 'KernelProcess' else 1
 
             if prc.wanted:
                 wanted_prcs[pid] = prc
@@ -905,6 +1057,8 @@ class PmemStat:
             if not group.alive and group.o_summary and remainder > 0:
                 remainder -= 1
                 self.pr_summary('x', group.o_summary)
+        if not self.window:
+            self.emit('')
 
     def emit(self, line, to_head=False, attr=None, resume=False):
         """ Emit a line of the report"""
@@ -915,7 +1069,7 @@ class PmemStat:
             else:
                 self.window.add_body(line, attr=attr, resume=resume)
         else:
-            print(line)
+            print(('' if resume else '\n') + line, end='')
 
     def help_screen(self):
         """Populate help screen"""
