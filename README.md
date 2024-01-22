@@ -88,26 +88,7 @@ Explanation of some options and arguments:
 
 
 ## Example Usage with Explanation of Output
-```
-10:38:17 Tot=31.3G Avail=21.8G Oth=2.4G Tmp=326.7M Dirty=1.2M PIDs: 202/202
- cpu_pct   pswap   other    data  ptotal   key/info (exe by mem)
-    37.9       0   1,670   5,193   6,862 T 202x --TOTALS in MB --
-──────────────────────────────────────────────────────────────────────────────
-     2.1       0     452   1,830   2,282   41x chrome
-    18.5       0       2     827     830   2x python->main.py
-     0.1       0      87     470     557   8x code
-     0.7       0      63     393     456   1x plasmashell
-     0.7       0     106     281     389   7x Code
-     0.2       0      52     176     227   2x app
-     0.0       0      17     200     217   1x DiscoverNotifier
-     0.0       0      80     114     194   1x app.asar
-     0.0       0      94      76     170   3x signal-desktop
-     0.0       0       4     160     165   2x python->lsp_server.py
-     2.9       0      29     101     129   1x kwin_x11
-     0.0       0      94       9     102   2x Signal
-    12.8       0     590     555   1,145 O 131x ---- OTHERS ----
-
-```
+![pmemstat](https://github.com/joedefen/pmemstat/blob/main/images/pmemstat.png?raw=true
 
 In the default refreshed window loop, we see
 * a **leader line** with:
@@ -118,7 +99,14 @@ In the default refreshed window loop, we see
        * Features such as BTRFS, ZFS, zRAM, unattached SysV Shared Memory, etc., can cause 'Oth' to be significant.
        * Determining the contributors can be difficult, but start with `sudo slabtop -sc` and feature specific tools (e.g., `zpool list`).
     * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads
+* a **second leader line for zRAM** only if zRAM is active with:
+    * percent cpu consumed by kernel processes (not normalized ... if there 4 CPUs, then the total CPU can 400%). This is important because, with zRAM, this often is mostly the swap process.
+    * **zRAM** - the amount of "Used" RAM that is storing zRAM data
+    * **eTot** - the effective Total RAM and the percent of "Tot" RAM (which would typically be above 100%). The bigger **zRAM**, the more accurate this number.
+    * **eUsed** - the effective Used RAM and percent of "Tot" RAM.
+    * **eAvail** - the effective Available RAM and percent of "Tot" RAM.
 * a **header line with the reported fields** including:
+    * **cpu** - percent CPU (again not normalized to 100%)
     * **pswap** - proportional use of swap (per smaps_rollup)
     * **other** - partly sums these categories (shown by the key, `o`):
       * **shSYSV** - proportional use of System V shared memory (per smaps)
@@ -126,8 +114,7 @@ In the default refreshed window loop, we see
       * **stack** - exclusive use of stack memory per smaps
       * **text** - proportional use of memory for text (i.e., the read-only binary code, per smaps)
     * **data** - exclusive use of memory for data (i.e., exclusively used of "heap" memory, per smaps)
-    * **ptotal** - proportional use of memory of all categories (i.e, sum of all columns to the left except **pswap**, per smaps)
-    * (sometimes) **pss** - proportional use of memory (per smaps_rollup)
+    * **ptotal** - proportional use of memory of all categories (i.e, sum of columns to the left); **note**, if zRAM, this includes **pswap**, else not.
     * *empty* - type of the entry which may be:
         * **T** - the grand total
         * **A** - a newly added grouping
@@ -140,7 +127,7 @@ In the default refreshed window loop, we see
 ## Help Screen (in Window Mode, Press '?')
 In window mode, press '?' to enter the help screen which looks like:
 
-![helpscreen example](https://github.com/joedefen/pmemstat/blob/main/images/help-screen_2023-05-15.png?raw=true)
+![helpscreen example](https://github.com/joedefen/pmemstat/blob/main/images/help-screen.png?raw=true)
 
 **Notes:**
 * There are a number of navigation keys (mostly following vim conventions); in the help screen, they apply to help screen; otherwise, they apply to main screen.
@@ -153,7 +140,7 @@ Pressing "K" enter "Kill Mode" where you use the navigation keys to highlight a 
 ## Scroll Position (Window Mode)
 
 Sometimes, the horizontal line between the header and scrollable region has a reverse video block (under the "351" in this case):
-![scroll-pos example](https://github.com/joedefen/pmemstat/blob/main/images/scroll-pos_2023-09-05.png?raw=true)
+![scroll-pos example](https://github.com/joedefen/pmemstat/blob/main/images/scroll.png?raw=true)
 
 **Notes:**
 * When there is no block, the scrolled document does not overflow the scrollable region.
