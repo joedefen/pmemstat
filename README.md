@@ -140,7 +140,7 @@ Pressing "K" enter "Kill Mode" where you use the navigation keys to highlight a 
 ## Scroll Position (Window Mode)
 
 Sometimes, the horizontal line between the header and scrollable region has a reverse video block (under the "351" in this case):
-![scroll-pos example](https://github.com/joedefen/pmemstat/blob/main/images/scroll.png?raw=true)
+![scroll-pos example](https://github.com/joedefen/pmemstat/blob/main/images/scroll-pos.png?raw=true)
 
 **Notes:**
 * When there is no block, the scrolled document does not overflow the scrollable region.
