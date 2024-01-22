@@ -1,13 +1,13 @@
 > **Quick Start**: from the CLI
-> * **If `python3 -V` shows v3.11 or later, install using `pipx`**:
->   * `python3 -m pip install --user pipx # if pipx not installed`
->   * `python3 -m pipx ensurepath # if needed (restart terminal)`
->   * `pipx upgrade pmemstat || pipx install pmemstat # to install/upgrade`
-> * **Else for python3.10 and lesser versions, install using `pip`**:
->   * `python3 -m pip install --user --upgrade pmemstat`
+> * **If `python3 -V` shows v3.11 or later, install with `pipx`**:
+>   * install `pipx` per your distro's guidance
+>   * then: `pipx upgrade pmemstat || pipx install pmemstat`
+> * **Else for python3.10 and lesser versions, install with `pip`**:
+>   * install `pip` per your distro's guidance
+>   * then: `python3 -m pip install --user --upgrade pmemstat`
 > * **To run**:
->   * `pmemstat # to run`
->   * Type "?" within pmemstat, show help screen.
+>   * simply run: `pmemstat`
+>   * type "?" within `pmemstat` to show help screen.
 
 
 # pmemstat - Proportional Memory Status
