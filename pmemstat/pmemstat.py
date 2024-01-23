@@ -596,6 +596,7 @@ class PmemStat:
         self.loop_num = 0
         self.debug = opts.debug
         self.prcs = {}
+        self.kernel_prcs = []
         self.groups = {} # indexed by group key (e.g., cmd)
         self.window = None
         self.spin = OptionSpinner()
@@ -851,6 +852,9 @@ class PmemStat:
     def loop(self, now, is_first, regroup=False):
         """one loop thru all pids"""
         # pylint: disable=too-many-branches
+        def sort_kernel_prcs():
+            self.kernel_prcs = sorted(self.kernel_prcs, reverse=True,
+                  key=lambda x: x.cpu.percent if x.cpu else 0)
 
         def pr_top_of_report(appKB):
             nonlocal self, meminfoKB, wanted_prcs, total_user_pids, kernel_cpu
@@ -886,24 +890,30 @@ class PmemStat:
             else:
                 self.emit(leader, to_head=True, resume=resume)
 
-            # second line only if zRAM
-            if not self.has_zram():
-                return
-            resume = False
-            proj = self.zram_projector
-            if self.opts.cpu:
-                leader = f'{kernel_cpu:8.1f}/ker '
-                self.emit(leader, to_head=True, resume=resume)
+            if self.has_zram(): # second line if zRAM
+                resume = False
+                proj = self.zram_projector
+                if self.opts.cpu:
+                    leader = f'{kernel_cpu:8.1f}/ker '
+                    self.emit(leader, to_head=True, resume=resume)
+                    resume = True
+                self.emit(f' zRAM={human(self.zram_projector.meminfo.MemZram)}',
+                          to_head=True, attr=curses.A_BOLD, resume=resume)
                 resume = True
-            self.emit(f' zRAM={human(self.zram_projector.meminfo.MemZram)}',
-                      to_head=True, attr=curses.A_BOLD, resume=resume)
-            resume = True
-            leader = ''
-            leader += f' eTot:{proj.human_pct(proj.e_max_used)}'
-            leader += f' eUsed:{proj.human_pct(proj.e_used)}'
-            leader += f' eAvail:{proj.human_pct(proj.e_avail)}'
-            # leader += f' Dirty={human(meminfoKB["Dirty"]*1024)}'
-            self.emit(leader, to_head=True, resume=resume)
+                leader = ''
+                leader += f' eTot:{proj.human_pct(proj.e_max_used)}'
+                leader += f' eUsed:{proj.human_pct(proj.e_used)}'
+                leader += f' eAvail:{proj.human_pct(proj.e_avail)}'
+                # leader += f' Dirty={human(meminfoKB["Dirty"]*1024)}'
+                self.emit(leader, to_head=True, resume=resume)
+            elif self.opts.cpu: # second line if reporting cpu
+                resume = False
+                leader = f'{kernel_cpu:8.1f}/ker'
+                sort_kernel_prcs()
+                for prc in self.kernel_prcs[0:2]:
+                    nickname = prc.cpu.get_nickname()
+                    leader += f'    {prc.cpu.percent:.2f}% {nickname}'
+                self.emit(leader, to_head=True, resume=resume)
 
             # pylint: disable=too-many-branches
         self.loop_num += 1
@@ -911,9 +921,10 @@ class PmemStat:
         self.zram_projector.compute_effective(meminfoKB)
         total_user_pids = 0
         total_kernel_pids = 0
-        kernel_cpu = total_user_pids
+        kernel_cpu = 0
         all_pids = []
         wanted_prcs = {}
+        self.kernel_prcs = []
 
         self.prep_new_loop(regroup)
 
@@ -956,6 +967,7 @@ class PmemStat:
                 if prc.kernel:
                     kernel_cpu += percent
                     total_kernel_pids += 1
+                    self.kernel_prcs.append(prc)
                 else:
                     total_user_pids += 1
 
