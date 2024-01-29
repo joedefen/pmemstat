@@ -341,7 +341,7 @@ class ProcMem:
             self.wanted = False
             self.why_not = 'FilteredByArgs'
             # print(f'    >>>> unwanted {pid}')
-        ## print(f'DBDB: {self.pid} wanted={self.wanted} whynot={self.whynot}')
+        ## print(f'DBDB: {self.pid} wanted={self.wanted} why_not={self.why_not}')
         self.set_key()
 
     def set_key(self):
@@ -567,7 +567,7 @@ class ProcMem:
         if not self.why_not:
             rollup_lines = self.get_rollup_lines()
         if self.why_not:
-            DB(4, f'pid={self.pid} {self.exebasename} whynot={self.why_not}')
+            DB(4, f'pid={self.pid} {self.exebasename} why_not={self.why_not}')
             return
         self.is_changed = False
         rollup_summary = self.parse_rollups(rollup_lines)
@@ -646,7 +646,7 @@ class PmemStat:
             group = SimpleNamespace(key=key,
                     is_new=True,
                     alive=False,
-                    whynot=None,
+                    why_not=None,
                     is_changed=False,
                     o_prcset=set(),
                     prcset=set(),
@@ -740,7 +740,7 @@ class PmemStat:
                 global read_smaps
                 read_smaps += 1
                 smaps_lines = prc.get_smaps_lines()
-                if prc.whynot:
+                if prc.why_not:
                     group.prcset.remove(prc)
                     continue
                 chunks = prc.make_chunks(smaps_lines)
