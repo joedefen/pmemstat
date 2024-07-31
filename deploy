@@ -1,21 +1,8 @@
 #!/bin/bash
-# NOTES:
-# * this installs/reinstalls a single file version of pmemstat.py created by 
-#   into ~/local/bin/.
-# * in case, your base is debian 12 or eqivalent where pip may be 
-#   disabled by default, this script forces the install the "old way"
- 
-PIP_BREAK_SYSTEM_PACKAGES=1
-LBIN=$HOME/.local/bin
-UBIN=/usr/bin
-TARGET=${UBIN}/pmemstat
-
-set -xe
-cd "$(dirname "$0")"
-
-python3 -m pip install stickytape --user
-
-sudo bash -c "rm -f ${UBIN}/pmemstat ${LBIN}/pmemstat"
-stickytape pmemstat/main.py  --add-python-path . > pmemstat.bundle
-sudo bash -c "cp ./pmemstat.bundle ${TARGET} && chmod +x ${TARGET}"
-ls -l ${TARGET}
+script_dir=$(dirname "$0")
+set -ex
+cd ${script_dir}
+rm -rf ./dist
+python3 -m pip install build --break-system-packages
+python3 -m build
+pip install -e . --break-system-packages

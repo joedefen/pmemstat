@@ -96,7 +96,10 @@ In the default refreshed window loop, we see
     * from `/proc/meminfo` in MemTotal (Tot), MemAvailable (Avail), Tmp (Shmem+TmpFS), and Dirty.
     * 'Oth' is the unaccounted for memory belonging to the kernel, reserve,
        drivers, imprecision, etc.; `Oth = Tot - Avail - Tmp - ptotal`.
-       * Features such as BTRFS, ZFS, zRAM, unattached SysV Shared Memory, etc., can cause 'Oth' to be significant.
+       * Features such as BTRFS, ZFS, zRAM, unattached SysV Shared Memory, etc., can cause 'Oth' to be significant;
+         that is, MemAvail is often greatly understated (and 'Oth' is overstated).  As a test (not intended for regular use), try:
+         `sudo sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"`; if that reduces `Oth` significantly,
+         then the MemAvailable calculation was off significantly.
        * Determining the contributors can be difficult, but start with `sudo slabtop -sc` and feature specific tools (e.g., `zpool list`).
     * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads
 * a **second leader line for zRAM** only if zRAM is active with:

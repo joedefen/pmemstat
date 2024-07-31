@@ -1,5 +1,5 @@
 pmemstat.bundle
-dist/*
-__pycache__/*
-*/__pycache__/*
-.vscode/*
+dist/
+__pycache__/
+.vscode/
+*.egg-info/

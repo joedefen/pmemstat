@@ -3,7 +3,7 @@
 """
 Module to kill a set of processes and ensure they are really gone.
 """
-# pylint: disable=broad-except
+# pylint: disable=broad-except,invalid-name,too-few-public-methods
 
 import os
 import sys
@@ -26,7 +26,7 @@ class KillThem():
                  signal.SIGTERM, signal.SIGTERM, signal.SIGTERM,
                  signal.SIGTERM, signal.SIGTERM, signal.SIGTERM,
                  signal.SIGKILL, signal.SIGKILL, signal.SIGKILL]
-        last_sig = '' 
+        last_sig = ''
         for sig in sigs:
             for pid in list(self.pids):
                 try:

@@ -50,14 +50,9 @@ import curses
 from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta
-try:
-    from Window import Window, OptionSpinner
-    from KillThem import KillThem
-    from CpuSmooth import CpuSmooth, SysStat
-except Exception:
-    from pmemstat.Window import Window, OptionSpinner
-    from pmemstat.KillThem import KillThem
-    from pmemstat.CpuSmooth import CpuSmooth, SysStat
+from pmemstat.Window import Window, OptionSpinner
+from pmemstat.KillThem import KillThem
+from pmemstat.CpuSmooth import CpuSmooth, SysStat
 
 # Trace Levels:
 #  0 - forced, temporary debugging (comment it out)
@@ -189,7 +184,7 @@ class ZramProjector:
             for key, value in vars(stat).items():
                 stats[key] += value
         stats = SimpleNamespace(**stats)
-        self.meminfo.MemZram = stats.mem_used_total 
+        self.meminfo.MemZram = stats.mem_used_total
 
         e_used = meminfo.MemUsed - stats.mem_used_total + stats.orig_data_size
         ratio = None
@@ -212,7 +207,7 @@ class ZramProjector:
             # now add uncompressed memory
         e_max_used += meminfo.MemTotal - e_max_used/ratio
         self.e_max_used = e_max_used
-        # self.e_max_used = max(e_max_total, e_used) # TODO: uncomment
+        # self.e_max_used = max(e_max_total, e_max_used)
         self.e_avail = e_max_used - e_used
 
 
@@ -1190,6 +1185,13 @@ class PmemStat:
             else:
                 assert False, f'unsupported mode ({self.mode})'
 
+def rerun_module_as_root(module_name):
+    """ rerun using the module name """
+    if os.geteuid() != 0: # Re-run the script with sudo
+        os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        vp = ['sudo', sys.executable, '-m', module_name] + sys.argv[1:]
+        os.execvp('sudo', vp)
+
 def main():
     """Main loop"""
     global DebugLevel
@@ -1234,8 +1236,7 @@ def main():
 
     if not opts.run_as_user and os.geteuid() != 0:
         # Re-run the script with sudo needed and opted
-        sys.argv[0] = __file__
-        os.execvp('sudo', ['sudo', sys.executable] + sys.argv)
+        rerun_module_as_root('pmemstat.main')
 
 
     if opts.min_delta_kb is None:

@@ -4,7 +4,7 @@
 Custom Wrapper for python curses.
 """
 # pylint: disable=too-many-instance-attributes,too-many-arguments
-# pylint: disable=invalid-name,broad-except
+# pylint: disable=invalid-name,broad-except,too-many-branches
 
 import traceback
 import atexit
@@ -111,6 +111,7 @@ class OptionSpinner:
         self._register(ns)
 
     def show_help_nav_keys(self, win):
+        """ Get/present standard verbiage for the navigation keys"""
         for line in Window.get_nav_keys_blurb().splitlines():
             if line:
                 win.add_header(line)
@@ -440,7 +441,7 @@ class Window:
             if ind_pos >= 0:
                 bot, cnt = ind_pos, 1
                 if 0 < ind_pos < self.cols-1:
-                    width = (self.scroll_view_size/self.body.row_cnt*self.cols)
+                    width = self.scroll_view_size/self.body.row_cnt * self.cols
                     bot = max(int(round(ind_pos-width/2)), 1)
                     top = min(int(round(ind_pos+width/2)), self.cols-1)
                     cnt = top - bot
@@ -631,7 +632,7 @@ if __name__ == '__main__':
                     for num in range(1, opts.pick_size):
                         win.draw(num+idx*opts.pick_size, 0, f'  addon: {loop}.{line}')
             win.render()
-            answer = do_key(win.prompt(seconds=5))
+            do_key(win.prompt(seconds=5))
             win.clear()
 
     try:

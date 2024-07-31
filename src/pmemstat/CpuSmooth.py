@@ -69,6 +69,7 @@ class SysStat:
     @staticmethod
     def refresh():
         """ TBD """
+        # pylint: disable=protected-access
         return SysStat.get_singleton()._refresh()
 
     def _refresh(self):
@@ -229,7 +230,7 @@ class CpuSmooth:
             self.hists.pop(0)
         try:
             _, _, delta_mono = pct(self.hists[-1], self.hists[-2])
-        except:
+        except Exception:
             pass
         if delta_mono <= 0.0:
             self.hists.pop()
