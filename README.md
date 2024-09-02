@@ -178,22 +178,8 @@ If the `pipx` install is not acceptable, choose the best way to install:
         python -m pip install --user pmemstat
         # to uninstall: python -m pip uninstall pmemstat
 ```
-* Or **from PyPi as root**. This makes `pememstat` available to all users
-   with `/usr/local/bin` on `$PATH`. Note: `PIP_BREAK_SYSTEM_PACKAGES=1`
-   may be required on some distros.
+* Or **from PyPi as root**. This makes `pmemstat` available to all users with `/usr/local/bin` on `$PATH`. Note: `PIP_BREAK_SYSTEM_PACKAGES=1` may be required on some distros.
 ```
         PIP_BREAK_SYSTEM_PACKAGES=1 sudo python -m pip install pmemstat
         # to uninstall: sudo python -m pip uninstall pmemstat
 ```
-* Or **from GitHub, scripted install**. The included `deploy` script installs
-   a single-file `pmemstat` to `/usr/bin/pmemstat`;
-   `deploy` installs/reinstalls `stickytape`, too.
-   These commands install/update `pmemstat` w/o leftovers (except `stickytape`):
-```
-        # NOTE: requires "git" to be installed beforehand
-        cd /tmp; rm -rf pmemstat;
-        git clone https://github.com/joedefen/pmemstat.git;
-        ./pmemstat/deploy; rm -rf pmemstat
-        # to uninstall run: sudo rm /usr/bin/pmemstat
-```
-* Or **from GitHub, manual install**: If you clone `pmemstat` from GitHub, then you may run its `deploy` script OR run "`pip install .`" as root or not OR just directly run `pmemstat/main.py`.
