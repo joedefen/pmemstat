@@ -32,7 +32,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pmemstat"
-version = "2.3.27"
+version = "2.3.28"
 description = "Report Proportional Memory on Linux"
 authors = [
     {name = "Joe Defen", email = "joedef@duck.com"},
