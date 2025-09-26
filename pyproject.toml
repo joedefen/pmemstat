@@ -1,38 +1,10 @@
-# HOW TO PUBLISH...
-#
-# Prep Work (ensure need modules are up-to-date):
-#   sudo pacman -Syu python-pip
-#   sudo pacman -Syu python-build
-#   sudo pacman -Syu python-twine
-#   -- antiquated way
-#      python3 -m pip install --upgrade pip
-#      python3 -m pip install --upgrade build
-#      python3 -m pip install --upgrade twine
-# 
-# PUBLIC Build and deploy (from project directory):
-#   ## BUMP the version (below in [project])
-#   rm -r dist; python3 -m build; ls dist/.
-#   python3 -m twine upload dist/*
-#     ## Enter __token__ and the saved TOKEN (in bitwarden)
-#   pipx upgrade pmemstat || pipx install pmemstat # >= python3.11
-#   --OR-- sudo python3 -m pip install pmemstat # <= python3.10
-#   ## VISIT  https://pypi.org/project/pmemstat and delete old versions
-#
-# TEST Build and test (from project directory):
-#   ## BUMP the version (below in [project])
-#   rm -r dist; python3 -m build
-#   python3 -m twine upload --repository testpypi dist/*
-#     ## Enter __token__ and the saved TOKEN (in bitwarden)
-#   sudo python3 -m pip install --index-url https://test.pypi.org/simple/ --no-deps pmemstat
-#   ## VISIT  https://test.pypi.org/project/pmemstat and delete old versions
-
 [build-system]
-requires = ["setuptools>=42", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["flit_core>=3.4"]
+build-backend = "flit_core.buildapi"
 
 [project]
 name = "pmemstat"
-version = "2.3.28"
+version = "2.3.29"
 description = "Report Proportional Memory on Linux"
 authors = [
     {name = "Joe Defen", email = "joedef@duck.com"},
@@ -40,15 +12,12 @@ authors = [
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.8"
-
 keywords = ["proportional memory", "RAM", "htop", "top", "monitor"]
-
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux"
 ]
-
 dependencies = [
     'psutil>5.9',
 ]
@@ -59,14 +28,3 @@ dependencies = [
 
 [project.scripts]
 pmemstat = "pmemstat.main:run"
-
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-exclude = [
-    "__pycache__",
-]
