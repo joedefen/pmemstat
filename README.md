@@ -88,7 +88,20 @@ Explanation of some options and arguments:
 
 
 ## Example Usage with Explanation of Output
-![pmemstat](https://github.com/joedefen/pmemstat/blob/main/images/pmemstat.png?raw=true)
+```
+20:49:12 Tot=7.6G Used=6.2G Avail=1.4G Oth=0 Sh+Tmp=477.7M PIDs=174
+     2.4%/ker MajF/s=2  zRAM=813.2M CR=4.3 eTot:16.8G eUsed:8.8G eAvail:8.0G
+ cpu_pct   pswap   other    data  ptotal   key/info (exe by mem)
+    60.8   2,535     593   3,988   7,116 T 174x --TOTALS in MB --
+───────────────────────────────────────────────────────────────────────────────
+     5.9   1,366      90   2,110   3,567   24x browser
+    16.6      89     117     822   1,028   9x code
+     5.9     270      32     291     593   1x firefox
+     1.6      95      68     335     497   6x exe
+     2.4     150      66      94     310   6x brave
+    16.0      52      73     152     277   3x VQ6B1EUZqoCU04zoRU
+     0.1      39      19      13      70   2x konsole
+```
 
 In the default refreshed window loop, we see
 * a **leader line** with:
@@ -104,14 +117,17 @@ In the default refreshed window loop, we see
     * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads
 * a **second leader line for zRAM** only if zRAM is active with:
     * percent cpu consumed by kernel processes (not normalized ... if there 4 CPUs, then the total CPU can 400%). This is important because, with zRAM, this often is mostly the swap process.
+    * **MajF/s** - the number of "major" page faults per second.
+      * 100+/s is high/worrisome.	Indicates significant memory pressure and heavy swapping or repeated large file access. System thrashing/slowdown is likely noticeable slow response.
+      * 1000+/s is extreme.	Indicates severe memory overcommitment, likely with processes constantly fighting for RAM, or an application aggressively accessing disk-mapped memory.
     * **zRAM** - the amount of "Used" RAM that is storing zRAM data
-    * **eTot** - the effective Total RAM and the percent of "Tot" RAM (which would typically be above 100%). The bigger **zRAM**, the more accurate this number.
-    * **eUsed** - the effective Used RAM and percent of "Tot" RAM.
-    * **eAvail** - the effective Available RAM and percent of "Tot" RAM.
+    * **eTot** - the effective Total RAM ... the bigger **zRAM**, the more accurate this number
+    * **eUsed** - the effective Used RAM
+    * **eAvail** - the effective Available RAM
 * a **header line with the reported fields** including:
     * **cpu** - percent CPU (again not normalized to 100%)
     * **pswap** - proportional use of swap (per smaps_rollup)
-    * **other** - partly sums these categories (shown by the key, `o`):
+    * **other** - partly sums these categories (shown by the key, `o`)
       * **shSYSV** - proportional use of System V shared memory (per smaps)
       * **shOth** - proportional use of other shared memory (per smaps)
       * **stack** - exclusive use of stack memory per smaps

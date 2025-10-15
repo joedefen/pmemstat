@@ -105,14 +105,15 @@ class ZramProjector:
         self.e_avail = 0
         self.e_used = 0
         self.e_max_used = 0
+        self.ratio = 0.0
         self.limit_pct = 80
         self.devs = {}
         self.DB = False
 
-    def human_pct(self, number):
+    def human_pct(self, number, with_pct=False):
         """ Return the number in human form and as pct total memory. """
         rv = human(number)
-        if number > 0 and self.meminfo.MemTotal > 0:
+        if with_pct and number > 0 and self.meminfo.MemTotal > 0:
             fraction = number/self.meminfo.MemTotal
             pct = int(round(100*fraction))
             rv += f'/{pct}%'
@@ -187,10 +188,10 @@ class ZramProjector:
         self.meminfo.MemZram = stats.mem_used_total
 
         e_used = meminfo.MemUsed - stats.mem_used_total + stats.orig_data_size
-        ratio = None
+        ratio, self.ratio = None, 0.0
         if e_used <= self.e_used: # zram hurts. assume not enuf data to project
             e_used = self.e_used
-            ratio = 3.5 # wild guess for projection
+            self.ratio = ratio = 3.5 # wild guess for projection
             # if self.DB: dump_effective(ns, '(unchg)')
             # return ns
         self.e_used = e_used
@@ -200,7 +201,7 @@ class ZramProjector:
             limit_pct = min(1.0, limit_pct, stats_limit_pct)
             # projected amount of orig used memory that fits in limit
         if ratio is None: # hopefully about 4 ;-)
-            ratio = stats.orig_data_size / stats.mem_used_total
+            self.ratio = ratio = stats.orig_data_size / stats.mem_used_total
         e_max_used = ratio * meminfo.MemTotal * limit_pct/100
             # now limit by disksize
         e_max_used = min(e_max_used, stats.disksize)
@@ -594,6 +595,7 @@ class PmemStat:
         self.kernel_prcs = []
         self.groups = {} # indexed by group key (e.g., cmd)
         self.window = None
+        self.vmstat = None
         self.spin = OptionSpinner()
         self.number = 0  # line number for opts.numbers
         self.units, self.divisor, self.fwidth = 0, 0, 0
@@ -844,6 +846,45 @@ class PmemStat:
         assert not keys, f'ALERT: cannot get vitals ({keys}) from {meminfofile}'
         return meminfoKB
 
+    def get_vmstat(self):
+        def make_ns(now):
+            ns = SimpleNamespace()
+            ns.base_time = now
+            ns.base_value = 0
+            ns.last_time = now
+            ns.last_value = 0
+            ns.rate = 0
+            return ns
+
+        """Get most vital stats from /proc/vmstat'"""
+        infofile = '/proc/vmstat'
+        now = time.monotonic()
+        if not self.vmstat:
+            self.vmstat = {'pgmajfault': make_ns(now)}
+        info = self.vmstat
+        keys = list(info.keys())
+
+        with open(infofile, encoding='utf-8') as fileh:
+            for line in fileh:
+                match = re.match(r'^([^\s]+)\s+(\d+)$', line)
+                if not match:
+                    continue
+                key, value = match.group(1), int(match.group(2))
+                if key not in keys:
+                    continue
+                ns = info[key]
+                ns.base_time, ns.base_value = ns.last_time, ns.last_value
+                ns.last_time, ns.last_value = now, value
+                ns.rate = 0
+                if ns.last_time > ns.base_time:
+                    ns.rate = int(round((ns.last_value - ns.base_value)
+                            / (ns.last_time - ns.base_time)))
+                keys.remove(key)
+                if not keys:
+                    break
+        assert not keys, f'ALERT: cannot get vitals ({keys}) from {infofile}'
+        return self.vmstat
+
     def loop(self, now, is_first, regroup=False):
         """one loop thru all pids"""
         # pylint: disable=too-many-branches
@@ -853,6 +894,7 @@ class PmemStat:
 
         def pr_top_of_report(appKB):
             nonlocal self, meminfoKB, wanted_prcs, total_user_pids, kernel_cpu
+            nonlocal major_fault_rate
             windowed = bool(self.window)
             resume = False
             # print timestamp of report
@@ -889,13 +931,15 @@ class PmemStat:
                 resume = False
                 proj = self.zram_projector
                 if self.opts.cpu:
-                    leader = f'{kernel_cpu:8.1f}/ker '
+                    leader = f'{kernel_cpu:8.1f}%/ker '
                     self.emit(leader, to_head=True, resume=resume)
                     resume = True
+                self.emit(f'MajF/s={major_fault_rate} ', to_head=True, resume=resume)
+                resume = True
                 self.emit(f' zRAM={human(self.zram_projector.meminfo.MemZram)}',
                           to_head=True, attr=curses.A_BOLD, resume=resume)
-                resume = True
                 leader = ''
+                leader += f' CR={proj.ratio:.1f}'
                 leader += f' eTot:{proj.human_pct(proj.e_max_used)}'
                 leader += f' eUsed:{proj.human_pct(proj.e_used)}'
                 leader += f' eAvail:{proj.human_pct(proj.e_avail)}'
@@ -903,7 +947,7 @@ class PmemStat:
                 self.emit(leader, to_head=True, resume=resume)
             elif self.opts.cpu: # second line if reporting cpu
                 resume = False
-                leader = f'{kernel_cpu:8.1f}/ker'
+                leader = f'{kernel_cpu:8.1f}%/ker'
                 sort_kernel_prcs()
                 for prc in self.kernel_prcs[0:2]:
                     nickname = prc.cpu.get_nickname()
@@ -913,6 +957,8 @@ class PmemStat:
             # pylint: disable=too-many-branches
         self.loop_num += 1
         meminfoKB = self.get_meminfo()
+        vmstat = self.get_vmstat()
+        major_fault_rate = vmstat['pgmajfault'].rate
         self.zram_projector.compute_effective(meminfoKB)
         total_user_pids = 0
         total_kernel_pids = 0
