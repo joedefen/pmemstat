@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "pmemstat"
-version = "3.0.1"
+version = "3.0.2"
 description = "Report Proportional Memory on Linux"
 authors = [
     {name = "Joe Defen", email = "joedef@duck.com"},
@@ -19,7 +19,8 @@ classifiers = [
     "Operating System :: POSIX :: Linux"
 ]
 dependencies = [
-    'psutil>5.9',
+    'psutil > 5.9',
+    'console-window >= 1.0.0',
 ]
 
 [project.urls]

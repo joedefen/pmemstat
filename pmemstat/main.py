@@ -50,7 +50,7 @@ import curses
 from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta
-from pmemstat.Window import Window, OptionSpinner
+from console_window import ConsoleWindow, OptionSpinner
 from pmemstat.KillThem import KillThem
 from pmemstat.CpuSmooth import CpuSmooth, SysStat
 
@@ -1200,7 +1200,7 @@ class PmemStat:
                           prompt='Set search string, then Enter', obj=self.opts)
 
         keys_we_handle =  [ord('K'), curses.KEY_ENTER, 10] + list(self.spin.keys)
-        self.window = Window(head_line=True, keys=keys_we_handle)
+        self.window = ConsoleWindow(head_line=True, keys=keys_we_handle)
         is_first = True
         was_groupby, regroup = self.opts.groupby, True
         was_others = self.opts.others
@@ -1331,7 +1331,7 @@ def run():
     except KeyboardInterrupt:
         pass
     except Exception as exce:
-        Window.stop_curses()
+        ConsoleWindow.stop_curses()
         print("exception:", str(exce))
         print(traceback.format_exc())
 
