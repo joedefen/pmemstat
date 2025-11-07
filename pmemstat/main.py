@@ -246,7 +246,7 @@ class ProcMem:
     # units = '' # determined by arguments
     # fwidth = 11
     pmemstat = None # the main program object
-    max_cmd_len = 32 # command line maximum length
+    max_cmd_len = 96 # command line maximum length
     chunk_dict = {
             'cat': None,
             'beg': 0,
@@ -286,58 +286,137 @@ class ProcMem:
             self.cpu = CpuSmooth(self.pid, avg_secs= ProcMem.opts.cpu_avg_secs)
         return self.cpu.refresh_cpu() # sets self.cpu.percent
 
+    def _get_exebasename(self, exepath, wds):
+        """
+        Final, definitive, robust executable base name resolver.
+        """
+        
+        # --- Phase 1: Determine the Initial Best Name Candidate ---
+        # ... (same initial logic as before, using os.readlink)
+        basename = os.path.basename(exepath)
+        is_bad_name = not basename or basename == 'exe' or len(basename) > 16 or not re.search(r'[a-zA-Z]', basename)
+
+        if is_bad_name:
+            try:
+                link_target = os.readlink(f'/proc/{self.pid}/exe')
+                if ' (deleted)' not in link_target and 'a.out' not in link_target:
+                    basename = os.path.basename(link_target)
+            except (FileNotFoundError, OSError):
+                pass
+
+        # --- Phase 2: Multi-Step Aggressive Cleanup (The FINAL Final Fix) ---
+
+        # 1. Remove VQ... style hashes and generic suffixes
+        hash_and_bin_pattern = r'(VQ[A-Z0-9]{10,}|-bin|\.bin)' 
+        basename = re.sub(hash_and_bin_pattern, '', basename).strip()
+
+        # 2. **CRITICAL FIX:** Remove all tab/PID/browser-related arguments from the tail.
+        # This addresses both 'browser 14 tab' AND any simple trailing numbers (like 'browser 4')
+        tab_and_num_pattern = r'(?:\s+\d+)?\s+(tab.*|socket.*|rdd.*|process.*|\d+)$'
+        basename = re.sub(tab_and_num_pattern, '', basename, flags=re.IGNORECASE).strip()
+        
+        # 3. Remove common internal browser-role suffixes (renderer, rdd, content, etc.)
+        roles_pattern = r'-(renderer|gpu|utility|plugin|content|chrm|bsp|extension)$'
+        basename = re.sub(roles_pattern, '', basename, flags=re.IGNORECASE).strip()
+
+        # Final safety cleanup for any leading/trailing punctuation/spaces leftover
+        basename = re.sub(r'^\W+|\W+$', '', basename).strip()
+
+        # --- Phase 3: Last Resort Fallback ---
+        
+        if not basename or basename in ('exe', 'a.out'):
+            try:
+                basename = os.path.basename(wds[0])
+            except IndexError:
+                basename = 'exe'
+        
+        # Special Case Protection: Restore I3 if it was reduced
+        if basename == 'i':
+            basename = 'i3'
+
+        return basename
+
     def get_cmdline(self):
         """Get the command line of the PID."""
-        try:
 
+        try:
             cmdline_file = f'/proc/{self.pid}/cmdline'
             try:
                 # pylint: disable=consider-using-with
                 line = open(cmdline_file, encoding='utf-8').read()[:-1]
             except FileNotFoundError as exc:
-                # this seems to be a race which ignore; either the process is just
-                # started or just quickly ended before even identified
                 if DebugLevel:
                     DB(1, f'skip pid={self.pid} no-rollup-lines exc={type(exc).__name__}')
                 return
+
             arguments = line.split('\0')
             if not arguments or not arguments[0]: # kernel process
                 self.wanted, self.kernel = False, True
-                # print(f'{self.pid}: kernel thread')
                 return
-            # DB(0, f'{self.pid}: {arguments}')
-            # sometimes the first word
-            wds = os.path.basename(arguments[0]).split() + arguments[1:]
-            basename = re.sub(r'^\W+', '', wds.pop(0))
-            basename = re.sub(r'\W+$', '', basename)
-            # DB(0, f'basename={basename} wds={wds}')
-            if basename in ('python', 'python2', 'python3', 'perl', 'bash', 'ruby',
-                    'sh', 'ksh', 'zsh') and wds:
-                script = os.path.basename(wds[0])
-                # DB(0, f'script={script} wds[0]={wds[0]}')
-                if script != wds[0]:
-                    basename = f'{basename}->{script}'
+
+            exepath = arguments[0]
+            
+            # Prepare wds (words/arguments) for use in the helper and cmdline rebuild
+            base_name_list = os.path.basename(exepath).split()
+            if base_name_list:
+                initial_basename = base_name_list.pop(0) 
+                wds = base_name_list + arguments[1:]
+            else:
+                initial_basename = ''
+                wds = arguments[1:]
+                
+            # Use the robust helper to determine the final, clean basename
+            self.exebasename = self._get_exebasename(exepath, wds) 
+            
+            # --- START ELABORATION LOGIC ---
+
+            # 1. Elaboration: The Sudo Wrapper
+            if self.exebasename == 'sudo' and wds:
+                actual_cmd_name = os.path.basename(wds[0])
+                if actual_cmd_name:
+                    self.exebasename = actual_cmd_name
                     del wds[0]
-            self.exebasename = basename
-            self.cmdline = ' '.join([basename] + wds)
+
+            # 2. Elaboration: The Interpreter (Python, Perl, etc.)
+            if self.exebasename in ('python', 'python2', 'python3', 'perl', 'bash', 'ruby',
+                    'sh', 'ksh', 'zsh') and wds:
+
+                # 2.a. Catch the 'python -m <module>' pattern (The New Fix)
+                if len(wds) >= 2 and wds[0] == '-m':
+                    module_name = wds[1]
+                    self.exebasename = f'{self.exebasename}->{module_name}'
+                    # Remove '-m' and the module name from arguments
+                    del wds[0]
+                    del wds[0]
+                
+                # 2.b. Catch the standard '<script.py>' pattern (Original Logic)
+                elif wds[0] and os.path.exists(wds[0]) and os.path.isfile(wds[0]):
+                    script = os.path.basename(wds[0])
+                    if script != wds[0]:
+                        # Only elaborate if it's a clear script name, not a generic main
+                        if not re.search(r'^__main__\.', script):
+                            self.exebasename = f'{self.exebasename}->{script}'
+                            del wds[0] # Remove the script path from arguments
+
+            # --- END ELABORATION LOGIC ---
+
+            self.cmdline = ' '.join([self.exebasename] + wds)
             self.cmdline_trunc = self.cmdline[0:ProcMem.max_cmd_len]
-            # DB(0, f'basename={basename} cmdline_trunc={self.cmdline}')
+            
         except Exception as exc:
-            # not really expecting this ... probably a bug
+            # ... (rest of exception handling is the same)
             print(f'  WARNING: skip pid={self.pid} no-basename exc={exc}')
             print(traceback.format_exc())
             self.wanted = self.kernel = False
             self.why_not = 'CannotGetCmdline'
             return
 
-        ## print(f'DBDB: {self.pid} {ProcMem.opts.pids}')
         # filter unwanted before too much work
         if (ProcMem.opts.pids and str(self.pid) not in ProcMem.opts.pids
                 and self.exebasename not in ProcMem.opts.pids):
             self.wanted = False
             self.why_not = 'FilteredByArgs'
-            # print(f'    >>>> unwanted {pid}')
-        ## print(f'DBDB: {self.pid} wanted={self.wanted} why_not={self.why_not}')
+
         self.set_key()
 
     def set_key(self):
