@@ -95,6 +95,92 @@ def human(number):
     return '' # impossible, but make pylint happy
 
 ####################################################################################
+# PORTABLE FUNCTION - Copy-pasted from zram-advisor
+# When updating: copy entire function from zram_advisor/main.py (lines 86-166)
+####################################################################################
+def compute_zram_effective(meminfo_total, meminfo_used, meminfo_available,
+                          zram_orig_data_size, zram_mem_used_total,
+                          zram_disksize, zram_mem_limit=0, limit_pct=80):
+    """
+    Compute effective memory values accounting for zRAM compression.
+
+    This is a PORTABLE function that can be copy-pasted between projects.
+    NO class dependencies - all inputs passed as parameters.
+
+    Args:
+        meminfo_total: Total physical RAM in bytes
+        meminfo_used: Currently used RAM in bytes
+        meminfo_available: Available RAM in bytes
+        zram_orig_data_size: Uncompressed data size stored in zRAM (bytes)
+        zram_mem_used_total: Physical RAM consumed by zRAM including overhead (bytes)
+        zram_disksize: Max uncompressed data zRAM will accept (bytes)
+        zram_mem_limit: Max RAM zRAM can use (0=unlimited) (bytes)
+        limit_pct: Arbitrary limit on % of RAM zRAM should use (default 80%)
+
+    Returns:
+        SimpleNamespace with:
+            - e_used: Effective memory used (uncompressed equivalent)
+            - e_avail: Effective memory available
+            - e_max_used: Maximum effective memory at full zRAM capacity
+            - ratio_current: Current effective compression ratio
+            - ratio_projected: Projected ratio accounting for degradation
+            - projection_confidence: 'low', 'medium', or 'high'
+            - usage_fraction: Fraction of disksize currently used
+    """
+    # Calculate effective used memory (what it would be if uncompressed)
+    e_used = meminfo_used - zram_mem_used_total + zram_orig_data_size
+
+    # Determine compression ratio
+    ratio = None
+    if e_used <= meminfo_used:  # zRAM not helping yet
+        e_used = meminfo_used
+        ratio = 2.75  # Conservative guess for projection when no data yet
+
+    if ratio is None:  # Calculate actual ratio
+        ratio = zram_orig_data_size / zram_mem_used_total if zram_mem_used_total > 0 else 2.75
+
+    # Apply memory limit if configured
+    if zram_mem_limit > 0:
+        stats_limit_pct = (zram_mem_limit / meminfo_total) * 100
+        limit_pct = min(100.0, limit_pct, stats_limit_pct)
+
+    # Calculate usage fraction and apply degradation
+    usage_fraction = zram_orig_data_size / zram_disksize if zram_disksize > 0 else 0
+
+    # Degradation logic based on current usage
+    if usage_fraction < 0.10:
+        degradation_factor = 0.75  # Aggressive: little real data
+        confidence = "low"
+    elif usage_fraction < 0.50:
+        degradation_factor = 0.85  # Moderate: some real data
+        confidence = "medium"
+    else:
+        degradation_factor = 0.95  # Conservative: lots of real data
+        confidence = "high"
+
+    projected_ratio = ratio * degradation_factor
+
+    # Project maximum effective memory when zRAM fills to limit
+    e_max_used = projected_ratio * meminfo_total * limit_pct / 100
+    # Cap by disksize limit
+    e_max_used = min(e_max_used, zram_disksize)
+    # Add uncompressed memory not in zRAM
+    e_max_used += meminfo_total - e_max_used / projected_ratio
+
+    # Calculate effective available
+    e_avail = e_max_used - e_used
+
+    return SimpleNamespace(
+        e_used=e_used,
+        e_avail=e_avail,
+        e_max_used=e_max_used,
+        ratio_current=ratio,
+        ratio_projected=projected_ratio,
+        projection_confidence=confidence,
+        usage_fraction=usage_fraction
+    )
+
+####################################################################################
 ###### ZramProjector class
 ####################################################################################
 class ZramProjector:
@@ -156,7 +242,7 @@ class ZramProjector:
         return infos
 
     def compute_effective(self, meminfoKB):
-        """ Compute the effective values """
+        """ Compute the effective values - now uses portable function """
         def seed(meminfoKB):
             nonlocal self
             meminfo = self.meminfo = SimpleNamespace()
@@ -175,6 +261,8 @@ class ZramProjector:
         devs = self._get_zram_stats()
         if not devs:
             return
+
+        # Aggregate stats from all zRAM devices
         stats = None
         for stat in devs.values():
             # NOTE: generalization for more than one weak unless all
@@ -187,29 +275,25 @@ class ZramProjector:
         stats = SimpleNamespace(**stats)
         self.meminfo.MemZram = stats.mem_used_total
 
-        e_used = meminfo.MemUsed - stats.mem_used_total + stats.orig_data_size
-        ratio, self.ratio = None, 0.0
-        if e_used <= self.e_used: # zram hurts. assume not enuf data to project
-            e_used = self.e_used
-            self.ratio = ratio = 3.5 # wild guess for projection
-            # if self.DB: dump_effective(ns, '(unchg)')
-            # return ns
-        self.e_used = e_used
-        limit_pct = self.limit_pct
-        if stats.mem_limit > 0:
-            stats_limit_pct = (stats.limit / meminfo.MemTotal)*100
-            limit_pct = min(1.0, limit_pct, stats_limit_pct)
-            # projected amount of orig used memory that fits in limit
-        if ratio is None: # hopefully about 4 ;-)
-            self.ratio = ratio = stats.orig_data_size / stats.mem_used_total
-        e_max_used = ratio * meminfo.MemTotal * limit_pct/100
-            # now limit by disksize
-        e_max_used = min(e_max_used, stats.disksize)
-            # now add uncompressed memory
-        e_max_used += meminfo.MemTotal - e_max_used/ratio
-        self.e_max_used = e_max_used
-        # self.e_max_used = max(e_max_total, e_max_used)
-        self.e_avail = e_max_used - e_used
+        # Call the portable computation function
+        result = compute_zram_effective(
+            meminfo_total=meminfo.MemTotal,
+            meminfo_used=meminfo.MemUsed,
+            meminfo_available=meminfo.MemAvailable,
+            zram_orig_data_size=stats.orig_data_size,
+            zram_mem_used_total=stats.mem_used_total,
+            zram_disksize=stats.disksize,
+            zram_mem_limit=stats.mem_limit,
+            limit_pct=self.limit_pct
+        )
+
+        # Update instance variables from result
+        self.e_used = result.e_used
+        self.e_avail = result.e_avail
+        self.e_max_used = result.e_max_used
+        self.ratio = result.ratio_current
+        self.ratio_projected = result.ratio_projected
+        self.projection_confidence = result.projection_confidence
 
 
 ####################################################################################
@@ -1314,7 +1398,12 @@ def rerun_module_as_root(module_name):
     """ rerun using the module name """
     if os.geteuid() != 0: # Re-run the script with sudo
         os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        vp = ['sudo', sys.executable, '-m', module_name] + sys.argv[1:]
+        # Preserve PYTHONPATH to allow sudo to find user-installed packages
+        pythonpath = os.pathsep.join(sys.path)
+        env_vars = os.environ.copy()
+        env_vars['PYTHONPATH'] = pythonpath
+        # Use env to pass PYTHONPATH through sudo
+        vp = ['sudo', 'env', f'PYTHONPATH={pythonpath}', sys.executable, '-m', module_name] + sys.argv[1:]
         os.execvp('sudo', vp)
 
 def main():

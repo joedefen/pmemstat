@@ -20,7 +20,7 @@ classifiers = [
 ]
 dependencies = [
     'psutil > 5.9',
-    'console-window >= 1.0.0',
+    'console-window >= 1.0.5',
 ]
 
 [project.urls]
