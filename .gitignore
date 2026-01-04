@@ -1,4 +1,5 @@
 pmemstat.bundle
+.venv/
 dist/
 __pycache__/
 .vscode/
