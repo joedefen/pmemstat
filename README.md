@@ -24,10 +24,11 @@ Without `-o`, `pmemstat` shows less details and is much faster and sometimes les
 
 Its looping features allow monitoring for changes in memory growth which may be "leaks".  Segregating memory by types can make identifying leaks faster and more certain.
 
-**In version 2.0, `pmemstat` has many new features including**:
+**In version 2.0+, `pmemstat` has many new features including**:
 * In its **window mode**, `pmemstat` updates the terminal in place (using "curses") rather than scrolling.
 * Showing **CPU use**, too, which makes `pmemstat` a viable alternative to `top` for regular use (although more specialized and still focused on accurate memory representation).
-* Supports **killing processes** that are selected visually with confirmation they are really gone (or not).
+* Supports **inline search** (press `/` to search-as-you-type with live filtering).
+* Supports **killing processes** with inline confirmation (press `y` to confirm, ESC to cancel).
 * And several **new options** that can be **controlled dynamically** if in window mode.
 
 ## Installation Options
@@ -153,8 +154,24 @@ In window mode, press '?' to enter the help screen which looks like:
 * Below the line, there are a number of keys/options; when you type an option key (e.g, "c"), it will highlight the next option value (e.g., "off"); when you change options, they will be applied to the next loop of the main menu.
     * These option keys can be used in the main menu (e.g., pressing "c" will change hide or reveal the CPU column w/o entering the help screen).
     
+## Inline Search (Window Mode)
+Press `/` to activate inline search mode. The search bar appears in the header on the right side:
+* As you type, the display filters in real-time to show only matching processes
+* The search pattern is shown in **reverse video** with a `|` cursor indicator
+* Press **Enter** to finalize the search (pattern stays visible in normal video)
+* Press **ESC** to cancel and clear the search
+* The search is case-insensitive and matches any part of the process info
+
 ## Kill Mode (Window Mode)
-Pressing "K" enter "Kill Mode" where you use the navigation keys to highlight a row, and then press ENTER to kill the process(es) represented by that row.
+Press `K` to enter "Kill Mode" where you can select and kill processes:
+1. Use navigation keys to highlight a row
+2. Press **Enter** to initiate kill
+3. An inline confirmation prompt appears below the selected process:
+   - Shows the process name and count of PIDs (e.g., `[3 PIDs]`)
+   - Press **`y`** to confirm and kill the process(es)
+   - Press **ESC** to cancel
+4. After killing, a brief flash message shows the result (e.g., `✓ Killed 3 processes`)
+5. Press `K` again to exit Kill Mode
 
 ## Scroll Position (Window Mode)
 

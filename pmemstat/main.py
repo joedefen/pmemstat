@@ -50,7 +50,7 @@ import curses
 from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta
-from console_window import ConsoleWindow, OptionSpinner, IncrementalSearchBar
+from console_window import ConsoleWindow, OptionSpinner, IncrementalSearchBar, InlineConfirmation
 from pmemstat.KillThem import KillThem
 from pmemstat.CpuSmooth import CpuSmooth, SysStat
 
@@ -774,6 +774,8 @@ class PmemStat:
             on_accept=lambda text: self._search_accept(),
             on_cancel=lambda original_text: self._search_cancel(original_text)
         )
+        # Initialize inline confirmation for kill operations
+        self.confirmation = InlineConfirmation()
 
     def has_zram(self):
         """Have zRAM actual? """
@@ -1282,10 +1284,18 @@ class PmemStat:
                     attr = curses.A_REVERSE if group.is_new or group.is_changed else None
                     attr = None if is_first else attr
                     if self.window:
-                        self.groups_by_line[self.window.body.row_cnt] = group
+                        current_row = self.window.body.row_cnt
+                        self.groups_by_line[current_row] = group
                     self.pr_summary('A' if group.is_new
                         else f'{group.delta_pss:+,}K' if group.is_changed
                         else ' ', group.summary, attr=attr)
+                    # Show confirmation prompt right after the selected line
+                    if (self.window and self.confirmation.active and
+                        current_row == self.window.pick_pos):
+                        prompt = f'  Type "y" to kill: {self.confirmation.identity} (ESC to cancel)'
+                        if self.confirmation.input_buffer:
+                            prompt += f' [{self.confirmation.input_buffer}_]'
+                        self.emit(prompt, attr=curses.A_REVERSE)
                     shown_cnt += 1
                     # DB(0, f'obj: {vars(obj)}')
             elif is_first or self.opts.window:
@@ -1353,14 +1363,19 @@ class PmemStat:
                     group = self.groups_by_line.get(win.pick_pos, None)
                     if group:
                         pids = [x.pid for x in group.prcset]
-                        answer = win.answer(seed='',
-                            prompt=f'Type "y" to kill: {group.summary["info"]} {pids}')
-                        if answer and answer.lower().startswith('y'):
-                            killer = KillThem(pids)
-                            ok, message = killer.do_kill()
-                            win.alert(title='OK' if ok else 'FAIL', message=message)
-                    self.opts.kill_mode = False
-                    self.window.set_pick_mode(self.opts.kill_mode)
+                        # Start inline confirmation (requires 'y' key to confirm)
+                        pid_count = len(pids)
+                        pid_label = f'[{pid_count} {"PID" if pid_count == 1 else "PIDs"}]'
+                        self.confirmation.start(
+                            action_type='kill',
+                            identity=f'{group.summary["info"]} {pid_label}',
+                            mode='y'
+                        )
+                        win.passthrough_mode = True
+                    else:
+                        # No group selected, exit kill mode
+                        self.opts.kill_mode = False
+                        self.window.set_pick_mode(self.opts.kill_mode)
             return regroup
 
         self.spin = OptionSpinner()
@@ -1387,7 +1402,7 @@ class PmemStat:
         self.spin.add_key('cpu_avg_secs', 'a - cpu moving avg secs',
                           vals=[5, 10, 20, 45, 90], obj=self.opts)
 
-        keys_we_handle =  [ord('K'), ord('/'), curses.KEY_ENTER, 10] + list(self.spin.keys)
+        keys_we_handle =  [ord('K'), ord('/'), 27, curses.KEY_ENTER, 10] + list(self.spin.keys)
         self.window = ConsoleWindow(head_line=True, keys=keys_we_handle)
         is_first = True
         was_groupby, regroup = self.opts.groupby, True
@@ -1409,21 +1424,47 @@ class PmemStat:
                 self.window.set_pick_mode(self.opts.kill_mode)
                 self.window.render()
                 key = self.window.prompt(self.opts.loop_secs)
+                # Let confirmation handle keys when active (highest priority)
+                enter_kill_loop = True
+                if self.confirmation.active:
+                    result = self.confirmation.handle_key(key)
+                    if result == 'confirmed':
+                        # User confirmed - execute the kill
+                        group = self.groups_by_line.get(self.window.pick_pos, None)
+                        if group:
+                            pids = [x.pid for x in group.prcset]
+                            killer = KillThem(pids)
+                            ok, message = killer.do_kill()
+                            # Flash result message for 1 second
+                            self.window.flash(f'{"✓" if ok else "✗"} {message}', duration=1.0)
+                        self.confirmation.cancel()
+                        self.window.passthrough_mode = False
+                        self.opts.kill_mode = False
+                        self.window.set_pick_mode(self.opts.kill_mode)
+                    elif result == 'cancelled':
+                        # User cancelled with ESC - go back to outer loop to redisplay
+                        self.confirmation.cancel()
+                        self.window.passthrough_mode = False
+                        enter_kill_loop = False  # Skip kill loop to trigger redisplay
                 # Let search bar handle keys when active
-                if self.search_bar.is_active and self.search_bar.handle_key(key):
+                elif self.search_bar.is_active and self.search_bar.handle_key(key):
                     pass  # Key was handled by search bar
                 else:
                     do_key(key)
-                while self.opts.kill_mode:
-                    if self.mode == 'help':
-                        break
-                    self.window.render()
-                    key = self.window.prompt(self.opts.loop_secs)
-                    # Let search bar handle keys when active
-                    if self.search_bar.is_active and self.search_bar.handle_key(key):
-                        pass  # Key was handled by search bar
-                    else:
-                        do_key(key)
+                if enter_kill_loop:
+                    while self.opts.kill_mode and not self.confirmation.active:
+                        if self.mode == 'help':
+                            break
+                        self.window.render()
+                        key = self.window.prompt(self.opts.loop_secs)
+                        # Let search bar handle keys when active
+                        if self.search_bar.is_active and self.search_bar.handle_key(key):
+                            pass  # Key was handled by search bar
+                        else:
+                            do_key(key)
+                            # If confirmation was just started, break to outer loop to show prompt
+                            if self.confirmation.active:
+                                break
                 self.window.clear()
                 is_first = False
             else:
