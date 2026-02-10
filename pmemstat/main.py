@@ -50,7 +50,7 @@ import curses
 from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta
-from console_window import ConsoleWindow, OptionSpinner
+from console_window import ConsoleWindow, OptionSpinner, IncrementalSearchBar
 from pmemstat.KillThem import KillThem
 from pmemstat.CpuSmooth import CpuSmooth, SysStat
 
@@ -768,10 +768,27 @@ class PmemStat:
         self.groups_by_line = {}
         self._set_units()
         self.zram_projector = ZramProjector()
+        # Initialize inline search bar
+        self.search_bar = IncrementalSearchBar(
+            on_change=lambda text: setattr(self.opts, 'search', text),
+            on_accept=lambda text: self._search_accept(),
+            on_cancel=lambda original_text: self._search_cancel(original_text)
+        )
 
     def has_zram(self):
         """Have zRAM actual? """
         return bool(self.zram_projector and self.zram_projector.devs)
+
+    def _search_accept(self):
+        """Called when search is accepted (Enter pressed)"""
+        if self.window:
+            self.window.passthrough_mode = False
+
+    def _search_cancel(self, original_text):
+        """Called when search is cancelled (Esc pressed)"""
+        self.opts.search = original_text
+        if self.window:
+            self.window.passthrough_mode = False
 
     def get_sortby(self):
         """Make sort_by sensible."""
@@ -1081,14 +1098,21 @@ class PmemStat:
                 leader += f' PIDs={len(wanted_prcs)}/{total_user_pids}'
             else:
                 leader += f' PIDs={total_user_pids}'
-            if self.opts.search:
-                self.emit(leader +' /', to_head=True, resume=resume)
-                resume = True
-                self.emit(self.opts.search, to_head=True,
-                          resume=resume, attr=curses.A_UNDERLINE)
-                self.emit('/', to_head=True, resume=resume)
-            else:
-                self.emit(leader, to_head=True, resume=resume)
+
+            # Always show search indicator on the right
+            self.emit(leader + ' /', to_head=True, resume=resume)
+            resume = True
+
+            # Show search text with appropriate formatting
+            if self.search_bar.is_active:
+                # Active search mode: show pattern in reverse video with cursor
+                before = self.search_bar.text[:self.search_bar.cursor_pos]
+                after = self.search_bar.text[self.search_bar.cursor_pos:]
+                search_display = f'{before}|{after}'
+                self.emit(search_display, to_head=True, resume=resume, attr=curses.A_REVERSE)
+            elif self.opts.search:
+                # Finalized search: show pattern in normal video
+                self.emit(self.opts.search, to_head=True, resume=resume)
 
             if self.has_zram(): # second line if zRAM
                 resume = False
@@ -1306,7 +1330,10 @@ class PmemStat:
             regroup = False
             # ENSURE keys are in 'keys_we_handle'
             if key in (ord('/'), ):
-                pass
+                # Start inline search mode
+                self.search_bar.start(self.opts.search)
+                self.window.passthrough_mode = True
+                return regroup
             if key in self.spin.keys:
                 self.spin.do_key(key, self.window)
                 if key in (ord('u'), ):
@@ -1328,7 +1355,7 @@ class PmemStat:
                         pids = [x.pid for x in group.prcset]
                         answer = win.answer(seed='',
                             prompt=f'Type "y" to kill: {group.summary["info"]} {pids}')
-                        if answer.lower().startswith('y'):
+                        if answer and answer.lower().startswith('y'):
                             killer = KillThem(pids)
                             ok, message = killer.do_kill()
                             win.alert(title='OK' if ok else 'FAIL', message=message)
@@ -1359,10 +1386,8 @@ class PmemStat:
                           vals=[False, True], obj=self.opts)
         self.spin.add_key('cpu_avg_secs', 'a - cpu moving avg secs',
                           vals=[5, 10, 20, 45, 90], obj=self.opts)
-        self.spin.add_key('search', '/ - search string',
-                          prompt='Set search string, then Enter', obj=self.opts)
 
-        keys_we_handle =  [ord('K'), curses.KEY_ENTER, 10] + list(self.spin.keys)
+        keys_we_handle =  [ord('K'), ord('/'), curses.KEY_ENTER, 10] + list(self.spin.keys)
         self.window = ConsoleWindow(head_line=True, keys=keys_we_handle)
         is_first = True
         was_groupby, regroup = self.opts.groupby, True
@@ -1383,12 +1408,22 @@ class PmemStat:
                 regroup = False
                 self.window.set_pick_mode(self.opts.kill_mode)
                 self.window.render()
-                do_key(self.window.prompt(self.opts.loop_secs))
+                key = self.window.prompt(self.opts.loop_secs)
+                # Let search bar handle keys when active
+                if self.search_bar.is_active and self.search_bar.handle_key(key):
+                    pass  # Key was handled by search bar
+                else:
+                    do_key(key)
                 while self.opts.kill_mode:
                     if self.mode == 'help':
                         break
                     self.window.render()
-                    do_key(self.window.prompt(self.opts.loop_secs))
+                    key = self.window.prompt(self.opts.loop_secs)
+                    # Let search bar handle keys when active
+                    if self.search_bar.is_active and self.search_bar.handle_key(key):
+                        pass  # Key was handled by search bar
+                    else:
+                        do_key(key)
                 self.window.clear()
                 is_first = False
             else:
