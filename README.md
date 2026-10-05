@@ -37,22 +37,22 @@ Its looping features allow monitoring for changes in memory growth which may be 
 * And several **new options** that can be **controlled dynamically** if in window mode.
 
 ## How `pmemstat` Compares to Other Tools
-`top` and `htop` are excellent general-purpose process viewers, and `ps` is the classic snapshot tool. Where `pmemstat` differs is its focus on **accurate, proportional memory**: instead of reporting each process's resident set size (RES/RSS) — which double-counts shared pages and ignores uninstantiated virtual memory — it digests `smaps`/`smaps_rollup` to attribute shared memory fairly and to break memory down by type. That makes `pmemstat` slower to start (especially with `-o`) but far more truthful about who is really using RAM.
+`top` and `htop` are excellent general-purpose process viewers, and `ps` is the classic snapshot tool. Where `pmemstat` differs is its focus on **accurate, proportional memory**: instead of reporting each process's resident set size (RES/RSS) — which double-counts shared pages and ignores uninstantiated virtual memory — it digests `smaps`/`smaps_rollup` to attribute shared memory fairly and to break memory down by type. That makes `pmemstat` slower to start (especially with `-o`) but far more truthful about who is really using RAM. The closest peer is `smem`, which likewise derives **PSS** from `smaps`, so it is included below as the most direct point of comparison.
 
-| Feature | `pmemstat` | `top` | `htop` | `ps` |
-|---|---|---|---|---|
-| **Proportional memory (PSS)** accounting | ✓ core design | ✗ (RES, double-counts) | ✗ (RES, double-counts) | ✗ (RSS) |
-| **Memory-type breakdown** (shared/swap/stack/text/data) | ✓ | ✗ | ✗ | ✗ |
-| **Proportional swap** per grouping | ✓ | ✗ | ✗ (total swap only) | ✗ |
-| **Grouping** of processes by exe/cmd | ✓ aggregates PIDs into one row | ✗ | ✗ (tree view only) | ✗ (manual `--sort`/`grep`) |
-| **Memory-leak / delta monitoring** (only re-shows significant growth) | ✓ (`-k`, loop mode) | ✗ | ✗ | ✗ |
-| **zRAM-aware effective RAM** (eTot/eUsed/eAvail) | ✓ | ✗ | ✗ | ✗ |
-| **Data source** | `/proc/{PID}/smaps*` | `/proc` summary | `/proc` + libs | `/proc` |
-| **Interactive full-screen window** | ✓ (`console-window`/curses) | ✓ | ✓ | ✗ (one-shot) |
-| **CPU usage reporting** | ✓ | ✓ | ✓ | ✓ |
-| **Kill processes** | ✓ (inline confirm) | ✓ | ✓ | ✗ |
-| **Inline search-as-you-type** | ✓ (`/`) | ✗ | ✓ (F3) | ✗ |
-| **Requires root for all-process detail** | ✓ (else only your own) | ✗ | ✗ | ✗ |
+| Feature | `pmemstat` | `smem` | `top` | `htop` | `ps` |
+|---|---|---|---|---|---|
+| **Proportional memory (PSS)** accounting | ✓ core design | ✓ core design | ✗ (RES, double-counts) | ✗ (RES, double-counts) | ✗ (RSS) |
+| **Memory-type breakdown** (shared/swap/stack/text/data) | ✓ | ✗ (USS/PSS/RSS/Swap only) | ✗ | ✗ | ✗ |
+| **Proportional swap** per grouping | ✓ | ✗ (flat Swap column) | ✗ | ✗ (total swap only) | ✗ |
+| **Grouping** of processes by exe/cmd | ✓ aggregates PIDs into one row | ✓ by command by default | ✗ | ✗ (tree view only) | ✗ (manual `--sort`/`grep`) |
+| **Memory-leak / delta monitoring** (only re-shows significant growth) | ✓ (`-k`, loop mode) | ✗ | ✗ | ✗ | ✗ |
+| **zRAM-aware effective RAM** (eTot/eUsed/eAvail) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| **Data source** | `/proc/{PID}/smaps*` | `/proc/{PID}/smaps` | `/proc` summary | `/proc` + libs | `/proc` |
+| **Interactive full-screen window** | ✓ (`console-window`/curses) | ✗ (one-shot) | ✓ | ✓ | ✗ (one-shot) |
+| **CPU usage reporting** | ✓ | ✗ (memory only) | ✓ | ✓ | ✓ |
+| **Kill processes** | ✓ (inline confirm) | ✗ | ✓ | ✓ | ✗ |
+| **Inline search-as-you-type** | ✓ (`/`) | ✗ | ✗ | ✓ (F3) | ✗ |
+| **Requires root for all-process detail** | ✓ (else only your own) | ✓ (else only your own) | ✗ | ✗ | ✗ |
 
 In short: reach for `top`/`htop` when you want a fast, broad system overview, and reach for `pmemstat` when you need to know **how much memory a program (or group of programs) is truly responsible for**, to break that memory down by type, or to watch for creeping growth that suggests a leak.
 
