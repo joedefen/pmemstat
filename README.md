@@ -1,13 +1,18 @@
-> **Quick Start**: from the CLI
-> * **If `python3 -V` shows v3.11 or later, install with `pipx`**:
->   * install `pipx` per your distro's guidance
->   * then: `pipx upgrade pmemstat || pipx install pmemstat`
-> * **Else for python3.10 and lesser versions, install with `pip`**:
->   * install `pip` per your distro's guidance
->   * then: `python3 -m pip install --user --upgrade pmemstat`
-> * **To run**:
->   * simply run: `pmemstat`
->   * type "?" within `pmemstat` to show help screen.
+> **Quick Start**: from the CLI (requires **Python 3.10 or later**)
+> * **Preferred: install system-wide with `pipx`** — works as root or as your user, for every account:
+>   * `sudo pipx install --global pmemstat`
+>   * the launcher lands in `/usr/local/bin` (which `sudo` searches), so plain `sudo pmemstat` just works
+>   * to upgrade: `sudo pipx upgrade --global pmemstat || sudo pipx install --global pmemstat`
+> * **Fallback: per-user `pipx`** if you cannot install system-wide:
+>   * `pipx upgrade pmemstat || pipx install pmemstat`
+>   * the launcher lands in `~/.local/bin`, which `sudo` does **not** search; run it as your user: `pmemstat`
+>   * for system-wide coverage, either install system-wide (above) or let it elevate itself: set `export PMEMSTAT_AUTO_SUDO=1` once, then just run `pmemstat`
+> * **To run** (running as root shows **all** processes; as your user, only your own):
+>   * `sudo pmemstat`  (system-wide install)
+>   * `pmemstat`  (per-user install; your processes only, unless `PMEMSTAT_AUTO_SUDO=1`)
+>   * type "?" within `pmemstat` to show the help screen.
+
+> **Note (v4.0.0 — breaking changes):** the install method changed (prefer a system-wide `pipx install --global`; a per-user install is not elevated by `sudo`), and `pmemstat` no longer re-runs itself as root by default. For the 3.x behavior (full, all-process view when launched as your user), set `PMEMSTAT_AUTO_SUDO=1` in your environment — or just run `sudo pmemstat`.
 
 
 # pmemstat - Proportional Memory Status
@@ -24,18 +29,43 @@ Without `-o`, `pmemstat` shows less details and is much faster and sometimes les
 
 Its looping features allow monitoring for changes in memory growth which may be "leaks".  Segregating memory by types can make identifying leaks faster and more certain.
 
-**In version 2.0+, `pmemstat` has many new features including**:
+**In version 3.x, `pmemstat` has these features**:
 * In its **window mode**, `pmemstat` updates the terminal in place (using "curses") rather than scrolling.
 * Showing **CPU use**, too, which makes `pmemstat` a viable alternative to `top` for regular use (although more specialized and still focused on accurate memory representation).
 * Supports **inline search** (press `/` to search-as-you-type with live filtering).
 * Supports **killing processes** with inline confirmation (press `y` to confirm, ESC to cancel).
 * And several **new options** that can be **controlled dynamically** if in window mode.
 
+## How `pmemstat` Compares to Other Tools
+`top` and `htop` are excellent general-purpose process viewers, and `ps` is the classic snapshot tool. Where `pmemstat` differs is its focus on **accurate, proportional memory**: instead of reporting each process's resident set size (RES/RSS) — which double-counts shared pages and ignores uninstantiated virtual memory — it digests `smaps`/`smaps_rollup` to attribute shared memory fairly and to break memory down by type. That makes `pmemstat` slower to start (especially with `-o`) but far more truthful about who is really using RAM.
+
+| Feature | `pmemstat` | `top` | `htop` | `ps` |
+|---|---|---|---|---|
+| **Proportional memory (PSS)** accounting | ✓ core design | ✗ (RES, double-counts) | ✗ (RES, double-counts) | ✗ (RSS) |
+| **Memory-type breakdown** (shared/swap/stack/text/data) | ✓ | ✗ | ✗ | ✗ |
+| **Proportional swap** per grouping | ✓ | ✗ | ✗ (total swap only) | ✗ |
+| **Grouping** of processes by exe/cmd | ✓ aggregates PIDs into one row | ✗ | ✗ (tree view only) | ✗ (manual `--sort`/`grep`) |
+| **Memory-leak / delta monitoring** (only re-shows significant growth) | ✓ (`-k`, loop mode) | ✗ | ✗ | ✗ |
+| **zRAM-aware effective RAM** (eTot/eUsed/eAvail) | ✓ | ✗ | ✗ | ✗ |
+| **Data source** | `/proc/{PID}/smaps*` | `/proc` summary | `/proc` + libs | `/proc` |
+| **Interactive full-screen window** | ✓ (`console-window`/curses) | ✓ | ✓ | ✗ (one-shot) |
+| **CPU usage reporting** | ✓ | ✓ | ✓ | ✓ |
+| **Kill processes** | ✓ (inline confirm) | ✓ | ✓ | ✗ |
+| **Inline search-as-you-type** | ✓ (`/`) | ✗ | ✓ (F3) | ✗ |
+| **Requires root for all-process detail** | ✓ (else only your own) | ✗ | ✗ | ✗ |
+
+In short: reach for `top`/`htop` when you want a fast, broad system overview, and reach for `pmemstat` when you need to know **how much memory a program (or group of programs) is truly responsible for**, to break that memory down by type, or to watch for creeping growth that suggests a leak.
+
 ## Installation Options
 Note that:
-* `pmemstat` needs to run as root to read the memory statistics for all processes (which is normally desired).
-* By default, `pmemstat` reruns itself as with `sudo` (thus you need `sudo` privileges).
-* To defeat re-running with `sudo`, use the `--run-as-user` or `-U` option.
+* `pmemstat` requires **Python 3.10 or later**.
+* `pmemstat` needs root privileges to read the memory statistics (`smaps`/`smaps_rollup`) for **all** processes; without them it reports only your own processes.
+* By default `pmemstat` runs as the invoking user and shows a hint; it does **not** silently escalate to root.
+* Where it is installed matters: a system-wide install (e.g. `sudo pipx install --global pmemstat`) is visible to both your user and root, so `sudo pmemstat` works; a per-user install lives in `~/.local/bin`, which root does not search, so you either run it as your user or let it elevate itself.
+* To have it re-run itself under `sudo` automatically, opt in once with `export PMEMSTAT_AUTO_SUDO=1` in your shell profile, or pass `--auto-sudo` per invocation (for a system-wide install you can also simply run `sudo pmemstat`).
+* Auto-elevation is skipped when there is no terminal for a `sudo` prompt and sudo is not already authorized, so scripts/CI never hang waiting for a password.
+* To force user-only operation and disable auto-elevation, use the `--run-as-user` or `-U` option.
+* `pmemstat` depends on `console-window`, pinned to an **exact version** on purpose. That package provides the curses UI and is deliberately not allowed to float: the pin protects against unexpected upstream changes and preserves the author's freedom to make backwards-incompatible UI revisions. Installing `pmemstat` pulls the pinned version automatically; do not "upgrade" `console-window` independently.
 
 See the Quick Start at the top for preferred install instructions using `pipx`. If not acceptable, see the "Alternative Installation Options" section below.
 
@@ -43,7 +73,7 @@ See the Quick Start at the top for preferred install instructions using `pipx`. 
 ## Usage
 ```
 usage: pmemstat [-h] [-D] [-C] [-g {exe,cmd,pid}] [-f] [-k MIN_DELTA_KB]
-        [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-n] [-U] [-o]
+        [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-n] [-U] [--auto-sudo] [-o]
         [-u {MB,mB,KB,human}] [-R] [-s {mem,cpu,name}] [-/ SEARCH] [-W] [pids ...]
 
 positional arguments:
@@ -57,7 +87,7 @@ options:
                         grouping method for presenting rows
   -f, --fit-to-window   do not overflow window [if -w]
   -k MIN_DELTA_KB, --min-delta-kb MIN_DELTA_KB
-                        minimum delta KB to show again [dflt=100 if DB else 1000
+                        minimum delta KB to show again [dflt=100 if DB else 1000]
   -l LOOP_SECS, --loop LOOP_SECS
                         loop interval in secs [dflt=5 if -w else 0]
   -L CMDLEN, --cmdlen CMDLEN
@@ -66,12 +96,13 @@ options:
                         report group contributing to top pct of ptotal [dflt=100]
   -n, --numbers         show line numbers in report
   -U, --run-as-user     run as user (NOT as root)
-  -o, --others          collapse shSYSV, shOth, stack, text into "other"
+  --auto-sudo           re-run self as root via sudo (same as PMEMSTAT_AUTO_SUDO)
+  -o, --others          expand "other" into shSYSV, shOth, stack, text
   -u {MB,mB,KB,human}, --units {MB,mB,KB,human}
                         units of memory [dflt=MB]
   -R, --no-rise         do NOT raise change/adds to top (only in window mode)
   -s {mem,cpu,name}, --sortby {mem,cpu,name}
-                        grouping method for presenting rows
+                        sort method for presenting rows
   -/ SEARCH, --search SEARCH
                         show items with search string in name
   -W, --no-window       show in "curses" window [disables: -D,-t,-L]
@@ -213,6 +244,6 @@ If the `pipx` install is not acceptable, choose the best way to install:
 ```
 * Or **from PyPi as root**. This makes `pmemstat` available to all users with `/usr/local/bin` on `$PATH`. Note: `PIP_BREAK_SYSTEM_PACKAGES=1` may be required on some distros.
 ```
-        PIP_BREAK_SYSTEM_PACKAGES=1 sudo python -m pip install pmemstat
+        sudo PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install pmemstat
         # to uninstall: sudo python -m pip uninstall pmemstat
 ```

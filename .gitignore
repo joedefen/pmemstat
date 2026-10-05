@@ -1,6 +1,8 @@
 pmemstat.bundle
 .venv/
 dist/
+build/
 __pycache__/
+.pytest_cache/
 .vscode/
 *.egg-info/

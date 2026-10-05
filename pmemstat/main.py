@@ -42,6 +42,7 @@ NOTE: kB is a misnomer ... should be "KB".  Morons.
 
 import os
 import re
+import subprocess
 import sys
 import traceback
 import time
@@ -50,7 +51,32 @@ import curses
 from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta
-from console_window import ConsoleWindow, OptionSpinner, IncrementalSearchBar, InlineConfirmation
+# console-window is intentionally pinned to an exact version (see pyproject.toml).
+# Provide a clear, actionable message instead of a bare ImportError when the
+# pinned package is missing or when a different version has been substituted.
+_CONSOLE_WINDOW_PIN = '1.4.3'
+try:
+    import console_window
+    from console_window import (ConsoleWindow, OptionSpinner,
+                                IncrementalSearchBar, InlineConfirmation)
+except ImportError as _cw_exc:  # pragma: no cover (only on a broken install)
+    raise SystemExit(
+        'pmemstat requires the console-window package pinned to '
+        f'version {_CONSOLE_WINDOW_PIN} (an intentional exact pin by the author).\n'
+        f'Could not import console_window: {_cw_exc}\n'
+        'Install/repair it with:\n'
+        f"    python3 -m pip install --user 'console-window=={_CONSOLE_WINDOW_PIN}'"
+    ) from _cw_exc
+
+_cw_found = getattr(console_window, '__version__', None)
+if _cw_found is not None and _cw_found != _CONSOLE_WINDOW_PIN:  # pragma: no cover
+    raise SystemExit(
+        'pmemstat requires console-window=='
+        f'{_CONSOLE_WINDOW_PIN} but found {_cw_found}.\n'
+        'The exact pin is intentional. Reinstall the pinned version with:\n'
+        f"    python3 -m pip install --user 'console-window=={_CONSOLE_WINDOW_PIN}'"
+    )
+
 from pmemstat.KillThem import KillThem
 from pmemstat.CpuSmooth import CpuSmooth, SysStat
 
@@ -1165,7 +1191,7 @@ class PmemStat:
             self.emit('     - Type "?" to open Help Screen')
             self.emit('     - Type "Ctrl-C" to exit program')
             if os.geteuid() != 0:
-                self.emit('     - Install with "sudo" to show all PIDs!',
+                self.emit('     - Run "sudo pmemstat" to show all PIDs!',
                           attr=curses.A_BOLD)
 
             self.window.render()
@@ -1330,7 +1356,7 @@ class PmemStat:
                    to_head=True, attr=curses.A_BOLD)
         self.spin.show_help_nav_keys(self.window)
         if os.geteuid() != 0:
-            self.emit('Hint: install with "sudo" to show all PIDs',
+            self.emit('Hint: run "sudo pmemstat" to show all PIDs',
                        attr=curses.A_BOLD)
         self.spin.show_help_body(self.window)
 
@@ -1470,17 +1496,86 @@ class PmemStat:
             else:
                 assert False, f'unsupported mode ({self.mode})'
 
+# Root auto-elevation is opt-in so the tool never escalates behind the
+# user's back. Opt in once in a shell profile with, e.g.:
+#     export PMEMSTAT_AUTO_SUDO=1
+# or per invocation with the equivalent --auto-sudo flag. Falsy values
+# ("0", "false", "no", "off") leave auto-elevation disabled.
+AUTO_SUDO_ENV = 'PMEMSTAT_AUTO_SUDO'
+
+def auto_sudo_opted_in():
+    """True when the user has explicitly opted into automatic root elevation."""
+    value = os.environ.get(AUTO_SUDO_ENV, '').strip().lower()
+    return value not in ('', '0', 'false', 'no', 'off')
+
+def _isolated_can_import(module_root):
+    """Whether an isolated interpreter (``python -I``) would find module_root.
+
+    This mirrors the environment used for the sudo'd process, so we can
+    decline cleanly instead of prompting for a password and then failing
+    with a confusing ImportError (e.g. for a ``pip install --user`` against
+    a system interpreter).
+    """
+    code = ('import importlib.util, sys; '
+            f'sys.exit(0 if importlib.util.find_spec({module_root!r}) else 3)')
+    try:
+        proc = subprocess.run([sys.executable, '-I', '-c', code],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, check=False)
+    except OSError:
+        return False
+    return proc.returncode == 0
+
+def _sudo_noninteractive_ok():
+    """True if sudo can run without prompting (already authorized/NOPASSWD)."""
+    try:
+        proc = subprocess.run(['sudo', '-n', 'true'],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, check=False)
+    except OSError:
+        return False
+    return proc.returncode == 0
+
 def rerun_module_as_root(module_name):
-    """ rerun using the module name """
-    if os.geteuid() != 0: # Re-run the script with sudo
-        os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        # Preserve PYTHONPATH to allow sudo to find user-installed packages
-        pythonpath = os.pathsep.join(sys.path)
-        env_vars = os.environ.copy()
-        env_vars['PYTHONPATH'] = pythonpath
-        # Use env to pass PYTHONPATH through sudo
-        vp = ['sudo', 'env', f'PYTHONPATH={pythonpath}', sys.executable, '-m', module_name] + sys.argv[1:]
-        os.execvp('sudo', vp)
+    """Re-exec ``module_name`` as root via sudo, but only in a safe, opt-in way.
+
+    Returns ``True`` if the process was replaced (which does not return) and
+    ``False`` if elevation was declined, in which case the caller should keep
+    running as the invoking user.
+
+    Safety properties compared with the previous unconditional re-exec:
+      * never runs by default: the caller opts in via ``--auto-sudo`` or the
+        ``PMEMSTAT_AUTO_SUDO`` environment variable;
+      * requires an interactive terminal unless sudo is already authorized
+        non-interactively, so scripts/CI cannot hang on a password prompt;
+      * re-execs the *same interpreter* in isolated mode (``-I``), so the
+        caller's ``PYTHONPATH``, the current directory and the per-user site
+        directory are not consulted by the root process. This removes the
+        ``sitecustomize.py`` / module-shadowing privilege escalation that the
+        previous ``sudo env PYTHONPATH=...`` permitted;
+      * declines when the isolated interpreter cannot import the module,
+        instead of prompting for a password and then failing.
+    """
+    if os.geteuid() == 0:
+        return True
+    module_root = module_name.split('.')[0]
+    if not _isolated_can_import(module_root):
+        print(f'pmemstat: not elevating to root: "{module_root}" is not '
+              'importable by an isolated interpreter (install system-wide, '
+              'with pipx, or inside a virtualenv to enable auto-sudo).',
+              file=sys.stderr)
+        return False
+    if not (sys.stdin.isatty() or _sudo_noninteractive_ok()):
+        print('pmemstat: not elevating to root (no terminal for a sudo '
+              'prompt); run "sudo pmemstat" for full detail.',
+              file=sys.stderr)
+        return False
+    cmd = ['sudo', sys.executable, '-I', '-m', module_name] + sys.argv[1:]
+    try:
+        os.execvp('sudo', cmd)
+    except OSError as exc:
+        print(f'pmemstat: could not exec sudo: {exc}', file=sys.stderr)
+    return False
 
 def main():
     """Main loop"""
@@ -1496,7 +1591,7 @@ def main():
     parser.add_argument('-f', '--fit-to-window', action='store_true',
             help='do not overflow window [if -w]')
     parser.add_argument('-k', '--min-delta-kb', type=int, default=None,
-            help='minimum delta KB to show again [dflt=100 if DB else 1000')
+            help='minimum delta KB to show again [dflt=100 if DB else 1000]')
     parser.add_argument('-l', '--loop', type=int, default=0, dest='loop_secs',
             help='loop interval in secs [dflt=5 if -w else 0]')
     parser.add_argument('-L', '--cmdlen', type=int, default=36,
@@ -1507,6 +1602,8 @@ def main():
             help='show line numbers in report')
     parser.add_argument('-U', '--run-as-user', action='store_true',
             help='run as user (NOT as root)')
+    parser.add_argument('--auto-sudo', action='store_true',
+            help='re-run self as root via sudo (same as PMEMSTAT_AUTO_SUDO)')
     parser.add_argument('-o', '--others', action='store_false',
             help='expand "other" into shSYSV, shOth, stack, text')
     parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'),
@@ -1514,7 +1611,7 @@ def main():
     parser.add_argument('-R', '--no-rise', action='store_false', dest='rise_to_top',
             help='do NOT raise change/adds to top (only in window mode)')
     parser.add_argument('-s', '--sortby', choices=('mem', 'cpu', 'name'),
-            default='mem', help='grouping method for presenting rows')
+            default='mem', help='sort method for presenting rows')
     parser.add_argument('-/', '--search', default='',
             help='show items with search string in name')
     parser.add_argument('-W', '--no-window', action='store_false', dest='window',
@@ -1525,8 +1622,14 @@ def main():
     # DB(0, f'opts={opts}')
 
     if not opts.run_as_user and os.geteuid() != 0:
-        # Re-run the script with sudo needed and opted
-        rerun_module_as_root('pmemstat.main')
+        if opts.auto_sudo or auto_sudo_opted_in():
+            # Opted in explicitly: try to elevate, but stay as the user if
+            # elevation is declined (reason is printed by the call).
+            rerun_module_as_root('pmemstat.main')
+        elif not opts.window:
+            print("pmemstat: running as user (other users' processes omitted); "
+                  'run "sudo pmemstat" or set PMEMSTAT_AUTO_SUDO=1 for full '
+                  'coverage.', file=sys.stderr)
 
 
     if opts.min_delta_kb is None:

@@ -3,12 +3,50 @@
 # Located in the top-level <svr pmemstat> directory
 
 import os
+import pwd
 import sys
 
 # Add the project directory to PYTHONPATH for editable install support
 project_dir = os.path.dirname(os.path.abspath(__file__))
 if project_dir not in sys.path:
     sys.path.insert(0, project_dir)
+
+
+def add_invoking_users_site_packages():
+    """Make a ``pip install --user`` dependency visible under ``sudo ./runner``.
+
+    Root's interpreter does not search the invoking user's per-user
+    site-packages, so running this checkout with plain ``sudo`` fails to
+    import the pinned ``console-window`` dependency that was installed with
+    ``--user`` (see the ``externally-managed-environment`` PEP 668 error when
+    trying to install it system-wide instead).
+
+    This is only reached when the developer *explicitly* runs
+    ``sudo ./runner``; it is NOT used by the installed ``pmemstat`` entry
+    point, whose ``--auto-sudo`` path deliberately never injects a
+    user-writable import path into root.  Bridging the original user's
+    site-packages here is therefore a deliberate, explicit developer
+    convenience rather than an automatic escalation.
+    """
+    if os.geteuid() != 0:
+        return
+    sudo_user = os.environ.get('SUDO_USER')
+    if not sudo_user or sudo_user == 'root':
+        return
+    try:
+        user_home = pwd.getpwnam(sudo_user).pw_dir
+    except KeyError:
+        return
+    ver = f'python{sys.version_info.major}.{sys.version_info.minor}'
+    for candidate in (
+            os.path.join(user_home, '.local', 'lib', ver, 'site-packages'),
+            os.path.join(user_home, '.local', 'lib', 'python3', 'site-packages'),
+    ):
+        if os.path.isdir(candidate) and candidate not in sys.path:
+            sys.path.insert(0, candidate)
+
+
+add_invoking_users_site_packages()
 
 # Import and run the main module directly
 if __name__ == '__main__':
