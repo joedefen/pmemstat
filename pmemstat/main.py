@@ -51,6 +51,8 @@ import curses
 from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta
+from pmemstat.KillThem import KillThem
+from pmemstat.CpuSmooth import CpuSmooth, SysStat
 # console-window is intentionally pinned to an exact version (see pyproject.toml).
 # Provide a clear, actionable message instead of a bare ImportError when the
 # pinned package is missing or when a different version has been substituted.
@@ -76,9 +78,6 @@ if _cw_found is not None and _cw_found != _CONSOLE_WINDOW_PIN:  # pragma: no cov
         'The exact pin is intentional. Reinstall the pinned version with:\n'
         f"    python3 -m pip install --user 'console-window=={_CONSOLE_WINDOW_PIN}'"
     )
-
-from pmemstat.KillThem import KillThem
-from pmemstat.CpuSmooth import CpuSmooth, SysStat
 
 # Trace Levels:
 #  0 - forced, temporary debugging (comment it out)
@@ -218,6 +217,8 @@ class ZramProjector:
         self.e_used = 0
         self.e_max_used = 0
         self.ratio = 0.0
+        self.ratio_projected = 0.0
+        self.projection_confidence = 'low'
         self.limit_pct = 80
         self.devs = {}
         self.DB = False
@@ -400,11 +401,12 @@ class ProcMem:
         """
         Final, definitive, robust executable base name resolver.
         """
-        
+
         # --- Phase 1: Determine the Initial Best Name Candidate ---
         # ... (same initial logic as before, using os.readlink)
         basename = os.path.basename(exepath)
-        is_bad_name = not basename or basename == 'exe' or len(basename) > 16 or not re.search(r'[a-zA-Z]', basename)
+        is_bad_name = (not basename or basename == 'exe' or len(basename) > 16
+                       or not re.search(r'[a-zA-Z]', basename))
 
         if is_bad_name:
             try:
@@ -417,14 +419,14 @@ class ProcMem:
         # --- Phase 2: Multi-Step Aggressive Cleanup (The FINAL Final Fix) ---
 
         # 1. Remove VQ... style hashes and generic suffixes
-        hash_and_bin_pattern = r'(VQ[A-Z0-9]{10,}|-bin|\.bin)' 
+        hash_and_bin_pattern = r'(VQ[A-Z0-9]{10,}|-bin|\.bin)'
         basename = re.sub(hash_and_bin_pattern, '', basename).strip()
 
         # 2. **CRITICAL FIX:** Remove all tab/PID/browser-related arguments from the tail.
         # This addresses both 'browser 14 tab' AND any simple trailing numbers (like 'browser 4')
         tab_and_num_pattern = r'(?:\s+\d+)?\s+(tab.*|socket.*|rdd.*|process.*|\d+)$'
         basename = re.sub(tab_and_num_pattern, '', basename, flags=re.IGNORECASE).strip()
-        
+
         # 3. Remove common internal browser-role suffixes (renderer, rdd, content, etc.)
         roles_pattern = r'-(renderer|gpu|utility|plugin|content|chrm|bsp|extension)$'
         basename = re.sub(roles_pattern, '', basename, flags=re.IGNORECASE).strip()
@@ -433,13 +435,13 @@ class ProcMem:
         basename = re.sub(r'^\W+|\W+$', '', basename).strip()
 
         # --- Phase 3: Last Resort Fallback ---
-        
+
         if not basename or basename in ('exe', 'a.out'):
             try:
                 basename = os.path.basename(wds[0])
             except IndexError:
                 basename = 'exe'
-        
+
         # Special Case Protection: Restore I3 if it was reduced
         if basename == 'i':
             basename = 'i3'
@@ -465,19 +467,17 @@ class ProcMem:
                 return
 
             exepath = arguments[0]
-            
+
             # Prepare wds (words/arguments) for use in the helper and cmdline rebuild
             base_name_list = os.path.basename(exepath).split()
             if base_name_list:
-                initial_basename = base_name_list.pop(0) 
-                wds = base_name_list + arguments[1:]
+                wds = base_name_list[1:] + arguments[1:]
             else:
-                initial_basename = ''
                 wds = arguments[1:]
-                
+
             # Use the robust helper to determine the final, clean basename
-            self.exebasename = self._get_exebasename(exepath, wds) 
-            
+            self.exebasename = self._get_exebasename(exepath, wds)
+
             # --- START ELABORATION LOGIC ---
 
             # 1. Elaboration: The Sudo Wrapper
@@ -498,7 +498,7 @@ class ProcMem:
                     # Remove '-m' and the module name from arguments
                     del wds[0]
                     del wds[0]
-                
+
                 # 2.b. Catch the standard '<script.py>' pattern (Original Logic)
                 elif wds[0] and os.path.exists(wds[0]) and os.path.isfile(wds[0]):
                     script = os.path.basename(wds[0])
@@ -512,7 +512,7 @@ class ProcMem:
 
             self.cmdline = ' '.join([self.exebasename] + wds)
             self.cmdline_trunc = self.cmdline[0:ProcMem.max_cmd_len]
-            
+
         except Exception as exc:
             # ... (rest of exception handling is the same)
             print(f'  WARNING: skip pid={self.pid} no-basename exc={exc}')
@@ -798,7 +798,7 @@ class PmemStat:
         self.search_bar = IncrementalSearchBar(
             on_change=lambda text: setattr(self.opts, 'search', text),
             on_accept=lambda text: self._search_accept(),
-            on_cancel=lambda original_text: self._search_cancel(original_text)
+            on_cancel=self._search_cancel
         )
         # Initialize inline confirmation for kill operations
         self.confirmation = InlineConfirmation()
@@ -1055,6 +1055,7 @@ class PmemStat:
         return meminfoKB
 
     def get_vmstat(self):
+        """Get most vital stats from /proc/vmstat."""
         def make_ns(now):
             ns = SimpleNamespace()
             ns.base_time = now
@@ -1064,7 +1065,6 @@ class PmemStat:
             ns.rate = 0
             return ns
 
-        """Get most vital stats from /proc/vmstat'"""
         infofile = '/proc/vmstat'
         now = time.monotonic()
         if not self.vmstat:
@@ -1095,7 +1095,6 @@ class PmemStat:
 
     def loop(self, now, is_first, regroup=False):
         """one loop thru all pids"""
-        # pylint: disable=too-many-branches
         def sort_kernel_prcs():
             self.kernel_prcs = sorted(self.kernel_prcs, reverse=True,
                   key=lambda x: x.cpu.percent if x.cpu else 0)
@@ -1169,7 +1168,6 @@ class PmemStat:
                     leader += f'    {prc.cpu.percent:.2f}% {nickname}'
                 self.emit(leader, to_head=True, resume=resume)
 
-            # pylint: disable=too-many-branches
         self.loop_num += 1
         meminfoKB = self.get_meminfo()
         vmstat = self.get_vmstat()
@@ -1217,6 +1215,7 @@ class PmemStat:
         # do cpu together that stats are consistent
         if self.opts.cpu:
             SysStat.refresh()
+            percent = 0
             for prc in prcs:
                 if prc.wanted or prc.kernel:
                     percent = prc.refresh_cpu()

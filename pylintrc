@@ -1,0 +1,24 @@
+# Pylint configuration for pmemstat.
+#
+# A few structural/design checks are intentionally tolerated because they do not
+# indicate defects for this codebase.  Everything else (real errors and most
+# warnings) stays enabled so that CI linting remains meaningful.
+#
+#   duplicate-code                - the three run()/main() try/except wrappers are deliberate
+#   too-many-branches             - the main reporting loop is inherently branchy
+#   too-many-nested-blocks        - ditto
+#   too-many-positional-arguments - compute_zram_effective() is a portable copy-paste API
+#   unused-argument               - (same) meminfo_available is kept for API parity
+#   chained-comparison            - false positive on the boolean chain in categorize_chunks()
+
+[MAIN]
+jobs = 0
+
+[MESSAGES CONTROL]
+disable =
+    duplicate-code,
+    too-many-branches,
+    too-many-nested-blocks,
+    too-many-positional-arguments,
+    unused-argument,
+    chained-comparison
