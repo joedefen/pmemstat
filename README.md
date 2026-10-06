@@ -29,32 +29,34 @@ Without `-o`, `pmemstat` shows less details and is much faster and sometimes les
 
 Its looping features allow monitoring for changes in memory growth which may be "leaks".  Segregating memory by types can make identifying leaks faster and more certain.
 
-**In version 3.x, `pmemstat` has these features**:
+**`pmemstat` has these features**:
 * In its **window mode**, `pmemstat` updates the terminal in place (using "curses") rather than scrolling.
 * Showing **CPU use**, too, which makes `pmemstat` a viable alternative to `top` for regular use (although more specialized and still focused on accurate memory representation).
 * Supports **inline search** (press `/` to search-as-you-type with live filtering).
 * Supports **killing processes** with inline confirmation (press `y` to confirm, ESC to cancel).
+* **Grouping by cgroup v2** (`-g cgroup`), so services, scopes and containers can be compared using both proportional PSS and the kernel's own `memory.current`/`memory.stat`/`memory.pressure`.
 * And several **new options** that can be **controlled dynamically** if in window mode.
 
 ## How `pmemstat` Compares to Other Tools
-`top` and `htop` are excellent general-purpose process viewers, and `ps` is the classic snapshot tool. Where `pmemstat` differs is its focus on **accurate, proportional memory**: instead of reporting each process's resident set size (RES/RSS) — which double-counts shared pages and ignores uninstantiated virtual memory — it digests `smaps`/`smaps_rollup` to attribute shared memory fairly and to break memory down by type. That makes `pmemstat` slower to start (especially with `-o`) but far more truthful about who is really using RAM. The closest peer is `smem`, which likewise derives **PSS** from `smaps`, so it is included below as the most direct point of comparison.
+Reach for `top` or `ps` when you need a tool that is always installed, and `htop` when you want a friendly full-screen overview. Where `pmemstat` differs is its focus on **accurate, proportional memory**: instead of reporting each process's resident set size (RES/RSS) — which double-counts shared pages and ignores uninstantiated virtual memory — it digests `smaps`/`smaps_rollup` to attribute shared memory fairly and to break memory down by type. That makes `pmemstat` slower to start (especially with `-o`) but far more truthful about who is really using RAM. The table below compares it against its closest peers: `smem` (the other tool that derives **PSS** from `smaps`) and `systemd-cgtop` (whose per-cgroup view `pmemstat` now mirrors, but with proportional numbers).
 
-| Feature | `pmemstat` | `smem` | `top` | `htop` | `ps` |
-|---|---|---|---|---|---|
-| **Proportional memory (PSS)** accounting | ✓ core design | ✓ core design | ✗ (RES, double-counts) | ✗ (RES, double-counts) | ✗ (RSS) |
-| **Memory-type breakdown** (shared/swap/stack/text/data) | ✓ | ✗ (USS/PSS/RSS/Swap only) | ✗ | ✗ | ✗ |
-| **Proportional swap** per grouping | ✓ | ✗ (flat Swap column) | ✗ | ✗ (total swap only) | ✗ |
-| **Grouping** of processes by exe/cmd | ✓ aggregates PIDs into one row | ✓ by command by default | ✗ | ✗ (tree view only) | ✗ (manual `--sort`/`grep`) |
-| **Memory-leak / delta monitoring** (only re-shows significant growth) | ✓ (`-k`, loop mode) | ✗ | ✗ | ✗ | ✗ |
-| **zRAM-aware effective RAM** (eTot/eUsed/eAvail) | ✓ | ✗ | ✗ | ✗ | ✗ |
-| **Data source** | `/proc/{PID}/smaps*` | `/proc/{PID}/smaps` | `/proc` summary | `/proc` + libs | `/proc` |
-| **Interactive full-screen window** | ✓ (`console-window`/curses) | ✗ (one-shot) | ✓ | ✓ | ✗ (one-shot) |
-| **CPU usage reporting** | ✓ | ✗ (memory only) | ✓ | ✓ | ✓ |
-| **Kill processes** | ✓ (inline confirm) | ✗ | ✓ | ✓ | ✗ |
-| **Inline search-as-you-type** | ✓ (`/`) | ✗ | ✗ | ✓ (F3) | ✗ |
-| **Requires root for all-process detail** | ✓ (else only your own) | ✓ (else only your own) | ✗ | ✗ | ✗ |
+| Feature | `pmemstat` | `smem` | `systemd-cgtop` | `htop` |
+|---|---|---|---|---|
+| **Proportional memory (PSS)** accounting | ✓ core design | ✓ core design | ✗ (`memory.current`) | ✗ (RES, double-counts) |
+| **Memory-type breakdown** (shared/swap/stack/text/data) | ✓ | ✗ (USS/PSS/RSS/Swap only) | ✗ | ✗ |
+| **Proportional swap** per grouping | ✓ | ✗ (flat Swap column) | ✗ | ✗ (total swap only) |
+| **Group processes** by executable/command | ✓ aggregates PIDs into one row | ✓ by command by default | ✗ | ✗ (tree view only) |
+| **Group by cgroup v2** (services, scopes, containers) | ✓ (`-g cgroup`) | ✗ | ✓ (its core design) | ✗ |
+| **Memory-leak / delta monitoring** (only re-shows significant growth) | ✓ (`-k`, loop mode) | ✗ | ✗ | ✗ |
+| **zRAM-aware effective RAM** (eTot/eUsed/eAvail) | ✓ | ✗ | ✗ | ✗ |
+| **Data source** | `/proc/{PID}/smaps*` | `/proc/{PID}/smaps` | `/sys/fs/cgroup` | `/proc` + libs |
+| **Interactive full-screen window** | ✓ (`console-window`/curses) | ✗ (one-shot) | ✓ | ✓ |
+| **CPU usage reporting** | ✓ | ✗ (memory only) | ✓ | ✓ |
+| **Kill processes** | ✓ (inline confirm) | ✗ | ✗ | ✓ |
+| **Inline search-as-you-type** | ✓ (`/`) | ✗ | ✗ | ✓ (F3) |
+| **Requires root for all-process detail** | ✓ (else only your own) | ✓ (else only your own) | ✗ | ✗ |
 
-In short: reach for `top`/`htop` when you want a fast, broad system overview, and reach for `pmemstat` when you need to know **how much memory a program (or group of programs) is truly responsible for**, to break that memory down by type, or to watch for creeping growth that suggests a leak.
+In short: reach for `top`/`htop` when you want a fast, broad system overview, and reach for `pmemstat` when you need to know **how much memory a program (or group of programs) is truly responsible for**, to break that memory down by type or by cgroup, or to watch for creeping growth that suggests a leak.
 
 ## Installation Options
 Note that:
@@ -72,7 +74,7 @@ See the Quick Start at the top for preferred install instructions using `pipx`. 
 
 ## Usage
 ```
-usage: pmemstat [-h] [-D] [-C] [-g {exe,cmd,pid}] [-f] [-k MIN_DELTA_KB]
+usage: pmemstat [-h] [-D] [-C] [-g {exe,cmd,pid,cgroup}] [-f] [-k MIN_DELTA_KB]
         [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-n] [-U] [--auto-sudo] [-o]
         [-u {MB,mB,KB,human}] [-R] [-s {mem,cpu,name}] [-/ SEARCH] [-W] [pids ...]
 
@@ -83,7 +85,7 @@ options:
   -h, --help            show this help message and exit
   -D, --debug           debug mode (the more Ds, the higher the debug level)
   -C, --no-cpu          do NOT report percent CPU (only in window mode)
-  -g {exe,cmd,pid}, --groupby {exe,cmd,pid}
+  -g {exe,cmd,pid,cgroup}, --groupby {exe,cmd,pid,cgroup}
                         grouping method for presenting rows
   -f, --fit-to-window   do not overflow window [if -w]
   -k MIN_DELTA_KB, --min-delta-kb MIN_DELTA_KB
@@ -109,15 +111,31 @@ options:
 
 ```
 Explanation of some options and arguments:
-* `-g {exe,cmd,pid}, --groupby {exe,cmd,pid}` -  select the grouping of memory stats for reporting.
+* `-g {exe,cmd,pid,cgroup}, --groupby {exe,cmd,pid,cgroup}` -  select the grouping of memory stats for reporting.
     * `exe` - group by basename of the executable (the default)
     * `cmd` - group by the truncated command line (use `-L CMDLEN` to choose length)
     * `pid` - group by one process
+    * `cgroup` - group by cgroup v2 path (services, scopes and containers); see "Grouping by cgroup v2" below
 * `-k MIN_DELTA_KB, --min-delta-kb MIN_DELTA_KB` - when looping, how much change in memory use is required to show the grouping in subsequent loops; note:
     * a positive `MIN_DELTA_KB` means the total memory of the groupin must **grow** by that amount (in KB)
     * a non-positive `MIN_DELTA_KB` means the total memory of the grouping must **change** by that amount (in KB)
 * `pids` - the positional arguments may be pids (i.e., numbers) or the names of executables (as shown by `-gexe`) 
 
+
+## Grouping by cgroup v2
+With `-g cgroup` (or cycling `g` in window mode) `pmemstat` groups processes by their **cgroup v2** path (read from `/proc/<pid>/cgroup`), which corresponds to systemd services/scopes and to container sandboxes. Each row is labelled with the cgroup's leaf unit name (e.g. `foo.service`); systemd's `\xNN` escapes are decoded for readability, and a trailing `+` marks a cgroup that also contains descendant cgroups listed on their own rows.
+
+Because `pmemstat` computes **proportional** memory (PSS), the `ptotal` column is *not* the same number that `systemd-cgtop`, `docker stats` or `podman stats` report: those use the kernel's `memory.current`, which is not proportional and over-counts pages shared between processes. `-g cgroup` therefore adds columns, read from `/sys/fs/cgroup/<path>/`, in the same units as every other column (`-u`), each chosen so it carries information PSS cannot see:
+* `cache` - `file - file_mapped`: page cache **not** mapped into userspace, i.e. invisible to PSS
+* `kmem` - `kernel`: kernel stacks, slab and pagetables (never part of PSS)
+* `kcharge` - `memory.current`: the kernel's total charge for the cgroup (what `memory.max` and the OOM killer use)
+* `psi_pct` - `memory.pressure`'s `some avg10`: memory-pressure stall time as a percentage; shown only when CPU is shown, beside `cpu_pct`
+
+These columns appear only in `-g cgroup` mode, and are omitted entirely when the kernel exposes no cgroup v2 data (e.g. a cgroup v1 host) or when `file_mapped` is unavailable.
+
+cgroup v2 accounting is **hierarchical**: a cgroup's `cache`/`kmem`/`kcharge` already include its descendant cgroups. A row whose cgroup also contains descendant cgroups listed separately is flagged with a trailing `+`, and **those descendants' figures are subtracted** so the row shows only that cgroup's own share. Consequently every row is its own share and the rows add up to the `TOTALS` row. (The one consequence of this: a `+` row's number is *smaller* than the raw `cat /sys/fs/cgroup/.../memory.current` for that cgroup; a row without `+` has no descendants and matches the file exactly.) The unified root (`/`, labelled `(root)`) is the ancestor of every cgroup, so if a process lives directly in it — as can happen inside a container, where it may be the only cgroup visible — that `(root)+` row counts every other row as its descendant. `psi_pct` is not totalled — it shows `n/a` in `TOTALS` and in the `---- OTHERS ----` row, since a sum of pressure percentages is meaningless.
+
+Reading `/proc/<pid>/cgroup` and `/sys/fs/cgroup` does not require root, so the grouping and these numbers are available even in non-root mode (the proportional PSS columns still reflect only the processes you are permitted to read).
 
 ## Example Usage with Explanation of Output
 ```

@@ -53,6 +53,8 @@ from io import StringIO
 from datetime import datetime, timedelta
 from pmemstat.KillThem import KillThem
 from pmemstat.CpuSmooth import CpuSmooth, SysStat
+from pmemstat.CGroup import (CGroup, cgroup_leaf, has_descendant,
+                             local_values, parse_cgroup_lines)
 # console-window is intentionally pinned to an exact version (see pyproject.toml).
 # Provide a clear, actionable message instead of a bare ImportError when the
 # pinned package is missing or when a different version has been substituted.
@@ -390,6 +392,7 @@ class ProcMem:
         self.cpu = None
         self.exebasename = None, None
         self.key, self.cmdline, self.cmdline_trunc = None, None, None
+        self.cgroup_path = None # cached cgroup v2 path (when grouping by cgroup)
 
     def refresh_cpu(self):
         """Get the Cpu Number for the PID (if possible)"""
@@ -529,10 +532,35 @@ class ProcMem:
 
         self.set_key()
 
+    def read_cgroup(self):
+        """Read and cache this process's cgroup v2 path (``None`` if absent)."""
+        if self.cgroup_path is not None:
+            return self.cgroup_path
+        try:
+            with open(f'/proc/{self.pid}/cgroup', encoding='utf-8') as fhandle:
+                lines = fhandle.read().splitlines()
+        except OSError as exc:
+            if DebugLevel:
+                DB(3, f'pid={self.pid} no-cgroup exc={type(exc).__name__}')
+            return None
+        self.cgroup_path = parse_cgroup_lines(lines)
+        return self.cgroup_path
+
     def set_key(self):
-        """ TBD """
-        self.key = (self.cmdline_trunc if ProcMem.opts.groupby == 'cmd' else
-                self.exebasename if ProcMem.opts.groupby == 'exe' else self.pid)
+        """Compute the grouping key for this process.
+
+        The key is opaque to the rest of the program; it merely has to be
+        equal for every process that belongs in the same displayed row.
+        """
+        groupby = ProcMem.opts.groupby
+        if groupby == 'cmd':
+            self.key = self.cmdline_trunc
+        elif groupby == 'exe':
+            self.key = self.exebasename
+        elif groupby == 'cgroup':
+            self.key = self.read_cgroup() or '(no-cgroup)'
+        else: # 'pid'
+            self.key = self.pid
 
     def read_lines(self, filename):
         """ Get the lines of the smaps """
@@ -635,6 +663,7 @@ class ProcMem:
         """ Make an object to summarize memory use of a PID or group """
         summary = {
                 'cpu_pct': 0,
+                'psi_pct': 0,  # cgroup v2 memory.pressure some avg10 (%)
                 'pswap': 0,
                 'shSYSV': 0,
                 'shOth': 0, # e.g., memory mapped file
@@ -642,6 +671,9 @@ class ProcMem:
                 'text': 0,
                 'data': 0, # deprecated 'pseudo' (e.g., memory barrier) now in 'data'
                 'ptotal': 0,
+                'cache': 0,    # cgroup v2 file - file_mapped (KB): unmapped page cache
+                'kmem': 0,     # cgroup v2 kernel (KB): kernel stacks + slab + pagetables
+                'kcharge': 0,  # cgroup v2 memory.current (KB): total kernel charge
                 'pss': 0,  # comes from rollups
                 'number': -pid if pid else 0, # count if positive; else -pid
                 'info': info,
@@ -792,6 +824,10 @@ class PmemStat:
         setattr(opts, 'kill_mode', False) # pseudo option
         setattr(opts, 'cpu_avg_secs', 20) # pseudo option
         self.groups_by_line = {}
+        self.cgroup_keys = set()
+        self.cgroup_raw = {}            # cgroup key -> raw (hierarchical) values
+        self.cgroup_data_seen = False   # any group had readable cgroup v2 data
+        self.cgroup_cache_seen = False  # memory.stat exposed file_mapped
         self._set_units()
         self.zram_projector = ZramProjector()
         # Initialize inline search bar
@@ -843,6 +879,11 @@ class PmemStat:
         else: # human
             self.divisor = 1 # human
             self.fwidth = 7
+        # Right-aligned header labels touch when a label is as wide as the
+        # column, so keep the width at least one wider than the longest label
+        # (e.g. "kmem"+"kcharge", or "cpu_pct"+"psi_pct" at human width).
+        label_width = max(len(name) for name in ProcMem.make_summary_dict())
+        self.fwidth = max(self.fwidth, label_width + 1)
 
     def get_group(self, key):
         """Per group info."""
@@ -864,6 +905,70 @@ class PmemStat:
             self.groups[key] = group
             # DB(0, f'add group[{key}]')
         return group
+
+    def update_cgroup_summary(self, group):
+        """Read the kernel's cgroup v2 numbers for a group (raw/subtree).
+
+        The label is the leaf unit name, marked with a trailing "+" when the
+        cgroup also contains descendant cgroups that are listed separately.
+
+        The numeric columns are the kernel's own per-cgroup accounting, each
+        chosen to add information PSS cannot see (PSS covers only mapped user
+        memory):
+          * ``cache``   = ``file - file_mapped``: page cache not mapped into
+            userspace, i.e. invisible to PSS.
+          * ``kmem``    = ``kernel``: kernel stacks + slab + pagetables.
+          * ``kcharge`` = ``memory.current``: the kernel's total charge for the
+            cgroup (what memory.max and the OOM killer enforce).
+
+        The values read here are *raw* (they include descendant cgroups); they
+        are cached in ``self.cgroup_raw`` and :meth:`apply_cgroup_locals`
+        reduces them to each row's own share so the rows sum to TOTALS. Memory
+        values are stored in KB (like every other column) so ``-u`` applies;
+        ``psi_pct`` is a percentage, handled like ``cpu_pct``.
+        """
+        label = cgroup_leaf(group.key)
+        if isinstance(group.key, str) and has_descendant(self.cgroup_keys, group.key):
+            label += '+'
+        group.summary['info'] = label
+        # Reset the cgroup columns (the summary may be a reused object); the
+        # three memory columns are filled by apply_cgroup_locals().
+        group.summary['cache'] = 0
+        group.summary['kmem'] = 0
+        group.summary['kcharge'] = 0
+        group.summary['psi_pct'] = 0
+        if not isinstance(group.key, str):
+            return
+        data = CGroup(group.key).read()
+        stat = data['stat'] or {}
+        raw = {'cache': 0, 'kmem': 0, 'kcharge': 0}
+        if 'file_mapped' in stat:
+            self.cgroup_cache_seen = True
+            raw['cache'] = (stat.get('file', 0) - stat.get('file_mapped', 0)) // 1024
+        if stat.get('kernel'):
+            raw['kmem'] = stat['kernel'] // 1024
+        if data['current'] is not None:
+            self.cgroup_data_seen = True
+            raw['kcharge'] = data['current'] // 1024
+        self.cgroup_raw[group.key] = raw
+        some = (data['pressure'] or {}).get('some') or {}
+        if 'avg10' in some:
+            group.summary['psi_pct'] = some['avg10']
+
+    def apply_cgroup_locals(self):
+        """Reduce each group's cgroup columns to its own ("local") share.
+
+        cgroup v2 accounting is hierarchical, so a parent's raw numbers include
+        its descendant groups'. Subtracting the descendants' raw values makes
+        every row its own share and lets the rows sum to TOTALS; the "+" marker
+        flags the rows that had descendants subtracted.
+        """
+        locals_by_key = local_values(self.cgroup_raw, ('cache', 'kmem', 'kcharge'))
+        for group in self.groups.values():
+            if group.alive and group.summary:
+                values = locals_by_key.get(group.key)
+                if values:
+                    group.summary.update(values)
 
     def prep_new_loop(self, regroup):
         """Prepare for a new loop.
@@ -902,7 +1007,7 @@ class PmemStat:
         """ Add a summary memory use into a running total of memory use """
         if summary and total:
             for key, val in summary.items():
-                if key in ('info',):
+                if key in ('info', 'psi_pct'):
                     pass
                 elif key in ('number',):
                     total[key] += 1 if val <= 0 else val
@@ -938,9 +1043,14 @@ class PmemStat:
             do_smaps = False
 
         for prc in list(group.prcset):
-            group.summary['info'] = (f'{prc.exebasename}' if self.opts.groupby == 'exe'
-                    else f'{prc.cmdline_trunc}' if self.opts.groupby == 'cmd'
-                    else f'{prc.pid} {prc.cmdline_trunc}')
+            if self.opts.groupby == 'exe':
+                group.summary['info'] = f'{prc.exebasename}'
+            elif self.opts.groupby == 'cmd':
+                group.summary['info'] = f'{prc.cmdline_trunc}'
+            elif self.opts.groupby == 'cgroup':
+                group.summary['info'] = cgroup_leaf(group.key)
+            else:
+                group.summary['info'] = f'{prc.pid} {prc.cmdline_trunc}'
             if do_smaps:
                 global read_smaps
                 read_smaps += 1
@@ -997,8 +1107,19 @@ class PmemStat:
     def pr_exclusions(self):
         """ TBD """
         exclusions = {'number', 'info'}
+        cgroup_cols = ('psi_pct', 'cache', 'kmem', 'kcharge')
         if not self.opts.cpu:
             exclusions.add('cpu_pct')
+        # cgroup v2 columns exist only in cgroup mode, only when the kernel
+        # exposed cgroup v2 data (else they would be misleading zeros), and
+        # psi_pct only when CPU is shown (it sits next to cpu_pct).
+        if self.opts.groupby != 'cgroup' or not self.cgroup_data_seen:
+            exclusions.update(cgroup_cols)
+        else:
+            if not self.opts.cpu:
+                exclusions.add('psi_pct')
+            if not self.cgroup_cache_seen:
+                exclusions.add('cache')
         others = ['text', 'shSYSV', 'shOth', 'stack'] if self.opts.others else []
         if not self.debug:
             exclusions.add('pss')
@@ -1014,7 +1135,10 @@ class PmemStat:
         self.number += 1
         for item, value in summary.items():
             if item not in exclusions:
-                if item in ('cpu_pct', ):
+                if value is None:
+                    body += f'{"n/a":>{self.fwidth}}'
+                    continue
+                if item in ('cpu_pct', 'psi_pct'):
                     body += f'{value:>{self.fwidth}.1f}'
                     continue
                 mbytes = int(round(value*1024/self.divisor))
@@ -1244,9 +1368,25 @@ class PmemStat:
         # for each group, if it has changed, sum all the smaps for the group
         # if the group rollup_summary indicates enough change
         grand_summary = ProcMem.make_summary_dict(info=f'--TOTALS in {self.units} --')
+        self.cgroup_data_seen = False
+        self.cgroup_cache_seen = False
+        self.cgroup_raw = {}
+        self.cgroup_keys = {g.key for g in self.groups.values()
+                            if isinstance(g.key, str) and g.prcset}
         for group in self.groups.values():
             if group.alive:
                 self.prc_group(group)
+                if self.opts.groupby == 'cgroup':
+                    self.update_cgroup_summary(group)
+        # cgroup v2 accounting is hierarchical, so reduce every row to its own
+        # ("local") share before totalling - that keeps the rows adding up to
+        # TOTALS. A sum of pressure percentages is meaningless, so psi_pct is
+        # shown as n/a there.
+        if self.opts.groupby == 'cgroup':
+            self.apply_cgroup_locals()
+            grand_summary['psi_pct'] = None
+        for group in self.groups.values():
+            if group.alive:
                 self.add_to_summary(group.summary, grand_summary)
 
         # detect changed group on basis of differing PIDs contributing
@@ -1326,6 +1466,8 @@ class PmemStat:
             elif is_first or self.opts.window:
                 if not others_summary:
                     others_summary = ProcMem.make_summary_dict(info='---- OTHERS ----')
+                    if self.opts.groupby == 'cgroup':
+                        others_summary['psi_pct'] = None
                 self.add_to_summary(group.summary, others_summary)
         if others_summary:
             self.pr_summary('O',  others_summary)
@@ -1411,7 +1553,7 @@ class PmemStat:
         self.spin.add_key('fit_to_window', 'f - fit rows to window',
                           vals=[False, True], obj=self.opts)
         self.spin.add_key('groupby', 'g - group by',
-                          vals=['exe', 'cmd', 'pid'], obj=self.opts)
+                          vals=['exe', 'cmd', 'pid', 'cgroup'], obj=self.opts)
         self.spin.add_key('numbers', 'n - line numbers',
                           vals=[False, True], obj=self.opts)
         self.spin.add_key('others', 'o - less category detail',
@@ -1585,7 +1727,7 @@ def main():
             help='debug mode (the more Ds, the higher the debug level)')
     parser.add_argument('-C', '--no-cpu', action='store_false', dest='cpu',
             help='do NOT report percent CPU (only in window mode)')
-    parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid'),
+    parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid', 'cgroup'),
             default='exe', help='grouping method for presenting rows')
     parser.add_argument('-f', '--fit-to-window', action='store_true',
             help='do not overflow window [if -w]')
