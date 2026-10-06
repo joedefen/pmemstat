@@ -3,7 +3,7 @@
 """
 Pending Features:
   - Iffy:
-    - PSI Indicator in title?  PSI Page (maybe with a thread)?
+    - PSI Page (maybe with a thread)?
 
 Copyright (c) 2022-2023 Joe Defen
 
@@ -55,6 +55,7 @@ from pmemstat.KillThem import KillThem
 from pmemstat.CpuSmooth import CpuSmooth, SysStat
 from pmemstat.CGroup import (CGroup, cgroup_leaf, has_descendant,
                              local_values, parse_cgroup_lines)
+from pmemstat.Pressure import format_pressure_lines, read_system_pressure
 # console-window is intentionally pinned to an exact version (see pyproject.toml).
 # Provide a clear, actionable message instead of a bare ImportError when the
 # pinned package is missing or when a different version has been substituted.
@@ -817,6 +818,7 @@ class PmemStat:
         self.groups = {} # indexed by group key (e.g., cmd)
         self.window = None
         self.vmstat = None
+        self.pressure = {}  # PSI snapshot (only read when opts.psi)
         self.spin = OptionSpinner()
         self.number = 0  # line number for opts.numbers
         self.units, self.divisor, self.fwidth = 0, 0, 0
@@ -1292,11 +1294,18 @@ class PmemStat:
                     leader += f'    {prc.cpu.percent:.2f}% {nickname}'
                 self.emit(leader, to_head=True, resume=resume)
 
+            if self.opts.psi: # PSI leader block (opt-in, one line per resource)
+                for idx, psi_line in enumerate(
+                        format_pressure_lines(self.pressure)):
+                    attr = curses.A_BOLD if idx == 0 else None
+                    self.emit(psi_line, to_head=True, resume=False, attr=attr)
+
         self.loop_num += 1
         meminfoKB = self.get_meminfo()
         vmstat = self.get_vmstat()
         major_fault_rate = vmstat['pgmajfault'].rate
         self.zram_projector.compute_effective(meminfoKB)
+        self.pressure = read_system_pressure() if self.opts.psi else {}
         total_user_pids = 0
         total_kernel_pids = 0
         kernel_cpu = 0
@@ -1568,6 +1577,8 @@ class PmemStat:
                           vals=[False, True], obj=self.opts)
         self.spin.add_key('cpu_avg_secs', 'a - cpu moving avg secs',
                           vals=[5, 10, 20, 45, 90], obj=self.opts)
+        self.spin.add_key('psi', 'p - show system pressure (PSI)',
+                          vals=[False, True], obj=self.opts)
 
         keys_we_handle =  [ord('K'), ord('/'), 27, curses.KEY_ENTER, 10] + list(self.spin.keys)
         self.window = ConsoleWindow(head_line=True, keys=keys_we_handle)
@@ -1727,6 +1738,8 @@ def main():
             help='debug mode (the more Ds, the higher the debug level)')
     parser.add_argument('-C', '--no-cpu', action='store_false', dest='cpu',
             help='do NOT report percent CPU (only in window mode)')
+    parser.add_argument('-P', '--psi', action='store_true',
+            help='show system pressure (PSI) in header [dflt=off]')
     parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid', 'cgroup'),
             default='exe', help='grouping method for presenting rows')
     parser.add_argument('-f', '--fit-to-window', action='store_true',

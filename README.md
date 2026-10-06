@@ -49,6 +49,7 @@ Reach for `top` or `ps` when you need a tool that is always installed, and `htop
 | **Group by cgroup v2** (services, scopes, containers) | ✓ (`-g cgroup`) | ✗ | ✓ (its core design) | ✗ |
 | **Memory-leak / delta monitoring** (only re-shows significant growth) | ✓ (`-k`, loop mode) | ✗ | ✗ | ✗ |
 | **zRAM-aware effective RAM** (eTot/eUsed/eAvail) | ✓ | ✗ | ✗ | ✗ |
+| **System pressure (PSI)** in header (memory/cpu/io, some/full) | ✓ (`-P`) | ✗ | ✗ | ✗ |
 | **Data source** | `/proc/{PID}/smaps*` | `/proc/{PID}/smaps` | `/sys/fs/cgroup` | `/proc` + libs |
 | **Interactive full-screen window** | ✓ (`console-window`/curses) | ✗ (one-shot) | ✓ | ✓ |
 | **CPU usage reporting** | ✓ | ✗ (memory only) | ✓ | ✓ |
@@ -74,9 +75,10 @@ See the Quick Start at the top for preferred install instructions using `pipx`. 
 
 ## Usage
 ```
-usage: pmemstat [-h] [-D] [-C] [-g {exe,cmd,pid,cgroup}] [-f] [-k MIN_DELTA_KB]
-        [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-n] [-U] [--auto-sudo] [-o]
-        [-u {MB,mB,KB,human}] [-R] [-s {mem,cpu,name}] [-/ SEARCH] [-W] [pids ...]
+usage: pmemstat [-h] [-D] [-C] [-P] [-g {exe,cmd,pid,cgroup}] [-f]
+        [-k MIN_DELTA_KB] [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-n] [-U]
+        [--auto-sudo] [-o] [-u {MB,mB,KB,human}] [-R] [-s {mem,cpu,name}]
+        [-/ SEARCH] [-W] [pids ...]
 
 positional arguments:
   pids                  list of pids/groups (none means every accessible pid)
@@ -85,6 +87,7 @@ options:
   -h, --help            show this help message and exit
   -D, --debug           debug mode (the more Ds, the higher the debug level)
   -C, --no-cpu          do NOT report percent CPU (only in window mode)
+  -P, --psi             show system pressure (PSI) in header [dflt=off]
   -g {exe,cmd,pid,cgroup}, --groupby {exe,cmd,pid,cgroup}
                         grouping method for presenting rows
   -f, --fit-to-window   do not overflow window [if -w]
@@ -116,6 +119,7 @@ Explanation of some options and arguments:
     * `cmd` - group by the truncated command line (use `-L CMDLEN` to choose length)
     * `pid` - group by one process
     * `cgroup` - group by cgroup v2 path (services, scopes and containers); see "Grouping by cgroup v2" below
+* `-P, --psi` - add a **system pressure (PSI)** line to the header (off by default); see "System pressure (PSI)" below. In window mode this can also be toggled with the `p` key.
 * `-k MIN_DELTA_KB, --min-delta-kb MIN_DELTA_KB` - when looping, how much change in memory use is required to show the grouping in subsequent loops; note:
     * a positive `MIN_DELTA_KB` means the total memory of the groupin must **grow** by that amount (in KB)
     * a non-positive `MIN_DELTA_KB` means the total memory of the grouping must **change** by that amount (in KB)
@@ -136,6 +140,21 @@ These columns appear only in `-g cgroup` mode, and are omitted entirely when the
 cgroup v2 accounting is **hierarchical**: a cgroup's `cache`/`kmem`/`kcharge` already include its descendant cgroups. A row whose cgroup also contains descendant cgroups listed separately is flagged with a trailing `+`, and **those descendants' figures are subtracted** so the row shows only that cgroup's own share. Consequently every row is its own share and the rows add up to the `TOTALS` row. (The one consequence of this: a `+` row's number is *smaller* than the raw `cat /sys/fs/cgroup/.../memory.current` for that cgroup; a row without `+` has no descendants and matches the file exactly.) The unified root (`/`, labelled `(root)`) is the ancestor of every cgroup, so if a process lives directly in it — as can happen inside a container, where it may be the only cgroup visible — that `(root)+` row counts every other row as its descendant. `psi_pct` is not totalled — it shows `n/a` in `TOTALS` and in the `---- OTHERS ----` row, since a sum of pressure percentages is meaningless.
 
 Reading `/proc/<pid>/cgroup` and `/sys/fs/cgroup` does not require root, so the grouping and these numbers are available even in non-root mode (the proportional PSS columns still reflect only the processes you are permitted to read).
+
+## System pressure (PSI)
+With `-P` (or the `p` key in window mode) pmemstat adds a small (bold-headed) table to the header reporting Linux **Pressure Stall Information**, read from `/proc/pressure/{memory,cpu,io}`. PSI expresses the fraction of time that work was stalled waiting for a resource: the higher the number, the more that resource is a bottleneck.
+
+```
+PSI     SOME 10s     60s    300s     FULL 10s     60s    300s
+    mem%    0.42    0.10    0.02         0.00    0.00    0.00
+    cpu%    0.00    0.03    0.00            -       -       -
+     io%    0.15    0.60    1.04         0.10    0.49    0.96
+```
+* The heading row names the two stall groups, `SOME` and `FULL`, and the three 10/60/300 **second** window columns (`10s`/`60s`/`300s`), which are right-aligned over the values below.
+* Each resource row (`mem`, `cpu`, `io`) holds the kernel's `avg10`/`avg60`/`avg300` stall-time percentage for that window.
+* `SOME` - at least one task was stalled; `FULL` - **all** non-idle tasks were stalled. `FULL` is normally available only for `memory` and `io`; a resource that provides no `full` line (for example `cpu.pressure` on many kernels) shows `-` in its `FULL` cells.
+* A resource whose file is absent (a kernel built with `CONFIG_PSI=n`) is simply omitted; if no resource is readable, the table is not shown.
+* This is the **system-wide** view. It is distinct from the per-cgroup `psi_pct` column described under "Grouping by cgroup v2" (which is one cgroup's `memory.pressure some avg10`).
 
 ## Example Usage with Explanation of Output
 ```
@@ -165,6 +184,7 @@ In the default refreshed window loop, we see
          then the MemAvailable calculation was off significantly.
        * Determining the contributors can be difficult, but start with `sudo slabtop -sc` and feature specific tools (e.g., `zpool list`).
     * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads
+* an optional **PSI block** (only with `-P`) as described in "System pressure (PSI)" above
 * a **second leader line for zRAM** only if zRAM is active with:
     * percent cpu consumed by kernel processes (not normalized ... if there 4 CPUs, then the total CPU can 400%). This is important because, with zRAM, this often is mostly the swap process.
     * **MajF/s** - the number of "major" page faults per second.

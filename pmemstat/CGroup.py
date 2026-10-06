@@ -24,6 +24,8 @@ alongside pmemstat's proportional PSS numbers so the two can be compared.
 import os
 import re
 
+from pmemstat.Pressure import parse_pressure
+
 
 def parse_cgroup_lines(lines):
     """Return the cgroup v2 (unified) path for a process.
@@ -96,32 +98,16 @@ def parse_memory_stat(lines):
     return stat
 
 
-_PRESSURE_AVG_KEYS = ('avg10', 'avg60', 'avg300')
-
-
 def parse_memory_pressure(lines):
     """Parse ``memory.pressure`` into ``{'some': {...}, 'full': {...}}``.
 
     ``avg*`` values are floats (percent) and ``total`` is an int
     (microseconds).
+
+    All PSI files share one grammar, so this is a thin compatibility wrapper
+    around :func:`pmemstat.Pressure.parse_pressure`.
     """
-    pressure = {}
-    for line in lines:
-        fields = line.split()
-        if len(fields) < 2 or fields[0] not in ('some', 'full'):
-            continue
-        entry = {}
-        for token in fields[1:]:
-            key, sep, value = token.partition('=')
-            if not sep:
-                continue
-            try:
-                entry[key] = (float(value) if key in _PRESSURE_AVG_KEYS
-                              else int(value))
-            except ValueError:
-                continue
-        pressure[fields[0]] = entry
-    return pressure
+    return parse_pressure(lines)
 
 
 def path_is_descendant(path, ancestor):
