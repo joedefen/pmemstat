@@ -213,6 +213,16 @@ In the default refreshed window loop, we see
         * **{PID}** - when the grouping line represents one process (for option `-gexe`).
         * **{num}x** - where {num} is the number of processes in the grouping.
         
+## Key Legend (Window Mode)
+The top line of the header is an always-visible, centered, dimmed key legend,
+so the available keys are in evidence without opening the help screen:
+
+    [?]help [g]roup [u]nits [s]ort [c]pu [K]ill [/]find [p]SI
+
+`?` remains the gateway to the complete list of keys plus the navigation keys.
+Because `?` is listed first, a narrow terminal truncates only the least-critical
+trailing entries, never the way to the full help screen.
+
 ## Help Screen (in Window Mode, Press '?')
 In window mode, press '?' to enter the help screen which looks like:
 

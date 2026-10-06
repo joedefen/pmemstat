@@ -809,6 +809,14 @@ class ProcMem:
 class PmemStat:
     """ The singleton class for running the main loop, etc"""
 
+    # Always-visible "evidence" of the available keys, shown as the top header
+    # line so the options are discoverable without opening the help screen.
+    # Keep this in sync with the OptionSpinner registrations in window_loop().
+    # '?' is deliberately first: if the terminal is too narrow to render the
+    # whole line, only the least-critical trailing entries are truncated while
+    # the gateway to the complete list (and the navigation keys) stays visible.
+    KEY_LEGEND = '[?]help [g]roup [u]nits [s]ort [c]pu [K]ill [/]find [p]SI'
+
     def __init__(self, opts):
         self.opts = opts
         self.loop_num = 0
@@ -1229,6 +1237,9 @@ class PmemStat:
             nonlocal self, meminfoKB, wanted_prcs, total_user_pids, kernel_cpu
             nonlocal major_fault_rate
             windowed = bool(self.window)
+            # Pin the key legend as the very first header row on every redraw
+            # so the available keys are always in evidence.
+            self.emit_key_legend()
             resume = False
             # print timestamp of report
             leader = '' if windowed else '--- '
@@ -1492,6 +1503,24 @@ class PmemStat:
                 self.pr_summary('x', group.o_summary)
         if not self.window:
             self.emit('')
+
+    def emit_key_legend(self):
+        """Emit the persistent key legend as the top line of the header.
+
+        This is the always-visible evidence of the available keys; the complete
+        list (plus the navigation keys) stays one '?' press away. The legend is
+        centered and drawn dim so it reads as chrome rather than as report data.
+        No-op outside window (curses) mode, where there are no interactive keys.
+        """
+        if not self.window:
+            return
+        # Refresh the terminal dimensions so centering uses the real width
+        # (self.window.cols is 0 until the first calc()).
+        self.window.calc()
+        cols = self.window.cols or 80
+        pad = max((cols - len(self.KEY_LEGEND)) // 2, 0)
+        self.emit(f'{" " * pad}{self.KEY_LEGEND}', to_head=True,
+                  attr=curses.A_DIM)
 
     def emit(self, line, to_head=False, attr=None, resume=False):
         """ Emit a line of the report"""
