@@ -1456,7 +1456,11 @@ class PmemStat:
               shown_cnt < limit-1 and running_summary['ptotal'] <= ptotal_limit):
                 if group.alive and (group.is_new or group.is_changed or self.window):
                     attr = curses.A_REVERSE if group.is_new or group.is_changed else None
-                    attr = None if is_first else attr
+                    # Suppress the highlight on the first render and on the first
+                    # refresh after the grouping changes: regrouping recreates
+                    # every group as "new", so without this every row would flash
+                    # as changed (reverse/bold) for one refresh.
+                    attr = None if is_first or regroup else attr
                     if self.window:
                         current_row = self.window.body.row_cnt
                         self.groups_by_line[current_row] = group
