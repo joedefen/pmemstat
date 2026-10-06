@@ -24,8 +24,10 @@ can be imported and unit-tested without the curses UI or the pinned
 import os
 
 # Display order and short labels: memory first because pmemstat is a memory tool.
+# A '%' is appended to each label in format_pressure_lines(), so these spell out
+# the full metric name (e.g. 'memPSI%') to mirror the report's column labels.
 RESOURCES = ('memory', 'cpu', 'io')
-_SHORT = {'memory': 'mem', 'cpu': 'cpu', 'io': 'io'}
+_SHORT = {'memory': 'memPSI', 'cpu': 'cpuPSI', 'io': 'ioPSI'}
 AVG_KEYS = ('avg10', 'avg60', 'avg300')
 _STALLS = ('some', 'full')
 
@@ -80,7 +82,7 @@ _WINDOW_LABELS = ('10s', '60s', '300s')
 _CELL_WIDTH = 6
 _CELL_GAP = 2                            # spaces between value cells
 _GROUP_WIDTH = _CELL_WIDTH * 3 + _CELL_GAP * 2   # some/all window group
-_LABEL_WIDTH = 8                         # e.g. '    mem%'
+_LABEL_WIDTH = 7                         # e.g. 'memPSI%'
 _LABEL_GAP = 2                           # row label -> first group
 _GROUP_GAP = 7                           # some group -> full group (separates)
 _TITLE_LABEL_SHIFT = 2                   # leaves one space before the 1st window
@@ -108,7 +110,7 @@ def _windows_title():
 
 
 def _title_line():
-    """The heading row: ``PSI`` then ``SOME``/``FULL`` over their columns.
+    """The heading row: ``SOME``/``FULL`` over their columns.
 
     Each stall label is shifted right so exactly one space separates it from
     the right-aligned window labels beneath (the label overwrites part of the
@@ -120,7 +122,6 @@ def _title_line():
         for offset, char in enumerate(text):
             buf[col + offset] = char
 
-    put('PSI', 0)
     for label, col in (('SOME', _SOME_COL), ('FULL', _FULL_COL)):
         put(_windows_title(), col)
         put(label, col - len(label) + _TITLE_LABEL_SHIFT)
@@ -133,10 +134,10 @@ def format_pressure_lines(snapshot, resources=RESOURCES):
     The block is four lines: a heading, then one row per resource, each with a
     ``SOME`` and a ``FULL`` group of ``avg10``/``avg60``/``avg300`` cells::
 
-        PSI     SOME 10s     60s    300s     FULL 10s     60s    300s
-            mem%    1.23    0.45    0.20         0.10    0.05    0.02
-            cpu%    0.00    0.03    0.00            -       -       -
-             io%    0.15    0.60    1.04         0.10    0.49    0.96
+            SOME 10s     60s    300s     FULL 10s     60s    300s
+         memPSI%    1.23    0.45    0.20         0.10    0.05    0.02
+         cpuPSI%    0.00    0.03    0.00            -       -       -
+          ioPSI%    0.15    0.60    1.04         0.10    0.49    0.96
 
     The heading line is intended to be drawn bold. Resources whose file is
     absent are skipped. When a resource provides no ``full`` line (as

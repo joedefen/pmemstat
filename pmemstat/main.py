@@ -663,8 +663,8 @@ class ProcMem:
     def make_summary_dict(pid=0, info=''):
         """ Make an object to summarize memory use of a PID or group """
         summary = {
-                'cpu_pct': 0,
-                'psi_pct': 0,  # cgroup v2 memory.pressure some avg10 (%)
+                'cpu%': 0,
+                'memPSI%': 0,  # cgroup v2 memory.pressure some avg10 (%)
                 'pswap': 0,
                 'shSYSV': 0,
                 'shOth': 0, # e.g., memory mapped file
@@ -790,7 +790,7 @@ class ProcMem:
         self.is_changed = False
         rollup_summary = self.parse_rollups(rollup_lines)
         if self.opts.cpu:
-            rollup_summary['cpu_pct'] = self.cpu.percent
+            rollup_summary['cpu%'] = self.cpu.percent
         group = self.pmemstat.get_group(self.key)
         if not group.alive:
             info = str(self.key)
@@ -816,6 +816,10 @@ class PmemStat:
     # whole line, only the least-critical trailing entries are truncated while
     # the gateway to the complete list (and the navigation keys) stays visible.
     KEY_LEGEND = '[?]help [g]roup [u]nits [s]ort [c]pu [K]ill [/]find [p]SI'
+    # The legend is drawn center-ish. Shift it this many columns to the left of
+    # true center so a narrow terminal is less likely to chop its tail, while
+    # the remaining indent keeps it from being visually scanned with data rows.
+    KEY_LEGEND_LEFT_SHIFT = 18
 
     def __init__(self, opts):
         self.opts = opts
@@ -891,7 +895,7 @@ class PmemStat:
             self.fwidth = 7
         # Right-aligned header labels touch when a label is as wide as the
         # column, so keep the width at least one wider than the longest label
-        # (e.g. "kmem"+"kcharge", or "cpu_pct"+"psi_pct" at human width).
+        # (e.g. "kmem"+"kcharge", or "cpu%"+"memPSI%" at human width).
         label_width = max(len(name) for name in ProcMem.make_summary_dict())
         self.fwidth = max(self.fwidth, label_width + 1)
 
@@ -935,7 +939,7 @@ class PmemStat:
         are cached in ``self.cgroup_raw`` and :meth:`apply_cgroup_locals`
         reduces them to each row's own share so the rows sum to TOTALS. Memory
         values are stored in KB (like every other column) so ``-u`` applies;
-        ``psi_pct`` is a percentage, handled like ``cpu_pct``.
+        ``memPSI%`` is a percentage, handled like ``cpu%``.
         """
         label = cgroup_leaf(group.key)
         if isinstance(group.key, str) and has_descendant(self.cgroup_keys, group.key):
@@ -946,7 +950,7 @@ class PmemStat:
         group.summary['cache'] = 0
         group.summary['kmem'] = 0
         group.summary['kcharge'] = 0
-        group.summary['psi_pct'] = 0
+        group.summary['memPSI%'] = 0
         if not isinstance(group.key, str):
             return
         data = CGroup(group.key).read()
@@ -963,7 +967,7 @@ class PmemStat:
         self.cgroup_raw[group.key] = raw
         some = (data['pressure'] or {}).get('some') or {}
         if 'avg10' in some:
-            group.summary['psi_pct'] = some['avg10']
+            group.summary['memPSI%'] = some['avg10']
 
     def apply_cgroup_locals(self):
         """Reduce each group's cgroup columns to its own ("local") share.
@@ -1017,7 +1021,7 @@ class PmemStat:
         """ Add a summary memory use into a running total of memory use """
         if summary and total:
             for key, val in summary.items():
-                if key in ('info', 'psi_pct'):
+                if key in ('info', 'memPSI%'):
                     pass
                 elif key in ('number',):
                     total[key] += 1 if val <= 0 else val
@@ -1076,7 +1080,7 @@ class PmemStat:
             self.add_to_summary(group.rollup_summary, group.summary)
         group.summary['pss'] = group.rollup_summary['ptotal']
         group.summary['pswap'] = group.rollup_summary['pswap']
-        group.summary['cpu_pct'] = group.rollup_summary['cpu_pct']
+        group.summary['cpu%'] = group.rollup_summary['cpu%']
 
         if not group.prcset:
             group.alive = False
@@ -1087,7 +1091,7 @@ class PmemStat:
         if not do_smaps:
             group.summary = group.o_summary
             if group.summary and group.rollup_summary:
-                group.summary['cpu_pct'] = group.rollup_summary['cpu_pct']
+                group.summary['cpu%'] = group.rollup_summary['cpu%']
             return
 
         if self.debug:
@@ -1117,17 +1121,17 @@ class PmemStat:
     def pr_exclusions(self):
         """ TBD """
         exclusions = {'number', 'info'}
-        cgroup_cols = ('psi_pct', 'cache', 'kmem', 'kcharge')
+        cgroup_cols = ('memPSI%', 'cache', 'kmem', 'kcharge')
         if not self.opts.cpu:
-            exclusions.add('cpu_pct')
+            exclusions.add('cpu%')
         # cgroup v2 columns exist only in cgroup mode, only when the kernel
         # exposed cgroup v2 data (else they would be misleading zeros), and
-        # psi_pct only when CPU is shown (it sits next to cpu_pct).
+        # memPSI% only when PSI is shown (-P), since it is a PSI column.
         if self.opts.groupby != 'cgroup' or not self.cgroup_data_seen:
             exclusions.update(cgroup_cols)
         else:
-            if not self.opts.cpu:
-                exclusions.add('psi_pct')
+            if not self.opts.psi:
+                exclusions.add('memPSI%')
             if not self.cgroup_cache_seen:
                 exclusions.add('cache')
         others = ['text', 'shSYSV', 'shOth', 'stack'] if self.opts.others else []
@@ -1148,7 +1152,7 @@ class PmemStat:
                 if value is None:
                     body += f'{"n/a":>{self.fwidth}}'
                     continue
-                if item in ('cpu_pct', 'psi_pct'):
+                if item in ('cpu%', 'memPSI%'):
                     body += f'{value:>{self.fwidth}.1f}'
                     continue
                 mbytes = int(round(value*1024/self.divisor))
@@ -1400,11 +1404,11 @@ class PmemStat:
                     self.update_cgroup_summary(group)
         # cgroup v2 accounting is hierarchical, so reduce every row to its own
         # ("local") share before totalling - that keeps the rows adding up to
-        # TOTALS. A sum of pressure percentages is meaningless, so psi_pct is
+        # TOTALS. A sum of pressure percentages is meaningless, so memPSI% is
         # shown as n/a there.
         if self.opts.groupby == 'cgroup':
             self.apply_cgroup_locals()
-            grand_summary['psi_pct'] = None
+            grand_summary['memPSI%'] = None
         for group in self.groups.values():
             if group.alive:
                 self.add_to_summary(group.summary, grand_summary)
@@ -1444,7 +1448,7 @@ class PmemStat:
 
         if self.get_sortby() == 'cpu':
             sorted_keys = sorted(alive_groups.keys(), key=lambda x:
-                (-round(alive_groups[x].summary['cpu_pct'], 1),
+                (-round(alive_groups[x].summary['cpu%'], 1),
                     str(alive_groups[x].key).lower()))
         elif self.get_sortby() == 'name':
             sorted_keys = sorted(alive_groups.keys(),
@@ -1491,7 +1495,7 @@ class PmemStat:
                 if not others_summary:
                     others_summary = ProcMem.make_summary_dict(info='---- OTHERS ----')
                     if self.opts.groupby == 'cgroup':
-                        others_summary['psi_pct'] = None
+                        others_summary['memPSI%'] = None
                 self.add_to_summary(group.summary, others_summary)
         if others_summary:
             self.pr_summary('O',  others_summary)
@@ -1509,16 +1513,19 @@ class PmemStat:
 
         This is the always-visible evidence of the available keys; the complete
         list (plus the navigation keys) stays one '?' press away. The legend is
-        centered and drawn dim so it reads as chrome rather than as report data.
+        drawn dim, and indented left-of-center (see KEY_LEGEND_LEFT_SHIFT) so it
+        reads as chrome rather than as report data and is less likely to be
+        chopped on a narrow terminal.
         No-op outside window (curses) mode, where there are no interactive keys.
         """
         if not self.window:
             return
-        # Refresh the terminal dimensions so centering uses the real width
-        # (self.window.cols is 0 until the first calc()).
+        # Refresh the terminal dimensions so the padding math uses the real
+        # width (self.window.cols is 0 until the first calc()).
         self.window.calc()
         cols = self.window.cols or 80
-        pad = max((cols - len(self.KEY_LEGEND)) // 2, 0)
+        pad = max((cols - len(self.KEY_LEGEND)) // 2 - self.KEY_LEGEND_LEFT_SHIFT,
+                  0)
         self.emit(f'{" " * pad}{self.KEY_LEGEND}', to_head=True,
                   attr=curses.A_DIM)
 
@@ -1610,7 +1617,7 @@ class PmemStat:
                           vals=[False, True], obj=self.opts)
         self.spin.add_key('cpu_avg_secs', 'a - cpu moving avg secs',
                           vals=[5, 10, 20, 45, 90], obj=self.opts)
-        self.spin.add_key('psi', 'p - show system pressure (PSI)',
+        self.spin.add_key('psi', 'p - show PSI (header + memPSI%)',
                           vals=[False, True], obj=self.opts)
 
         keys_we_handle =  [ord('K'), ord('/'), 27, curses.KEY_ENTER, 10] + list(self.spin.keys)
@@ -1772,7 +1779,7 @@ def main():
     parser.add_argument('-C', '--no-cpu', action='store_false', dest='cpu',
             help='do NOT report percent CPU (only in window mode)')
     parser.add_argument('-P', '--psi', action='store_true',
-            help='show system pressure (PSI) in header [dflt=off]')
+            help='show PSI (system pressure in header + memPSI% column) [dflt=off]')
     parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid', 'cgroup'),
             default='exe', help='grouping method for presenting rows')
     parser.add_argument('-f', '--fit-to-window', action='store_true',

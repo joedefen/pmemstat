@@ -89,16 +89,17 @@ class TestFormatPressureLines(unittest.TestCase):
     def test_four_line_table(self):
         lines = format_pressure_lines(self.SNAPSHOT)
         self.assertEqual(len(lines), 4)
-        self.assertTrue(lines[0].startswith('PSI'))
+        # The 'PSI' title was dropped: the row labels now carry it (memPSI% ...).
+        self.assertNotIn('PSI', lines[0])
         self.assertIn('SOME', lines[0])
         self.assertIn('FULL', lines[0])
         for label in ('10s', '60s', '300s'):
             self.assertIn(label, lines[0])
         self.assertNotIn('(', lines[0])
         # one row per resource, in memory/cpu/io order
-        self.assertTrue(lines[1].startswith('    mem%'))
-        self.assertTrue(lines[2].startswith('    cpu%'))
-        self.assertTrue(lines[3].startswith('     io%'))
+        self.assertTrue(lines[1].startswith('memPSI%'))
+        self.assertTrue(lines[2].startswith('cpuPSI%'))
+        self.assertTrue(lines[3].startswith(' ioPSI%'))
         self.assertIn('1.23', lines[1])
         self.assertIn('1.04', lines[3])
 
@@ -118,7 +119,7 @@ class TestFormatPressureLines(unittest.TestCase):
     def test_absent_resource_skipped(self):
         lines = format_pressure_lines({'cpu': self.SNAPSHOT['cpu']})
         self.assertEqual(len(lines), 2)
-        self.assertTrue(lines[1].startswith('    cpu%'))
+        self.assertTrue(lines[1].startswith('cpuPSI%'))
 
 
 if __name__ == '__main__':

@@ -87,7 +87,8 @@ options:
   -h, --help            show this help message and exit
   -D, --debug           debug mode (the more Ds, the higher the debug level)
   -C, --no-cpu          do NOT report percent CPU (only in window mode)
-  -P, --psi             show system pressure (PSI) in header [dflt=off]
+  -P, --psi             show PSI (system pressure in header + memPSI% column)
+                        [dflt=off]
   -g {exe,cmd,pid,cgroup}, --groupby {exe,cmd,pid,cgroup}
                         grouping method for presenting rows
   -f, --fit-to-window   do not overflow window [if -w]
@@ -119,7 +120,7 @@ Explanation of some options and arguments:
     * `cmd` - group by the truncated command line (use `-L CMDLEN` to choose length)
     * `pid` - group by one process
     * `cgroup` - group by cgroup v2 path (services, scopes and containers); see "Grouping by cgroup v2" below
-* `-P, --psi` - add a **system pressure (PSI)** line to the header (off by default); see "System pressure (PSI)" below. In window mode this can also be toggled with the `p` key.
+* `-P, --psi` - show PSI (off by default): adds a **system pressure (PSI)** table to the header *and* the per-cgroup `memPSI%` column; see "System pressure (PSI)" and "Grouping by cgroup v2" below. In window mode this can also be toggled with the `p` key.
 * `-k MIN_DELTA_KB, --min-delta-kb MIN_DELTA_KB` - when looping, how much change in memory use is required to show the grouping in subsequent loops; note:
     * a positive `MIN_DELTA_KB` means the total memory of the groupin must **grow** by that amount (in KB)
     * a non-positive `MIN_DELTA_KB` means the total memory of the grouping must **change** by that amount (in KB)
@@ -133,11 +134,11 @@ Because `pmemstat` computes **proportional** memory (PSS), the `ptotal` column i
 * `cache` - `file - file_mapped`: page cache **not** mapped into userspace, i.e. invisible to PSS
 * `kmem` - `kernel`: kernel stacks, slab and pagetables (never part of PSS)
 * `kcharge` - `memory.current`: the kernel's total charge for the cgroup (what `memory.max` and the OOM killer use)
-* `psi_pct` - `memory.pressure`'s `some avg10`: memory-pressure stall time as a percentage; shown only when CPU is shown, beside `cpu_pct`
+* `memPSI%` - `memory.pressure`'s `some avg10`: memory-pressure stall time as a percentage; shown only with `-P` (PSI), beside `cpu%`
 
 These columns appear only in `-g cgroup` mode, and are omitted entirely when the kernel exposes no cgroup v2 data (e.g. a cgroup v1 host) or when `file_mapped` is unavailable.
 
-cgroup v2 accounting is **hierarchical**: a cgroup's `cache`/`kmem`/`kcharge` already include its descendant cgroups. A row whose cgroup also contains descendant cgroups listed separately is flagged with a trailing `+`, and **those descendants' figures are subtracted** so the row shows only that cgroup's own share. Consequently every row is its own share and the rows add up to the `TOTALS` row. (The one consequence of this: a `+` row's number is *smaller* than the raw `cat /sys/fs/cgroup/.../memory.current` for that cgroup; a row without `+` has no descendants and matches the file exactly.) The unified root (`/`, labelled `(root)`) is the ancestor of every cgroup, so if a process lives directly in it — as can happen inside a container, where it may be the only cgroup visible — that `(root)+` row counts every other row as its descendant. `psi_pct` is not totalled — it shows `n/a` in `TOTALS` and in the `---- OTHERS ----` row, since a sum of pressure percentages is meaningless.
+cgroup v2 accounting is **hierarchical**: a cgroup's `cache`/`kmem`/`kcharge` already include its descendant cgroups. A row whose cgroup also contains descendant cgroups listed separately is flagged with a trailing `+`, and **those descendants' figures are subtracted** so the row shows only that cgroup's own share. Consequently every row is its own share and the rows add up to the `TOTALS` row. (The one consequence of this: a `+` row's number is *smaller* than the raw `cat /sys/fs/cgroup/.../memory.current` for that cgroup; a row without `+` has no descendants and matches the file exactly.) The unified root (`/`, labelled `(root)`) is the ancestor of every cgroup, so if a process lives directly in it — as can happen inside a container, where it may be the only cgroup visible — that `(root)+` row counts every other row as its descendant. `memPSI%` is not totalled — it shows `n/a` in `TOTALS` and in the `---- OTHERS ----` row, since a sum of pressure percentages is meaningless.
 
 Reading `/proc/<pid>/cgroup` and `/sys/fs/cgroup` does not require root, so the grouping and these numbers are available even in non-root mode (the proportional PSS columns still reflect only the processes you are permitted to read).
 
@@ -145,22 +146,22 @@ Reading `/proc/<pid>/cgroup` and `/sys/fs/cgroup` does not require root, so the 
 With `-P` (or the `p` key in window mode) pmemstat adds a small (bold-headed) table to the header reporting Linux **Pressure Stall Information**, read from `/proc/pressure/{memory,cpu,io}`. PSI expresses the fraction of time that work was stalled waiting for a resource: the higher the number, the more that resource is a bottleneck.
 
 ```
-PSI     SOME 10s     60s    300s     FULL 10s     60s    300s
-    mem%    0.42    0.10    0.02         0.00    0.00    0.00
-    cpu%    0.00    0.03    0.00            -       -       -
-     io%    0.15    0.60    1.04         0.10    0.49    0.96
+       SOME 10s     60s    300s     FULL 10s     60s    300s
+memPSI%    0.42    0.10    0.02         0.00    0.00    0.00
+cpuPSI%    0.00    0.03    0.00            -       -       -
+ ioPSI%    0.15    0.60    1.04         0.10    0.49    0.96
 ```
 * The heading row names the two stall groups, `SOME` and `FULL`, and the three 10/60/300 **second** window columns (`10s`/`60s`/`300s`), which are right-aligned over the values below.
-* Each resource row (`mem`, `cpu`, `io`) holds the kernel's `avg10`/`avg60`/`avg300` stall-time percentage for that window.
+* Each resource row (`memPSI%`, `cpuPSI%`, `ioPSI%`) holds the kernel's `avg10`/`avg60`/`avg300` stall-time percentage for that window.
 * `SOME` - at least one task was stalled; `FULL` - **all** non-idle tasks were stalled. `FULL` is normally available only for `memory` and `io`; a resource that provides no `full` line (for example `cpu.pressure` on many kernels) shows `-` in its `FULL` cells.
 * A resource whose file is absent (a kernel built with `CONFIG_PSI=n`) is simply omitted; if no resource is readable, the table is not shown.
-* This is the **system-wide** view. It is distinct from the per-cgroup `psi_pct` column described under "Grouping by cgroup v2" (which is one cgroup's `memory.pressure some avg10`).
+* This is the **system-wide** view. It is distinct from the per-cgroup `memPSI%` column described under "Grouping by cgroup v2" (which is one cgroup's `memory.pressure some avg10`).
 
 ## Example Usage with Explanation of Output
 ```
 20:49:12 Tot=7.6G Used=6.2G Avail=1.4G Oth=0 Sh+Tmp=477.7M PIDs=174
      2.4%/ker MajF/s=2  zRAM=813.2M CR=4.3 eTot:16.8G eUsed:8.8G eAvail:8.0G
- cpu_pct   pswap   other    data  ptotal   key/info (exe by mem)
+ cpu%      pswap   other    data  ptotal   key/info (exe by mem)
     60.8   2,535     593   3,988   7,116 T 174x --TOTALS in MB --
 ───────────────────────────────────────────────────────────────────────────────
      5.9   1,366      90   2,110   3,567   24x browser
