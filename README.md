@@ -29,17 +29,10 @@ Without `-o`, `pmemstat` shows less details and is much faster and sometimes les
 
 Its looping features allow monitoring for changes in memory growth which may be "leaks".  Segregating memory by types can make identifying leaks faster and more certain.
 
-**`pmemstat` has these features**:
-* In its **window mode**, `pmemstat` updates the terminal in place (using "curses") rather than scrolling.
-* Showing **CPU use**, too, which makes `pmemstat` a viable alternative to `top` for regular use (although more specialized and still focused on accurate memory representation).
-* Supports **inline search** (press `/` to search-as-you-type with live filtering).
-* Supports **killing processes** with inline confirmation (press `y` to confirm, ESC to cancel).
-* **Grouping by cgroup v2** (`-g cgroup`), so services, scopes and containers can be compared using both proportional PSS and the kernel's own `memory.current`/`memory.stat`/`memory.pressure`.
-* **Memory-growth ("leak") annotations**: press `G` (or use `--growth-style`) to annotate the top-N growers inline (e.g. `13M 2h3m`) using a geometric, self-forgetting baseline; a system-wide growth/attribution line summarizes `ΔUsed = ΔTOTALS + Δ(Sh+Tmp) + ΔOthK + ΔOthU`.
-* And several **new options** that can be **controlled dynamically** if in window mode.
-
 ## How `pmemstat` Compares to Other Tools
 Reach for `top` or `ps` when you need a tool that is always installed, and `htop` when you want a friendly full-screen overview. Where `pmemstat` differs is its focus on **accurate, proportional memory**: instead of reporting each process's resident set size (RES/RSS) — which double-counts shared pages and ignores uninstantiated virtual memory — it digests `smaps`/`smaps_rollup` to attribute shared memory fairly and to break memory down by type. That makes `pmemstat` slower to start (especially with `-o`) but far more truthful about who is really using RAM. The table below compares it against its closest peers: `smem` (the other tool that derives **PSS** from `smaps`) and `systemd-cgtop` (whose per-cgroup view `pmemstat` now mirrors, but with proportional numbers).
+
+Three of `pmemstat`'s capabilities are **new or substantially overhauled** in recent releases and are marked **🆕** in the table below: **cgroup v2 grouping**, **memory-leak / growth monitoring**, and **system pressure (PSI)**. They are the areas where `pmemstat` pushes well past its peers (all three are ✗ for `smem`, `systemd-cgtop` and `htop`), and each has its own section below.
 
 | Feature | `pmemstat` | `smem` | `systemd-cgtop` | `htop` |
 |---|---|---|---|---|
@@ -47,10 +40,10 @@ Reach for `top` or `ps` when you need a tool that is always installed, and `htop
 | **Memory-type breakdown** (shared/swap/stack/text/data) | ✓ | ✗ (USS/PSS/RSS/Swap only) | ✗ | ✗ |
 | **Proportional swap** per grouping | ✓ | ✗ (flat Swap column) | ✗ | ✗ (total swap only) |
 | **Group processes** by executable/command | ✓ aggregates PIDs into one row | ✓ by command by default | ✗ | ✗ (tree view only) |
-| **Group by cgroup v2** (services, scopes, containers) | ✓ (`-g cgroup`) | ✗ | ✓ (its core design) | ✗ |
-| **Memory-leak / growth monitoring** (annotates top-N growers; only re-shows significant growth) | ✓ (`L`, `-k`, growth sort) | ✗ | ✗ | ✗ |
+| **Group by cgroup v2** 🆕 (services, scopes, containers) | ✓ (`-g cgroup`) | ✗ | ✓ (its core design) | ✗ |
+| **Memory-leak / growth monitoring** 🆕 (annotates top-N growers; only re-shows significant growth) | ✓ (`L`, `-k`, growth sort) | ✗ | ✗ | ✗ |
 | **zRAM-aware effective RAM** (eTot/eUsed/eAvail) | ✓ | ✗ | ✗ | ✗ |
-| **System pressure (PSI)** in header (memory/cpu/io, some/full) | ✓ (`-P`) | ✗ | ✗ | ✗ |
+| **System pressure (PSI)** 🆕 in header (memory/cpu/io, some/full) | ✓ (`-P`) | ✗ | ✗ | ✗ |
 | **Data source** | `/proc/{PID}/smaps*` | `/proc/{PID}/smaps` | `/sys/fs/cgroup` | `/proc` + libs |
 | **Interactive full-screen window** | ✓ (`console-window`/curses) | ✗ (one-shot) | ✓ | ✓ |
 | **CPU usage reporting** | ✓ | ✗ (memory only) | ✓ | ✓ |
