@@ -44,6 +44,7 @@ NOTE: kB is a misnomer ... should be "KB".  Morons.
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import traceback
@@ -52,9 +53,10 @@ import curses
 # from curses.textpad import rectangle
 from types import SimpleNamespace
 from io import StringIO
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pmemstat.KillThem import KillThem
 from pmemstat.CpuSmooth import CpuSmooth, SysStat
+from pmemstat import History
 from pmemstat.CGroup import (CGroup, cgroup_leaf, has_descendant,
                              local_values, parse_cgroup_lines)
 from pmemstat.Pressure import format_pressure_lines, read_system_pressure
@@ -117,6 +119,9 @@ CGROUP_GROUPS = ('cgroup', 'cgroupCharge')
 # Every grouping whose growth history is tracked independently, so that changing
 # the grouping never resets the leak baseline (see PmemStat.update_growth).
 GROWTH_VIEWS = ('exe', 'cmd', 'pid') + CGROUP_GROUPS
+
+# Set PMEMSTAT_NO_HISTORY to any value to disable cross-run history entirely.
+HISTORY_ENV_DISABLE = 'PMEMSTAT_NO_HISTORY'
 
 
 def is_cgroup_groupby(groupby):
@@ -231,6 +236,25 @@ class GrowthTracker:
         self._next_age = self.BASE
         self.last_seen = None
 
+    def seed(self, now, base_val, peak, interval):
+        """Pre-load a baseline carried over from a previous run's ledger.
+
+        ``t0`` is back-dated by ``interval`` so it coincides with the baseline's
+        first observation, and the baseline anchor is stored at age ``0``.  The
+        reported interval is therefore the time since the baseline -- not the
+        time since this session began -- and, because the baseline sits at age
+        ``0``, it is never aged out by :data:`RETENTION` (growth stays continuous
+        since the first observation).  Normal ``update()`` still clamps growth at
+        zero, so ``base_val`` (the lower of baseline/current) is the floor and a
+        rebound is measured from it.
+        """
+        interval = max(1, interval)
+        self.t0 = now - interval
+        self.peak = peak
+        self.snaps = [(0, base_val)]
+        self._next_age = max(interval, self.BASE) * 4
+        self.last_seen = now
+
     def update(self, now, value):
         """Feed a sample; return ``(growth, interval)`` in (KB, secs) or None."""
         if value is None:
@@ -246,13 +270,114 @@ class GrowthTracker:
             self._next_age *= 4
         if self.peak is None or value > self.peak:
             self.peak = value
-        while (len(self.snaps) > 1
+        while (len(self.snaps) > 1 and self.snaps[0][0] > 0
                and age >= self.RETENTION * self.snaps[0][0]):
             self.snaps.pop(0)
         if not self.snaps or age <= self.snaps[0][0]:
             return None
         base_age, base_val = self.snaps[0]
         return max(value - base_val, 0), age - base_age
+
+
+def _parse_iso(value):
+    """Parse an ISO-8601 timestamp into an aware datetime, or ``None``."""
+    if not isinstance(value, str):
+        return None
+    try:
+        stamp = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp
+
+
+def _as_datetime(value):
+    """Coerce epoch seconds to an aware UTC ``datetime``; pass datetimes through."""
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, timezone.utc)
+    return value
+
+
+def _baseline_parts(entry, now_wall):
+    """Return ``(base_kb, interval_secs)`` for a ledger baseline entry, else None.
+
+    ``now_wall`` must already be a ``datetime`` (callers normalize via
+    :func:`_as_datetime`).  ``interval_secs`` is the wall-clock time since the
+    baseline's ``base_ts`` (at least 1s when the timestamp is unusable).
+    """
+    if not isinstance(entry, dict):
+        return None
+    try:
+        base = int(entry['base'])
+    except (KeyError, TypeError, ValueError):
+        return None
+    stamp = _parse_iso(entry.get('base_ts'))
+    interval = ((now_wall - stamp).total_seconds()
+                if stamp is not None else 1.0)
+    return base, max(1.0, interval)
+
+
+def seed_from_baselines(trackers, baselines, samples, now_mono, now_wall):
+    """Seed per-``(view, key)`` trackers from ledger baselines and first samples.
+
+    ``trackers`` is the mutable ``{(view, key): GrowthTracker}`` map (missing
+    entries are created).  ``baselines`` maps ``view -> {key: {'base': kb,
+    'base_ts': iso}}`` exactly as returned by :func:`pmemstat.History.baselines`.
+    For every ``(view, key)`` present in BOTH ``baselines`` and the current
+    ``samples`` the tracker is pre-loaded with ``base_val = min(base, C)`` and
+    ``peak = max(base, C)`` and an interval equal to the wall-clock time since
+    the baseline was first seen this boot, so growth is measured across runs from
+    the ledger's first observation without ever going negative.  A key missing
+    from ``baselines`` is left fresh (no seed).  Returns the set of seeded
+    ``(view, key)`` keys.
+    """
+    seeded = set()
+    if not baselines:
+        return seeded
+    now_wall = _as_datetime(now_wall)
+    for view, by_key in (samples or {}).items():
+        base_view = baselines.get(view) or {}
+        for key, current in by_key.items():
+            parts = _baseline_parts(base_view.get(key), now_wall)
+            if parts is None:
+                continue
+            base, interval = parts
+            skey = (view, key)
+            tracker = trackers.get(skey)
+            if tracker is None:
+                tracker = GrowthTracker()
+                trackers[skey] = tracker
+            tracker.seed(now_mono, min(base, current), max(base, current),
+                         interval)
+            seeded.add(skey)
+    return seeded
+
+
+def seed_sys_from_baselines(trackers, baselines, samples, now_mono, now_wall):
+    """Seed the flat system trackers from ledger system baselines.
+
+    Like :func:`seed_from_baselines` but for the unscoped system metrics
+    (``Used``/``TOTALS``/``ShTmp``/``OthK``/``OthU``): ``trackers`` and
+    ``samples`` are flat ``{key: value}`` maps and ``baselines`` is
+    ``{key: {'base': kb, 'base_ts': iso}}``.  Returns the set of seeded keys.
+    """
+    seeded = set()
+    if not baselines:
+        return seeded
+    now_wall = _as_datetime(now_wall)
+    for key, current in (samples or {}).items():
+        parts = _baseline_parts(baselines.get(key), now_wall)
+        if parts is None:
+            continue
+        base, interval = parts
+        tracker = trackers.get(key)
+        if tracker is None:
+            tracker = GrowthTracker()
+            trackers[key] = tracker
+        tracker.seed(now_mono, min(base, current), max(base, current), interval)
+        seeded.add(key)
+    return seeded
 
 ####################################################################################
 # PORTABLE FUNCTION - Copy-pasted from zram-advisor
@@ -1015,6 +1140,25 @@ class PmemStat:
         self.sys_trackers = {key: GrowthTracker() for key in (
             'Used', 'TOTALS', 'ShTmp', 'OthK', 'OthU')}
         self.sys_growth = {}
+        # Cross-run growth ledger.  The boot id is captured once (it is stable
+        # for the life of the process); growth_samples is refreshed every loop by
+        # update_growth so the periodic ledger write is cheap.  history_use seeds
+        # the in-memory trackers from the ledger's baselines; history_save writes
+        # the ledger.  PMEMSTAT_NO_HISTORY disables both; the CLI flags disable
+        # one each.
+        no_history = bool(os.environ.get(HISTORY_ENV_DISABLE))
+        self.history_use = not no_history and not getattr(
+            opts, 'no_growth_history', False)
+        self.history_save = not no_history and not getattr(
+            opts, 'dont_save_growth_history', False)
+        self.history_boot = History.current_boot()
+        self.update_secs = History.update_secs()
+        self.growth_samples = {}
+        self.sys_samples = {}
+        self._history_seeded = False
+        self._history_saved_once = False
+        self._last_ledger_save = 0.0
+        self._history_finalized = False
         self._set_units()
         self.zram_projector = ZramProjector()
         # Initialize inline search bar
@@ -1380,6 +1524,35 @@ class PmemStat:
             for view, key in prc.view_keys.items():
                 samples[view][key] = samples[view].get(key, 0) + metric
         self.cgroup_growth_samples(samples)
+        # Keep the raw per-view samples so history can snapshot them cheaply.
+        self.growth_samples = samples
+        total = meminfoKB['MemTotal']
+        avail = meminfoKB['MemAvailable']
+        sh_tmp = meminfoKB['Shmem']
+        othk = (meminfoKB['SUnreclaim'] + meminfoKB['KernelStack']
+                + meminfoKB['PageTables'])
+        oth = total - grand_summary['ptotal'] - avail - sh_tmp
+        self.sys_samples = {
+            'Used': total - avail,
+            'TOTALS': grand_summary['ptotal'],
+            'ShTmp': sh_tmp,
+            'OthK': othk,
+            'OthU': oth - othk,
+        }
+        # Seed the trackers from the ledger baselines exactly once per process,
+        # after the samples exist but before any result is computed, so the very
+        # first annotations already measure growth since the first observation.
+        # The system metrics are seeded too, so the header deltas share that same
+        # baseline and interval.
+        if self.history_use and not self._history_seeded:
+            self._history_seeded = True
+            wall = datetime.now(timezone.utc)
+            baselines = History.baselines(boot=self.history_boot)
+            seed_from_baselines(self.growth_trackers, baselines, samples,
+                                now, wall)
+            sys_baselines = History.sys_baselines(boot=self.history_boot)
+            seed_sys_from_baselines(self.sys_trackers, sys_baselines,
+                                    self.sys_samples, now, wall)
         self.growth_results = {}
         for view, by_key in samples.items():
             self.growth_results[view] = {
@@ -1401,21 +1574,46 @@ class PmemStat:
                 minutes = group.growth_interval / 60.0
                 group.growth_rate = (group.growth_val / minutes
                                      if minutes > 0 else 0.0)
-        total = meminfoKB['MemTotal']
-        avail = meminfoKB['MemAvailable']
-        sh_tmp = meminfoKB['Shmem']
-        othk = (meminfoKB['SUnreclaim'] + meminfoKB['KernelStack']
-                + meminfoKB['PageTables'])
-        oth = total - grand_summary['ptotal'] - avail - sh_tmp
-        sys_samples = {
-            'Used': total - avail,
-            'TOTALS': grand_summary['ptotal'],
-            'ShTmp': sh_tmp,
-            'OthK': othk,
-            'OthU': oth - othk,
-        }
         self.sys_growth = {key: self.sys_trackers[key].update(now, value)
-                           for key, value in sys_samples.items()}
+                           for key, value in self.sys_samples.items()}
+
+    def history_begin(self):
+        """Startup housekeeping: drop obsolete phase-1 anchor/live/marker files."""
+        if not self.history_save and not self.history_use:
+            return
+        try:
+            History.cleanup_obsolete()
+        except OSError:
+            pass
+
+    def history_update(self, now=None, force=False):
+        """Merge the latest samples into the ledger (throttled unless forced).
+
+        Called on the first loop (to capture baselines promptly) and then on the
+        ``History.update_secs()`` timer, reusing the monotonic throttle pattern.
+        ``force`` writes regardless of the timer so the final flush on exit is
+        never skipped.  Idempotent: merging the same samples is harmless.
+        """
+        if not self.history_save or not self.growth_samples:
+            return
+        now = time.monotonic() if now is None else now
+        if (not force and self._history_saved_once
+                and now - self._last_ledger_save < self.update_secs):
+            return
+        self._history_saved_once = True
+        self._last_ledger_save = now
+        try:
+            History.update_ledger(self.growth_samples, self.sys_samples,
+                                  boot=self.history_boot)
+        except OSError:
+            pass
+
+    def history_finalize(self):
+        """Write one final ledger update on the way out (idempotent)."""
+        if self._history_finalized:
+            return
+        self._history_finalized = True
+        self.history_update(force=True)
 
     def growth_text(self, group):
         """Format a group's growth annotation for the current mode."""
@@ -1923,6 +2121,7 @@ class PmemStat:
             self._sysgrow_small = 0
             self._last_growth_mode = self.opts.growth_style
         self.update_growth(time.monotonic(), grand_summary, meminfoKB)
+        self.history_update()
         alive_for_growth = {k: g for k, g in self.groups.items() if g.alive}
         allowed = self.select_growth_rows(alive_for_growth)
         need = 1
@@ -2247,6 +2446,24 @@ def args_from_env():
     """
     return shlex.split(os.environ.get(ARGS_ENV, ''))
 
+
+def _resolve_argv(raw_argv, env_text):
+    """Effective argv for ``main``; returns ``(argv, error)``.
+
+    ``--save-history-now`` is special: it must work from cron regardless of the
+    ambient configuration, so its presence bypasses ``PMEMSTAT_ARGS`` (and, by
+    extension, every other environment setting) entirely.  Otherwise
+    ``env_text`` is tokenized and prepended to ``raw_argv``; a tokenization
+    error is returned as a message rather than raised.
+    """
+    raw_argv = list(raw_argv)
+    if '--save-history-now' in raw_argv:
+        return ['--save-history-now'], None
+    try:
+        return shlex.split(env_text) + raw_argv, None
+    except ValueError as exc:
+        return None, str(exc)
+
 def _isolated_can_import(module_root):
     """Whether an isolated interpreter (``python -I``) would find module_root.
 
@@ -2283,9 +2500,12 @@ def rerun_module_as_root(module_name, args=None):
     merged list matters because ``sudo`` resets the environment, so an
     ``PMEMSTAT_ARGS``-provided flag would otherwise be lost after elevation.
 
-    Returns ``True`` if the process was replaced (which does not return) and
-    ``False`` if elevation was declined, in which case the caller should keep
-    running as the invoking user.
+    On success the process is replaced and this function does not return.  It
+    returns ``None`` when elevation is not needed (already root), or a short
+    failure-reason string -- ``'not-importable'``, ``'no-tty'`` or
+    ``'exec-failed'`` -- when elevation did not happen, so callers can choose
+    to fail loudly (see :func:`_elevate_or_exit`) instead of silently running
+    with partial data.
 
     Safety properties compared with the previous unconditional re-exec:
       * never runs by default: the caller opts in via ``--sudo`` (which
@@ -2301,19 +2521,19 @@ def rerun_module_as_root(module_name, args=None):
         instead of prompting for a password and then failing.
     """
     if os.geteuid() == 0:
-        return True
+        return None
     module_root = module_name.split('.')[0]
     if not _isolated_can_import(module_root):
         print(f'pmemstat: not elevating to root: "{module_root}" is not '
               'importable by an isolated interpreter (install system-wide, '
               'with pipx, or inside a virtualenv to enable sudo elevation).',
               file=sys.stderr)
-        return False
+        return 'not-importable'
     if not (sys.stdin.isatty() or _sudo_noninteractive_ok()):
         print('pmemstat: not elevating to root (no terminal for a sudo '
               'prompt); run "sudo pmemstat" for full detail.',
               file=sys.stderr)
-        return False
+        return 'no-tty'
     if args is None:
         args = sys.argv[1:]
     cmd = ['sudo', sys.executable, '-I', '-m', module_name] + list(args)
@@ -2321,7 +2541,99 @@ def rerun_module_as_root(module_name, args=None):
         os.execvp('sudo', cmd)
     except OSError as exc:
         print(f'pmemstat: could not exec sudo: {exc}', file=sys.stderr)
-    return False
+        return 'exec-failed'
+    return 'exec-failed'  # unreachable: a successful execvp never returns
+
+def _handle_sigterm(signum, _frame):
+    """Turn SIGTERM into a graceful unwind so the history hook can run."""
+    raise SystemExit(128 + signum)
+
+
+def _elevate_or_exit(opts, effective_argv):
+    """Exit fatally when ``--sudo`` was requested but elevation cannot happen.
+
+    A non-importable install (or a missing terminal) used to downgrade silently
+    to a user-only run whose warning scrolled off-screen, hiding that the data
+    was partial.  When root data was explicitly requested, failing visibly is
+    the safer behavior.  Callers invoke this only when not already root.
+    """
+    reason = rerun_module_as_root('pmemstat.main', effective_argv)
+    if reason is None:
+        return  # already root; nothing to do
+    print(f'pmemstat: FATAL: root elevation was requested (--sudo) but failed '
+          f'({reason}); run as root (e.g. "sudo pmemstat") or fix the install.',
+          file=sys.stderr)
+    sys.exit(1)
+
+
+def save_history_now(opts):
+    """Collect the current stats once and write the ledger, then exit (no UI).
+
+    Intended for cron / system startup: it implies ``--sudo`` (data for all
+    processes needs root) and ignores every other option and environment
+    setting.  Prints nothing on success and returns ``0``; on failure it prints
+    an explanation to stderr and returns ``1``.
+    """
+    if os.geteuid() == 0:
+        return _collect_and_save_history(opts)
+    reason = rerun_module_as_root('pmemstat.main', ['--save-history-now'])
+    # Reaching here means elevation did not happen (success replaces the
+    # process), so any return value is a failure reason.
+    print('pmemstat: history update FAILED: could not elevate to root '
+          f'({reason})', file=sys.stderr)
+    return 1
+
+
+def _collect_and_save_history(opts):
+    """One silent scan and ledger write; returns ``0`` on success, else ``1``.
+
+    Every other option is ignored: the scan is forced to a non-window one-shot
+    whose report is suppressed, and the ledger write is done here so its
+    success/failure becomes the exit code.
+    """
+    opts.window = False
+    opts.loop_secs = 0
+    opts.debug = False
+    opts.cpu = False
+    opts.fit_to_window = False
+    if opts.min_delta_kb is None:
+        opts.min_delta_kb = 100 if opts.units == 'KB' else 1000
+    pmemstat = PmemStat(opts=opts)
+    ProcMem.pmemstat = pmemstat
+    ProcMem.opts = opts
+    # The scan builds growth_samples/sys_samples; the ledger write is done here
+    # so its success/failure becomes the exit code.  Suppress the scan's report.
+    pmemstat.history_use = False
+    pmemstat.history_save = False
+    saved_stdout = sys.stdout
+    try:
+        with open(os.devnull, 'w', encoding='utf-8') as devnull:
+            sys.stdout = devnull
+            try:
+                pmemstat.loop(datetime.now(), is_first=True)
+            finally:
+                sys.stdout = saved_stdout
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        print(f'pmemstat: history update FAILED: {exc}', file=sys.stderr)
+        return 1
+    if not pmemstat.growth_samples:
+        print('pmemstat: history update FAILED: no process data collected',
+              file=sys.stderr)
+        return 1
+    try:
+        ok = History.update_ledger(pmemstat.growth_samples,
+                                   pmemstat.sys_samples,
+                                   boot=pmemstat.history_boot)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        print(f'pmemstat: history update FAILED: {exc}', file=sys.stderr)
+        return 1
+    if not ok:
+        print('pmemstat: history update FAILED: ledger not written '
+              '(another run holds the lock, or the state dir is unwritable)',
+              file=sys.stderr)
+        return 1
+    return 0
+
 
 def main():
     """Main loop"""
@@ -2357,6 +2669,9 @@ def main():
     parser.add_argument('--sudo', action='store_true',
             help='re-run self as root via sudo '
                  '(or set PMEMSTAT_ARGS=--sudo)')
+    parser.add_argument('--save-history-now', action='store_true',
+            help='save the current stats to the history ledger and exit '
+                 '(implies --sudo; ignores other options and the environment)')
     parser.add_argument('-o', '--others', action='store_false',
             help='expand "other" into shSYSV, shOth, stack, text')
     parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'),
@@ -2370,26 +2685,32 @@ def main():
     parser.add_argument('--growth-top',
             choices=('3', '10', '30', 'all'), default='3',
             help='annotate only the top-N growers: 3|10|30|all [dflt=3]')
+    parser.add_argument('--no-growth-history', action='store_true',
+            help='do NOT seed growth from the cross-run ledger (fresh baseline)')
+    parser.add_argument('--dont-save-growth-history', action='store_true',
+            help='do NOT write the cross-run growth ledger')
     parser.add_argument('-/', '--search', default='',
             help='show items with search string in name')
     parser.add_argument('-W', '--no-window', action='store_false', dest='window',
             help='show in "curses" window [disables: -D,-t,-L]')
     parser.add_argument('pids', nargs='*', action='store',
             help='list of pids/groups (none means every accessible pid)')
-    try:
-        env_args = args_from_env()
-    except ValueError as exc:
-        print(f'pmemstat: bad {ARGS_ENV}: {exc}', file=sys.stderr)
+    effective_argv, argv_error = _resolve_argv(
+        sys.argv[1:], os.environ.get(ARGS_ENV, ''))
+    if argv_error is not None:
+        print(f'pmemstat: bad {ARGS_ENV}: {argv_error}', file=sys.stderr)
         sys.exit(2)
-    effective_argv = env_args + sys.argv[1:]
     opts = parser.parse_args(effective_argv)
     # DB(0, f'opts={opts}')
 
+    if opts.save_history_now:
+        return save_history_now(opts)
+
     if not opts.run_as_user and os.geteuid() != 0:
         if opts.sudo:
-            # Opted in explicitly: try to elevate, but stay as the user if
-            # elevation is declined (reason is printed by the call).
-            rerun_module_as_root('pmemstat.main', effective_argv)
+            # Opted in explicitly: elevation failure is fatal (a silent
+            # downgrade scrolls off-screen and hides that the data is partial).
+            _elevate_or_exit(opts, effective_argv)
         elif not opts.window:
             print("pmemstat: running as user (other users' processes omitted); "
                   'run "sudo pmemstat" or set PMEMSTAT_ARGS=--sudo for '
@@ -2417,34 +2738,50 @@ def main():
     ProcMem.pmemstat = pmemstat
     ProcMem.opts = opts
 
-    if opts.window:
-        if opts.loop_secs <= 0:
-            opts.loop_secs = 5
-        pmemstat.window_loop()
-    else:
-        is_first = True
-        while True:
-            now = datetime.now()
-            pmemstat.loop(now, is_first)
+    try:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+    except (ValueError, OSError):  # not on the main thread / unsupported
+        pass
+
+    # History lifecycle: recover a crashed run + mark the start now, and always
+    # finalize (append the closing anchor, mark a clean shutdown) on the way
+    # out, including on Ctrl-C / SIGTERM / sys.exit.
+    try:
+        pmemstat.history_begin()
+        if opts.window:
             if opts.loop_secs <= 0:
-                break
-            until_dt = now + timedelta(0, opts.loop_secs)
-            diff_dt = until_dt - datetime.now()
-            seconds = diff_dt.total_seconds()
-            if seconds > 0:
-                time.sleep(seconds)
-            is_first = False
+                opts.loop_secs = 5
+            pmemstat.window_loop()
+        else:
+            is_first = True
+            while True:
+                now = datetime.now()
+                pmemstat.loop(now, is_first)
+                if opts.loop_secs <= 0:
+                    break
+                until_dt = now + timedelta(0, opts.loop_secs)
+                diff_dt = until_dt - datetime.now()
+                seconds = diff_dt.total_seconds()
+                if seconds > 0:
+                    time.sleep(seconds)
+                is_first = False
+    finally:
+        pmemstat.history_finalize()
+    return 0
+
 
 def run():
-    """Wrap main in try/except."""
+    """Wrap main in try/except and exit with a status code."""
     try:
-        main()
+        code = main()
     except KeyboardInterrupt:
-        pass
-    except Exception as exce:
+        code = 130
+    except Exception as exce:  # pylint: disable=broad-exception-caught
         ConsoleWindow.stop_curses()
         print("exception:", str(exce))
         print(traceback.format_exc())
+        code = 1
+    sys.exit(code or 0)
 
 
 if __name__ == '__main__':

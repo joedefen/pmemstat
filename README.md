@@ -68,7 +68,7 @@ Note that:
 * Where it is installed matters: a system-wide install (e.g. `sudo pipx install --global pmemstat`) is visible to both your user and root, so `sudo pmemstat` works; a per-user install lives in `~/.local/bin`, which root does not search, so you either run it as your user or let it elevate itself.
 * To have it re-run itself under `sudo` automatically, opt in once with `export PMEMSTAT_ARGS=--sudo` in your shell profile, or pass `--sudo` per invocation (for a system-wide install you can also simply run `sudo pmemstat`).
 * For a persistent set of default flags, export `PMEMSTAT_ARGS` with a shell-quoted argument string, e.g. `export PMEMSTAT_ARGS='--sudo --psi --loop 3 -s name'`. It is tokenized like a command line and prepended to the real arguments, so anything typed on the command line still takes precedence.
-* Auto-elevation is skipped when there is no terminal for a `sudo` prompt and sudo is not already authorized, so scripts/CI never hang waiting for a password.
+* When `--sudo` is requested but elevation cannot happen (no terminal for a `sudo` prompt and sudo not pre-authorized, or the install is not importable by the isolated interpreter), `pmemstat` fails with a clear message and a non-zero exit instead of silently downgrading to a user-only view. It never hangs waiting for a password.
 * To force user-only operation and disable auto-elevation, use the `--run-as-user` or `-U` option.
 * `pmemstat` depends on `console-window`, pinned to an **exact version** on purpose. That package provides the curses UI and is deliberately not allowed to float: the pin protects against unexpected upstream changes and preserves the author's freedom to make backwards-incompatible UI revisions. Installing `pmemstat` pulls the pinned version automatically; do not "upgrade" `console-window` independently.
 
@@ -79,7 +79,7 @@ See the Quick Start at the top for preferred install instructions using `pipx`. 
 ```
 usage: pmemstat [-h] [-D] [-C] [-P] [-g {exe,cmd,pid,cgroup,cgroupCharge}]
         [-f] [-k MIN_DELTA_KB] [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT]
-        [-n] [-U] [--sudo] [-o] [-u {MB,mB,KB,human}]
+        [-n] [-U] [--sudo] [--save-history-now] [-o] [-u {MB,mB,KB,human}]
         [-s {mem,cpu,name,growth}] [--growth-style {off,both,growth,rate}]
         [--growth-top {3,10,30,all}] [-/ SEARCH] [-W] [pids ...]
 
@@ -107,6 +107,8 @@ options:
   -U, --run-as-user     run as user (NOT as root)
   --sudo                re-run self as root via sudo (or set
                         PMEMSTAT_ARGS=--sudo)
+  --save-history-now    save current stats to the history ledger and exit
+                        (implies --sudo; ignores other options/environment)
   -o, --others          expand "other" into shSYSV, shOth, stack, text
   -u {MB,mB,KB,human}, --units {MB,mB,KB,human}
                         units of memory [dflt=MB]
@@ -271,6 +273,16 @@ groups that are growing, making slow leaks visible without scrolling history:
   userspace (`ΔTOTALS`) and tmpfs (`Δ(Sh+Tmp)`).
 * Caveats: `Oth*` are only meaningful when run as root; when not root the `OthU`
   remainder also includes other users' memory.
+
+## Updating History from Cron / Startup
+Run `pmemstat --save-history-now` to perform a single **silent** scan and write
+the per-boot history ledger, then exit: return code `0` on success, `1` on
+failure (with an explanation on stderr; nothing on success). It implies
+`--sudo` and ignores every other option and `PMEMSTAT_ARGS`, so it is safe from
+cron or a system-startup unit, e.g. `pmemstat --save-history-now`. The ledger is
+per invoking user (`/tmp/pmemstat-<uid>`, or `PMEMSTAT_STATE_DIR` if set), so run
+it as the user whose history you want to keep; a root cron job without
+`SUDO_UID` updates the root ledger instead.
 
 ## Key Legend (Window Mode)
 The top line of the header is an always-visible key legend (dimmed, left-aligned

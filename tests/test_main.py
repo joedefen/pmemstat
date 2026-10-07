@@ -7,14 +7,20 @@ deterministic functions that do the memory math and the smaps/rollup parsing.
 Importing the ``tests`` package (which Python does before importing this
 module) installs a ``console_window`` stub when the real package is missing.
 """
+import io
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest import mock
 
+from pmemstat import main as main_module
 from pmemstat.main import (human, human_kb, ago_str, GrowthTracker,
                            compute_zram_effective, ProcMem, PmemStat,
-                           args_from_env, ARGS_ENV)
+                           args_from_env, ARGS_ENV, seed_from_baselines,
+                           seed_sys_from_baselines, HISTORY_ENV_DISABLE,
+                           save_history_now, _resolve_argv)
 from pmemstat.CGroup import CGroup
 
 GIB = 1024 ** 3
@@ -400,6 +406,268 @@ class TestGrowthTracker(unittest.TestCase):
         # age 600 >= 32*16, so the 16s anchor is dropped
         self.assertEqual(tracker.update(600.0, 500), (300, 536.0))
         self.assertEqual(tracker.snaps[0], (64, 200))
+
+
+class TestGrowthTrackerSeed(unittest.TestCase):
+    """Seeding a tracker carries a baseline across runs, unsigned."""
+
+    def test_seed_current_below_anchor_lowers_baseline(self):
+        tracker = GrowthTracker()
+        # anchor A=500, current C=300 -> base=min=300, peak=max=500.
+        tracker.seed(1000.0, 300, 500, 100.0)
+        # Comparing to C shows no growth (no negative growth is ever shown);
+        # the interval is the time since the baseline (110s), not since seeding.
+        self.assertEqual(tracker.update(1010.0, 300), (0, 110.0))
+        # Rebounding to A is measured from C: A - C == 200.
+        self.assertEqual(tracker.update(1120.0, 500)[0], 200)
+
+    def test_seed_current_above_anchor_shows_growth(self):
+        tracker = GrowthTracker()
+        # anchor A=300, current C=500 -> base=min=300, peak=max=500.
+        tracker.seed(1000.0, 300, 500, 100.0)
+        self.assertEqual(tracker.update(1010.0, 500), (200, 110.0))
+
+    def test_seed_never_shows_negative_growth(self):
+        tracker = GrowthTracker()
+        tracker.seed(1000.0, 300, 500, 100.0)
+        growth, _ = tracker.update(1100.0, 100)
+        self.assertEqual(growth, 0)
+
+    def test_seed_records_last_seen(self):
+        tracker = GrowthTracker()
+        tracker.seed(1000.0, 300, 500, 100.0)
+        self.assertEqual(tracker.last_seen, 1000.0)
+
+
+class TestSaveHistoryNow(unittest.TestCase):
+    """``--save-history-now`` writes the ledger silently, exit code = status."""
+
+    @staticmethod
+    def _opts():
+        return SimpleNamespace(window=True, loop_secs=5, debug=False, cpu=True,
+                               fit_to_window=True, min_delta_kb=None,
+                               units='MB')
+
+    def test_resolve_argv_bypasses_environment(self):
+        argv, err = _resolve_argv(['--save-history-now', '--loop', '9'],
+                                  '--debug --bad')
+        self.assertIsNone(err)
+        self.assertEqual(argv, ['--save-history-now'])
+
+    def test_resolve_argv_reports_bad_env(self):
+        argv, err = _resolve_argv([], '--search "unclosed')
+        self.assertIsNone(argv)
+        self.assertIsNotNone(err)
+
+    def test_non_root_elevation_failure_returns_1(self):
+        err = io.StringIO()
+        with mock.patch.object(main_module.os, 'geteuid', return_value=1), \
+             mock.patch.object(main_module, 'rerun_module_as_root',
+                               return_value='not-importable'), \
+             mock.patch('sys.stderr', err):
+            self.assertEqual(save_history_now(self._opts()), 1)
+        self.assertIn('FAILED', err.getvalue())
+
+    def test_elevate_or_exit_is_fatal_on_failure(self):
+        err = io.StringIO()
+        opts = SimpleNamespace(sudo=True, run_as_user=False)
+        with mock.patch.object(main_module, 'rerun_module_as_root',
+                               return_value='not-importable'), \
+             mock.patch('sys.stderr', err):
+            with self.assertRaises(SystemExit) as ctx:
+                main_module._elevate_or_exit(opts, [])
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn('FATAL', err.getvalue())
+
+    def test_elevate_or_exit_noop_when_already_root(self):
+        opts = SimpleNamespace(sudo=True, run_as_user=False)
+        with mock.patch.object(main_module, 'rerun_module_as_root',
+                               return_value=None) as rerun:
+            main_module._elevate_or_exit(opts, [])  # must not raise/exit
+        rerun.assert_called_once()
+
+    def test_success_writes_ledger_and_returns_0(self):
+        calls = {}
+
+        class FakePm:  # pylint: disable=too-few-public-methods
+            def __init__(self, opts):
+                self.growth_samples = {}
+                self.sys_samples = {}
+                self.history_boot = 'b'
+
+            def loop(self, now, is_first):
+                self.growth_samples = {'exe': {'a': 1}}
+                self.sys_samples = {'Used': 2}
+
+        def fake_update(samples, sys_samples, boot=None):
+            calls['args'] = (samples, sys_samples, boot)
+            return True
+
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+             mock.patch.object(main_module, 'PmemStat', FakePm), \
+             mock.patch.object(main_module.History, 'update_ledger',
+                               side_effect=fake_update):
+            self.assertEqual(save_history_now(self._opts()), 0)
+        self.assertEqual(calls['args'],
+                         ({'exe': {'a': 1}}, {'Used': 2}, 'b'))
+
+    def test_ledger_write_failure_returns_1(self):
+        err = io.StringIO()
+
+        class FakePm:  # pylint: disable=too-few-public-methods
+            def __init__(self, opts):
+                self.growth_samples = {}
+                self.sys_samples = {}
+                self.history_boot = 'b'
+
+            def loop(self, now, is_first):
+                self.growth_samples = {'exe': {'a': 1}}
+                self.sys_samples = {}
+
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+             mock.patch.object(main_module, 'PmemStat', FakePm), \
+             mock.patch.object(main_module.History, 'update_ledger',
+                               return_value=False), \
+             mock.patch('sys.stderr', err):
+            self.assertEqual(save_history_now(self._opts()), 1)
+        self.assertIn('FAILED', err.getvalue())
+
+
+class TestSeedFromBaselines(unittest.TestCase):
+    """``seed_from_baselines`` seeds only keys the ledger already knows."""
+
+    def test_seeds_present_pairs_and_skips_new_keys(self):
+        trackers = {}
+        now_wall = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+        base_ts = (now_wall - timedelta(seconds=120)).isoformat()
+        baselines = {'exe': {'a': {'base': 500, 'base_ts': base_ts}}}
+        samples = {'exe': {'a': 300, 'b': 50}}
+        seeded = seed_from_baselines(trackers, baselines, samples,
+                                     now_mono=1000.0, now_wall=now_wall)
+        self.assertIn(('exe', 'a'), seeded)
+        self.assertNotIn(('exe', 'b'), seeded)
+        self.assertIn(('exe', 'a'), trackers)
+        # 'b' had no baseline, so it must stay fresh (no tracker created).
+        self.assertNotIn(('exe', 'b'), trackers)
+        tracker = trackers[('exe', 'a')]
+        # min/max lowering: base=min(500,300)=300, peak=max=500.
+        self.assertEqual(tracker.update(1010.0, 300)[0], 0)
+        # Rebounding to the baseline is measured from the lowered base: 500-300.
+        self.assertEqual(tracker.update(1120.0, 500)[0], 200)
+
+    def test_interval_derived_from_base_ts(self):
+        trackers = {}
+        now_wall = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+        base_ts = (now_wall - timedelta(seconds=120)).isoformat()
+        seed_from_baselines(
+            trackers, {'exe': {'a': {'base': 10, 'base_ts': base_ts}}},
+            {'exe': {'a': 10}}, now_mono=1000.0, now_wall=now_wall)
+        self.assertAlmostEqual(trackers[('exe', 'a')].t0, 1000.0 - 120.0)
+
+    def test_empty_baselines_seeds_nothing(self):
+        now = datetime.now(timezone.utc)
+        self.assertEqual(
+            seed_from_baselines({}, {}, {'exe': {'a': 1}}, 1.0, now), set())
+        self.assertEqual(
+            seed_from_baselines({}, None, {'exe': {'a': 1}}, 1.0, now), set())
+
+    def test_accepts_epoch_seconds_for_now_wall(self):
+        # Regression: update_growth() may pass time.time() (an epoch float);
+        # it must be coerced, not subtracted from a datetime.
+        trackers = {}
+        base_ts = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc).isoformat()
+        now_wall = datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc).timestamp()
+        seeded = seed_from_baselines(
+            trackers, {'exe': {'a': {'base': 10, 'base_ts': base_ts}}},
+            {'exe': {'a': 10}}, now_mono=1000.0, now_wall=now_wall)
+        self.assertIn(('exe', 'a'), seeded)
+        self.assertAlmostEqual(trackers[('exe', 'a')].t0, 1000.0 - 120.0)
+
+    def test_interval_reports_time_since_baseline(self):
+        # The displayed interval must be the time since the ledger baseline,
+        # not the time since this pmemstat session began.
+        trackers = {}
+        now_wall = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+        base_ts = (now_wall - timedelta(seconds=120)).isoformat()
+        seed_from_baselines(
+            trackers, {'exe': {'a': {'base': 10, 'base_ts': base_ts}}},
+            {'exe': {'a': 10}}, now_mono=1000.0, now_wall=now_wall)
+        tracker = trackers[('exe', 'a')]
+        _, interval = tracker.update(1000.0, 10)
+        self.assertAlmostEqual(interval, 120.0)
+        _, interval = tracker.update(1060.0, 10)
+        self.assertAlmostEqual(interval, 180.0)
+
+    def test_seed_sys_from_baselines(self):
+        trackers = {}
+        now_wall = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+        base_ts = (now_wall - timedelta(seconds=300)).isoformat()
+        baselines = {'Used': {'base': 500, 'base_ts': base_ts},
+                     'TOTALS': {'base': 100, 'base_ts': base_ts}}
+        seeded = seed_sys_from_baselines(
+            trackers, baselines, {'Used': 400, 'TOTALS': 100, 'New': 1},
+            now_mono=2000.0, now_wall=now_wall)
+        self.assertEqual(seeded, {'Used', 'TOTALS'})
+        self.assertNotIn('New', trackers)
+        _, interval = trackers['Used'].update(2000.0, 400)
+        self.assertAlmostEqual(interval, 300.0)
+
+
+class TestUpdateGrowthSeeding(unittest.TestCase):
+    """``update_growth`` seeds once from the ledger baselines."""
+
+    @staticmethod
+    def _grand():
+        return {'ptotal': 1000}
+
+    @staticmethod
+    def _meminfo():
+        return {'MemTotal': 10000, 'MemAvailable': 5000, 'Shmem': 100,
+                'SUnreclaim': 10, 'KernelStack': 5, 'PageTables': 5}
+
+    def test_baselines_consulted_exactly_once(self):
+        opts = SimpleNamespace(units='MB', debug=0, groupby='exe')
+        pm = PmemStat(opts)
+        pm.groups = {}
+        baselines = {'exe': {'a': {'base': 100}}}
+        with mock.patch.object(main_module.History, 'baselines',
+                               return_value=baselines) as bl:
+            pm.update_growth(0.0, self._grand(), self._meminfo())
+            self.assertTrue(pm._history_seeded)  # pylint: disable=protected-access
+            bl.assert_called_once()
+            pm.update_growth(1.0, self._grand(), self._meminfo())
+            bl.assert_called_once()  # never re-seeded
+
+
+class TestHistoryFlags(unittest.TestCase):
+    """The two CLI flags map onto ``history_use`` / ``history_save``."""
+
+    @staticmethod
+    def _pm(**over):
+        fields = dict(units='MB', debug=0)
+        fields.update(over)
+        return PmemStat(SimpleNamespace(**fields))
+
+    def test_defaults_enable_both(self):
+        pm = self._pm()
+        self.assertTrue(pm.history_use)
+        self.assertTrue(pm.history_save)
+
+    def test_no_growth_history_disables_use_only(self):
+        pm = self._pm(no_growth_history=True)
+        self.assertFalse(pm.history_use)
+        self.assertTrue(pm.history_save)
+
+    def test_dont_save_growth_history_disables_save_only(self):
+        pm = self._pm(dont_save_growth_history=True)
+        self.assertTrue(pm.history_use)
+        self.assertFalse(pm.history_save)
+
+    def test_env_disables_both(self):
+        with mock.patch.dict(os.environ, {HISTORY_ENV_DISABLE: '1'}):
+            pm = self._pm()
+        self.assertFalse(pm.history_use)
+        self.assertFalse(pm.history_save)
 
 
 class TestDebouncedWidth(unittest.TestCase):
