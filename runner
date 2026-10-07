@@ -23,7 +23,7 @@ def add_invoking_users_site_packages():
 
     This is only reached when the developer *explicitly* runs
     ``sudo ./runner``; it is NOT used by the installed ``pmemstat`` entry
-    point, whose ``--auto-sudo`` path deliberately never injects a
+    point, whose ``--sudo`` path deliberately never injects a
     user-writable import path into root.  Bridging the original user's
     site-packages here is therefore a deliberate, explicit developer
     convenience rather than an automatic escalation.

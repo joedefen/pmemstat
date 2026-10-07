@@ -8,12 +8,14 @@ Importing the ``tests`` package (which Python does before importing this
 module) installs a ``console_window`` stub when the real package is missing.
 """
 import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 
 from pmemstat.main import (human, human_kb, ago_str, GrowthTracker,
                            compute_zram_effective, ProcMem, PmemStat,
                            args_from_env, ARGS_ENV)
+from pmemstat.CGroup import CGroup
 
 GIB = 1024 ** 3
 FIXTURES = os.path.join(os.path.dirname(__file__), 'fixtures')
@@ -487,6 +489,129 @@ class TestCgroupLabel(unittest.TestCase):
         self.pm.cgroup_keys = {'/x', '/x/app-niri-fuzzel-32513.scope'}
         group = self._group('/x', ['code'])
         self.assertEqual(self.pm.cgroup_label(group), 'code+')
+
+
+class TestCgroupColumns(unittest.TestCase):
+    """The per-view cgroup column spec and the sum-to-total invariant."""
+
+    @staticmethod
+    def _pm(view, **over):
+        """Build a PmemStat for a cgroup view ('footprt' or 'kcharge')."""
+        groupby = 'cgroupCharge' if view == 'kcharge' else 'cgroup'
+        fields = dict(units='MB', debug=0, groupby=groupby, cpu=True,
+                      psi=False, others=True)
+        fields.update(over)
+        pm = PmemStat(SimpleNamespace(**fields))
+        pm.cgroup_data_seen = True
+        return pm
+
+    def test_is_cgroup_for_both_views(self):
+        self.assertTrue(self._pm('footprt').is_cgroup())
+        self.assertTrue(self._pm('kcharge').is_cgroup())
+        self.assertFalse(self._pm('footprt', groupby='exe').is_cgroup())
+
+    def test_footprt_column_order(self):
+        """ptotal is the left-hand reference, then the slices, then footprt."""
+        self.assertEqual(self._pm('footprt').view_columns(),
+                         ['cpu%', 'ptotal', '', 'anon', 'cache', 'kmem',
+                          'swap', 'oK', 'footprt'])
+
+    def test_kcharge_column_order(self):
+        """The kcharge view is the same block without the swap slice."""
+        self.assertEqual(self._pm('kcharge').view_columns(),
+                         ['cpu%', 'ptotal', '', 'anon', 'cache', 'kmem',
+                          'oK', 'kcharge'])
+
+    def test_ptotal_precedes_the_slice_block(self):
+        cols = self._pm('footprt').view_columns()
+        self.assertLess(cols.index('ptotal'), cols.index('anon'))
+        self.assertLess(cols.index('oK'), cols.index('footprt'))
+
+    def test_total_key_matches_view(self):
+        self.assertEqual(self._pm('footprt').total_key(), 'footprt')
+        self.assertEqual(self._pm('kcharge').total_key(), 'kcharge')
+
+    def test_non_cgroup_unchanged(self):
+        pm = self._pm('footprt', groupby='exe')
+        pm.cgroup_data_seen = False
+        self.assertEqual(pm.view_columns(),
+                         ['cpu%', 'pswap', 'shSYSV', 'data', 'ptotal'])
+        self.assertEqual(pm.total_key(), 'ptotal')
+
+    def test_others_expanded(self):
+        pm = self._pm('footprt', groupby='exe', others=False)
+        pm.cgroup_data_seen = False
+        self.assertEqual(pm.view_columns(),
+                         ['cpu%', 'pswap', 'shSYSV', 'shOth', 'stack',
+                          'text', 'data', 'ptotal'])
+
+    def _run_locals(self, view, raw, charge_keys):
+        pm = self._pm(view)
+        pm.cgroup_raw = {'/a': raw}
+        pm.cgroup_charge_keys = set(charge_keys)
+        group = SimpleNamespace(key='/a', alive=True,
+                                summary=ProcMem.make_summary_dict(info='/a'))
+        pm.groups = {'/a': group}
+        pm.apply_cgroup_locals()
+        return group.summary
+
+    def test_kcharge_row_sums_to_total(self):
+        summary = self._run_locals(
+            'kcharge',
+            {'anon': 10, 'cache': 100, 'kmem': 5, 'swap': 0,
+             'kcharge': 200, 'footprt': 0},
+            {'/a'})
+        self.assertEqual(summary['anon'] + summary['cache']
+                         + summary['kmem'] + summary['oK'], 200)
+        self.assertEqual(summary['oK'], 85)
+
+    def test_footprt_row_sums_to_total(self):
+        summary = self._run_locals(
+            'footprt',
+            {'anon': 10, 'cache': 100, 'kmem': 5, 'swap': 7,
+             'kcharge': 0, 'footprt': 150},
+            {'/a'})
+        self.assertEqual(summary['anon'] + summary['cache'] + summary['kmem']
+                         + summary['swap'] + summary['oK'], 150)
+        self.assertEqual(summary['oK'], 28)
+
+    def test_non_charge_row_is_none(self):
+        summary = self._run_locals(
+            'footprt',
+            {'anon': 0, 'cache': 0, 'kmem': 0, 'swap': 0,
+             'kcharge': 0, 'footprt': 0},
+            set())
+        self.assertIsNone(summary['footprt'])
+        self.assertIsNone(summary['oK'])
+
+    def test_update_summary_formulas(self):
+        """memory.stat slices map to the per-view formulas (bytes -> KB)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, 'a')
+            os.makedirs(target)
+            with open(os.path.join(target, 'memory.current'), 'w',
+                      encoding='utf-8') as fh:
+                fh.write('1048576\n')
+            with open(os.path.join(target, 'memory.stat'), 'w',
+                      encoding='utf-8') as fh:
+                fh.write('anon 262144\nfile 262144\ninactive_file 65536\n'
+                         'kernel 8192\nslab_reclaimable 4096\n')
+            saved = CGroup.root
+            CGroup.root = tmp
+            self.addCleanup(setattr, CGroup, 'root', saved)
+            for view, expect in (
+                    ('footprt', {'anon': 256, 'cache': 192, 'kmem': 4,
+                                 'footprt': 956}),
+                    ('kcharge', {'anon': 256, 'cache': 256, 'kmem': 8,
+                                 'kcharge': 1024})):
+                pm = self._pm(view)
+                group = SimpleNamespace(key='/a', prcset=set())
+                group.summary = ProcMem.make_summary_dict(info='')
+                pm.update_cgroup_summary(group)
+                self.assertIn('/a', pm.cgroup_charge_keys)
+                raw = pm.cgroup_raw['/a']
+                for key, value in expect.items():
+                    self.assertEqual(raw[key], value, f'{view}:{key}')
 
 
 if __name__ == '__main__':

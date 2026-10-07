@@ -6,13 +6,13 @@
 > * **Fallback: per-user `pipx`** if you cannot install system-wide:
 >   * `pipx upgrade pmemstat || pipx install pmemstat`
 >   * the launcher lands in `~/.local/bin`, which `sudo` does **not** search; run it as your user: `pmemstat`
->   * for system-wide coverage, either install system-wide (above) or let it elevate itself: set `export PMEMSTAT_ARGS=--auto-sudo` once, then just run `pmemstat`
+>   * for system-wide coverage, either install system-wide (above) or let it elevate itself: set `export PMEMSTAT_ARGS=--sudo` once, then just run `pmemstat`
 > * **To run** (running as root shows **all** processes; as your user, only your own):
 >   * `sudo pmemstat`  (system-wide install)
->   * `pmemstat`  (per-user install; your processes only, unless `PMEMSTAT_ARGS=--auto-sudo`)
+>   * `pmemstat`  (per-user install; your processes only, unless `PMEMSTAT_ARGS=--sudo`)
 >   * type "?" within `pmemstat` to show the help screen.
 
-> **Note (v4.0.0 — breaking changes):** the install method changed (prefer a system-wide `pipx install --global`; a per-user install is not elevated by `sudo`), and `pmemstat` no longer re-runs itself as root by default. For the 3.x behavior (full, all-process view when launched as your user), set `PMEMSTAT_ARGS=--auto-sudo` in your environment — or just run `sudo pmemstat`.
+> **Note (v4.0.0 — breaking changes):** the install method changed (prefer a system-wide `pipx install --global`; a per-user install is not elevated by `sudo`), and `pmemstat` no longer re-runs itself as root by default. For the 3.x behavior (full, all-process view when launched as your user), set `PMEMSTAT_ARGS=--sudo` in your environment — or just run `sudo pmemstat`.
 
 
 # pmemstat - Proportional Memory Status
@@ -66,8 +66,8 @@ Note that:
 * `pmemstat` needs root privileges to read the memory statistics (`smaps`/`smaps_rollup`) for **all** processes; without them it reports only your own processes.
 * By default `pmemstat` runs as the invoking user and shows a hint; it does **not** silently escalate to root.
 * Where it is installed matters: a system-wide install (e.g. `sudo pipx install --global pmemstat`) is visible to both your user and root, so `sudo pmemstat` works; a per-user install lives in `~/.local/bin`, which root does not search, so you either run it as your user or let it elevate itself.
-* To have it re-run itself under `sudo` automatically, opt in once with `export PMEMSTAT_ARGS=--auto-sudo` in your shell profile, or pass `--auto-sudo` per invocation (for a system-wide install you can also simply run `sudo pmemstat`).
-* For a persistent set of default flags, export `PMEMSTAT_ARGS` with a shell-quoted argument string, e.g. `export PMEMSTAT_ARGS='--auto-sudo --psi --loop 3 -s name'`. It is tokenized like a command line and prepended to the real arguments, so anything typed on the command line still takes precedence.
+* To have it re-run itself under `sudo` automatically, opt in once with `export PMEMSTAT_ARGS=--sudo` in your shell profile, or pass `--sudo` per invocation (for a system-wide install you can also simply run `sudo pmemstat`).
+* For a persistent set of default flags, export `PMEMSTAT_ARGS` with a shell-quoted argument string, e.g. `export PMEMSTAT_ARGS='--sudo --psi --loop 3 -s name'`. It is tokenized like a command line and prepended to the real arguments, so anything typed on the command line still takes precedence.
 * Auto-elevation is skipped when there is no terminal for a `sudo` prompt and sudo is not already authorized, so scripts/CI never hang waiting for a password.
 * To force user-only operation and disable auto-elevation, use the `--run-as-user` or `-U` option.
 * `pmemstat` depends on `console-window`, pinned to an **exact version** on purpose. That package provides the curses UI and is deliberately not allowed to float: the pin protects against unexpected upstream changes and preserves the author's freedom to make backwards-incompatible UI revisions. Installing `pmemstat` pulls the pinned version automatically; do not "upgrade" `console-window` independently.
@@ -77,9 +77,9 @@ See the Quick Start at the top for preferred install instructions using `pipx`. 
 
 ## Usage
 ```
-usage: pmemstat [-h] [-D] [-C] [-P] [-g {exe,cmd,pid,cgroup}] [-f]
-        [-k MIN_DELTA_KB] [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-n] [-U]
-        [--auto-sudo] [-o] [-u {MB,mB,KB,human}]
+usage: pmemstat [-h] [-D] [-C] [-P] [-g {exe,cmd,pid,cgroup,cgroupCharge}]
+        [-f] [-k MIN_DELTA_KB] [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT]
+        [-n] [-U] [--sudo] [-o] [-u {MB,mB,KB,human}]
         [-s {mem,cpu,name,growth}] [--growth-style {off,both,growth,rate}]
         [--growth-top {3,10,30,all}] [-/ SEARCH] [-W] [pids ...]
 
@@ -105,7 +105,8 @@ options:
                         report group contributing to top pct of ptotal [dflt=100]
   -n, --numbers         show line numbers in report
   -U, --run-as-user     run as user (NOT as root)
-  --auto-sudo           re-run self as root via sudo (or set PMEMSTAT_ARGS=--auto-sudo)
+  --sudo                re-run self as root via sudo (or set
+                        PMEMSTAT_ARGS=--sudo)
   -o, --others          expand "other" into shSYSV, shOth, stack, text
   -u {MB,mB,KB,human}, --units {MB,mB,KB,human}
                         units of memory [dflt=MB]
@@ -121,11 +122,12 @@ options:
 
 ```
 Explanation of some options and arguments:
-* `-g {exe,cmd,pid,cgroup}, --groupby {exe,cmd,pid,cgroup}` -  select the grouping of memory stats for reporting.
+* `-g {exe,cmd,pid,cgroup,cgroupCharge}, --groupby {...}` -  select the grouping of memory stats for reporting.
     * `exe` - group by basename of the executable (the default)
     * `cmd` - group by the truncated command line (use `-L CMDLEN` to choose length)
     * `pid` - group by one process
-    * `cgroup` - group by cgroup v2 path (services, scopes and containers); see "Grouping by cgroup v2" below
+    * `cgroup` - group by cgroup v2 path (services, scopes and containers), showing the derived **footprint** total; see "Grouping by cgroup v2" below
+    * `cgroupCharge` - the same cgroup v2 grouping, but each row's slices and total show the kernel's `memory.current` charge instead of the derived footprint; see "Grouping by cgroup v2" below
 * `-P, --psi` - show PSI (off by default): adds a **system pressure (PSI)** table to the header *and* the per-cgroup `memPSI%` column; see "System pressure (PSI)" and "Grouping by cgroup v2" below. In window mode this can also be toggled with the `p` key.
 * `-k MIN_DELTA_KB, --min-delta-kb MIN_DELTA_KB` - when looping, how much change in memory use is required to show the grouping in subsequent loops; note:
     * a positive `MIN_DELTA_KB` means the total memory of the groupin must **grow** by that amount (in KB)
@@ -139,15 +141,24 @@ Explanation of some options and arguments:
 ## Grouping by cgroup v2
 With `-g cgroup` (or cycling `g` in window mode) `pmemstat` groups processes by their **cgroup v2** path (read from `/proc/<pid>/cgroup`), which corresponds to systemd services/scopes and to container sandboxes. Each row is labelled with the cgroup's leaf unit name (e.g. `foo.service`); systemd's `\xNN` escapes are decoded for readability, and a trailing `+` marks a cgroup that also contains descendant cgroups listed on their own rows. If the leaf name matches none of the row's member executables — common with launcher-created app scopes (e.g. niri's `app-niri-fuzzel-*.scope`, which actually host the launched app such as VS Code or Vivaldi) — the row is labelled with the dominant member executable instead; the full cgroup path stays searchable with `/`.
 
-Because `pmemstat` computes **proportional** memory (PSS), the `ptotal` column is *not* the same number that `systemd-cgtop`, `docker stats` or `podman stats` report: those use the kernel's `memory.current`, which is not proportional and over-counts pages shared between processes. `-g cgroup` therefore adds columns, read from `/sys/fs/cgroup/<path>/`, in the same units as every other column (`-u`), each chosen so it carries information PSS cannot see:
-* `cache` - `file - file_mapped`: page cache **not** mapped into userspace, i.e. invisible to PSS
-* `kmem` - `kernel`: kernel stacks, slab and pagetables (never part of PSS)
-* `footprt` - a derived **footprint**: `memory.current - inactive_file - slab_reclaimable + swap` (KB). It removes reclaimable page cache and reclaimable slab and adds swap, giving a stable "what this cgroup really holds" number that `memory.max`/the OOM killer act on; `-g cgroup` also uses it as the growth metric. (The raw `memory.current` is no longer shown; `--growth-style`/`Oth*` attribution use it internally.)
+Because `pmemstat` computes **proportional** memory (PSS), the `ptotal` column is *not* the same number that `systemd-cgtop`, `docker stats` or `podman stats` report: those use the kernel's `memory.current`, which is not proportional and over-counts pages shared between processes. For that reason the cgroup groupings keep `ptotal` as a left-hand **reference** column (the tool's namesake proportional total) but do **not** use it as the row total; the row total is the kernel charge, and the grouping chooses which charge: `-g cgroup` shows the derived `footprt`, `-g cgroupCharge` shows `memory.current` (`kcharge`).
+
+The kernel columns, read from `/sys/fs/cgroup/<path>/` in the same units as every other column (`-u`), are a decomposition of that charge. The slices to the left of the total add up to it exactly:
+* `anon` - `memory.stat`'s `anon`: anonymous memory charged to the cgroup
+* `cache` - page cache: `file` (in the `kcharge` view) or `file - inactive_file` (in the `footprt` view, where reclaimable inactive cache is removed)
+* `kmem` - kernel memory: `kernel` (`kcharge`) or `kernel - slab_reclaimable` (`footprt`)
+* `swap` - the kernel swap charge (`footprt` view only; swap is not part of `memory.current`). Distinct from `pswap` (the smaps-proportional swap shown in other modes)
+* `oK` - the remainder, `total - (anon + cache + kmem [+ swap])`; normally just `sock`, it guarantees the row adds up
+* `footprt` / `kcharge` - the row **total** for the active grouping (`cgroup` -> `footprt`; `cgroupCharge` -> `kcharge`):
+    * `footprt` (default) - a derived **footprint**: `memory.current - inactive_file - slab_reclaimable + swap`, a stable "what this cgroup really holds" number; also the growth metric
+    * `kcharge` - `memory.current`, the kernel's own charge (the verifiable number behind `systemd-cgtop`/`docker stats`, and what `memory.max`/the OOM killer act on)
 * `memPSI%` - `memory.pressure`'s `some avg10`: memory-pressure stall time as a percentage; shown only with `-P` (PSI), beside `cpu%`
 
-These columns appear only in `-g cgroup` mode, and are omitted entirely when the kernel exposes no cgroup v2 data (e.g. a cgroup v1 host) or when `file_mapped` is unavailable.
+So the memory columns of a `-g cgroup` row read `ptotal | anon cache kmem [swap] oK | <total>`: the leftmost value is pmemstat's proportional total (for comparison), and the bracketed slice block sums to the view total on the right. The raw `memory.current` is visible in the `kcharge` view (and is used internally by `--growth-style`/`Oth*` attribution).
 
-cgroup v2 accounting is **hierarchical**: a cgroup's `cache`/`kmem`/`footprt` already include its descendant cgroups. A row whose cgroup also contains descendant cgroups listed separately is flagged with a trailing `+`, and **those descendants' figures are subtracted** so the row shows only that cgroup's own share. Consequently every row is its own share and the rows add up to the `TOTALS` row. (Because `footprt` is *derived* (`memory.current - inactive_file - slab_reclaimable + swap`), a cgroup row no longer equals the raw `cat /sys/fs/cgroup/.../memory.current`; the raw value is intentionally not displayed.) The unified root (`/`, labelled `(root)`) is the ancestor of every cgroup, so if a process lives directly in it — as can happen inside a container, where it may be the only cgroup visible — that `(root)+` row counts every other row as its descendant. `memPSI%` is not totalled — it shows `n/a` in `TOTALS` and in the `---- OTHERS ----` row, since a sum of pressure percentages is meaningless.
+These columns appear only in the cgroup groupings (`-g cgroup` / `-g cgroupCharge`), and are omitted entirely when the kernel exposes no cgroup v2 data (e.g. a cgroup v1 host).
+
+cgroup v2 accounting is **hierarchical**: a cgroup's `anon`/`cache`/`kmem`/`swap`/`footprt`/`kcharge` already include its descendant cgroups. A row whose cgroup also contains descendant cgroups listed separately is flagged with a trailing `+`, and **those descendants' figures are subtracted** so the row shows only that cgroup's own share. Consequently every row is its own share and the rows add up to the `TOTALS` row, and within each row the slice block adds up to the view total. (Because `footprt` is *derived* (`memory.current - inactive_file - slab_reclaimable + swap`), a `footprt`-view row does not equal the raw `cat /sys/fs/cgroup/.../memory.current`; switch to the `kcharge` view to see that raw value.) The unified root (`/`, labelled `(root)`) is the ancestor of every cgroup, so if a process lives directly in it — as can happen inside a container, where it may be the only cgroup visible — that `(root)+` row counts every other row as its descendant. `memPSI%` is not totalled — it shows `n/a` in `TOTALS` and in the `---- OTHERS ----` row, since a sum of pressure percentages is meaningless.
 
 Reading `/proc/<pid>/cgroup` and `/sys/fs/cgroup` does not require root, so the grouping and these numbers are available even in non-root mode (the proportional PSS columns still reflect only the processes you are permitted to read).
 
@@ -244,8 +255,9 @@ groups that are growing, making slow leaks visible without scrolling history:
   (In window mode every row is listed, so annotations are always visible; in
   non-window loop mode a row is re-shown only when it changes enough for `-k`.)
 * `-s growth` sorts rows by the displayed growth metric (rate in `both`/`rate`).
-* With `-g cgroup` the metric is `footprt` (see "Grouping by cgroup v2") rather
-  than proportional PSS.
+* With a cgroup grouping the metric is that grouping's total (`footprt` for
+  `-g cgroup`, or `kcharge` for `-g cgroupCharge`; see "Grouping by cgroup v2")
+  rather than proportional PSS.
 * A system-wide line is shown beneath the leader (same mode) and closes the
   accounting identity `ΔUsed = ΔTOTALS(ptotal) + Δ(Sh+Tmp) + ΔOthK + ΔOthU`,
   where `OthK = SUnreclaim + KernelStack + PageTables` and `OthU` is the

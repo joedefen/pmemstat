@@ -109,6 +109,17 @@ def DB(level, *opts, **kwargs):
         print(*opts, **kwargs)
         print(tstr.getvalue() + f'[:{lineno}]')
 
+# Grouping methods that present cgroup v2 rows. 'cgroup' is the footprint view
+# (the default) and 'cgroupCharge' is the same grouping with the kernel
+# ``memory.current`` charge shown instead; they differ only in the memory view.
+CGROUP_GROUPS = ('cgroup', 'cgroupCharge')
+
+
+def is_cgroup_groupby(groupby):
+    """True when ``groupby`` selects a cgroup v2 grouping (either view)."""
+    return groupby in CGROUP_GROUPS
+
+
 ##############################################################################
 ##   human()
 ##############################################################################
@@ -645,7 +656,7 @@ class ProcMem:
             self.key = self.cmdline_trunc
         elif groupby == 'exe':
             self.key = self.exebasename
-        elif groupby == 'cgroup':
+        elif is_cgroup_groupby(groupby):
             self.key = self.read_cgroup() or '(no-cgroup)'
         else: # 'pid'
             self.key = self.pid
@@ -759,8 +770,16 @@ class ProcMem:
                 'text': 0,
                 'data': 0, # deprecated 'pseudo' (e.g., memory barrier) now in 'data'
                 'ptotal': 0,
-                'cache': 0,    # cgroup v2 file - file_mapped (KB): unmapped page cache
-                'kmem': 0,     # cgroup v2 kernel (KB): kernel stacks + slab + pagetables
+                # cgroup v2 kernel-charge slices (see README "Grouping by cgroup
+                # v2"). anon/cache/kmem/swap partition the charge, oK is the
+                # remainder (total - slices, normally just sock) so the row adds
+                # up, and kcharge/footprt are the two view totals.
+                'anon': 0,     # cgroup v2 anon (KB)
+                'cache': 0,    # cgroup v2 page cache (KB): file or file-inactive_file
+                'kmem': 0,     # cgroup v2 kernel (KB): kernel or kernel-slab_reclaimable
+                'swap': 0,     # cgroup v2 kernel swap charge (KB), footprt view
+                'oK': 0,       # cgroup v2 remainder (KB): total - slices
+                'kcharge': 0,  # cgroup v2 memory.current (KB)
                 'footprt': 0,  # cgroup v2 derived footprint (KB): current - reclaimable + swap
                 'pss': 0,  # comes from rollups
                 'number': -pid if pid else 0, # count if positive; else -pid
@@ -904,6 +923,9 @@ class PmemStat:
     # the gateway to the complete list (and the navigation keys) stays visible.
     KEY_LEGEND = ('[?]help [g]roup [u]nits [s]ort [c]pu [K]ill [p]SI'
                   ' [G]rowth [t]op')
+    # PSS categories folded into the single combined "other" column when -o is
+    # not given; the first entry is the rendered slot (the sum is shown there).
+    OTHER_KEYS = ('shSYSV', 'shOth', 'stack', 'text')
     # Grow a width immediately; shrink it only after this many consecutive
     # smaller refreshes (hysteresis against frame-to-frame jitter).
     WIDTH_SHRINK_DELAY = 4
@@ -931,8 +953,7 @@ class PmemStat:
         self.cgroup_keys = set()
         self.cgroup_raw = {}            # cgroup key -> raw (hierarchical) values
         self.cgroup_data_seen = False   # any group had readable cgroup v2 data
-        self.cgroup_cache_seen = False  # memory.stat exposed file_mapped
-        self.cgroup_footprt_keys = set()  # cgroups with a computable footprt
+        self.cgroup_charge_keys = set()  # cgroups with a computable charge total
         self.lead_width = 1             # width of the growth column
         self.sys_growth_width = 1       # width of the system line values
         self._lead_small = 0            # consecutive smaller-refresh counts
@@ -1064,15 +1085,21 @@ class PmemStat:
         The label is the leaf unit name, marked with a trailing "+" when the
         cgroup also contains descendant cgroups that are listed separately.
 
-        The numeric columns are the kernel's own per-cgroup accounting, each
-        chosen to add information PSS cannot see (PSS covers only mapped user
-        memory):
-          * ``cache``   = ``file - file_mapped``: page cache not mapped into
-            userspace, i.e. invisible to PSS.
-          * ``kmem``    = ``kernel``: kernel stacks + slab + pagetables.
-          * ``footprt`` = ``memory.current - inactive_file - slab_reclaimable
-            + swap``: the cgroup's memory footprint (reclaimable cache and slab
-            removed, swap added), also used as the growth metric.
+        The numeric columns are a decomposition of the kernel's own per-cgroup
+        charge, each slice taken from ``memory.stat`` so the row reconciles to
+        the view total (``memory.current`` for the kcharge view, or the derived
+        ``footprt`` for the footprt view):
+
+          * ``anon``  = ``anon``: anonymous memory charged to the cgroup.
+          * ``cache`` = ``file`` (kcharge) or ``file - inactive_file``
+            (footprt): page cache; reclaimable inactive cache is removed in the
+            footprt view.
+          * ``kmem``  = ``kernel`` (kcharge) or ``kernel - slab_reclaimable``
+            (footprt): kernel slabs + stacks + pagetables.
+          * ``swap``  = the kernel swap charge (footprt view only; swap is not
+            part of ``memory.current``).
+          * ``oK``    = total - the slices above (normally just ``sock``), so
+            the row adds up exactly.
 
         The values read here are *raw* (they include descendant cgroups); they
         are cached in ``self.cgroup_raw`` and :meth:`apply_cgroup_locals`
@@ -1082,34 +1109,38 @@ class PmemStat:
         """
         group.summary['info'] = self.cgroup_label(group)
         # Reset the cgroup columns (the summary may be a reused object); the
-        # three memory columns are filled by apply_cgroup_locals().
-        group.summary['cache'] = 0
-        group.summary['kmem'] = 0
+        # memory columns are filled by apply_cgroup_locals().
+        for key in ('anon', 'cache', 'kmem', 'swap', 'oK'):
+            group.summary[key] = 0
+        group.summary['kcharge'] = None
         group.summary['footprt'] = None
         group.summary['memPSI%'] = 0
         if not isinstance(group.key, str):
             return
         data = CGroup(group.key).read()
         stat = data['stat'] or {}
-        raw = {'cache': 0, 'kmem': 0, 'footprt': 0}
-        if 'file_mapped' in stat:
-            self.cgroup_cache_seen = True
-            raw['cache'] = (stat.get('file', 0) - stat.get('file_mapped', 0)) // 1024
-        if stat.get('kernel'):
-            raw['kmem'] = stat['kernel'] // 1024
+        raw = {'anon': 0, 'cache': 0, 'kmem': 0, 'swap': 0,
+               'kcharge': 0, 'footprt': 0}
         if data['current'] is not None:
             self.cgroup_data_seen = True
-            # footprt = memory.current - inactive_file - slab_reclaimable + swap:
-            # absent optional inputs count as 0, and the result is clamped at 0.
+            current = data['current']
             swap = stat.get('swap')
             if swap is None:
                 swap = data.get('swap_current') or 0
-            footprt = (data['current']
-                       - stat.get('inactive_file', 0)
-                       - stat.get('slab_reclaimable', 0)
-                       + swap) // 1024
-            raw['footprt'] = max(0, footprt)
-            self.cgroup_footprt_keys.add(group.key)
+            inactive_file = stat.get('inactive_file', 0)
+            slab_reclaimable = stat.get('slab_reclaimable', 0)
+            raw['anon'] = stat.get('anon', 0) // 1024
+            if self.cgroup_view() == 'footprt':
+                raw['cache'] = (stat.get('file', 0) - inactive_file) // 1024
+                raw['kmem'] = (stat.get('kernel', 0) - slab_reclaimable) // 1024
+                raw['swap'] = swap // 1024
+                raw['footprt'] = max(0, (current - inactive_file
+                                         - slab_reclaimable + swap) // 1024)
+            else:
+                raw['cache'] = stat.get('file', 0) // 1024
+                raw['kmem'] = stat.get('kernel', 0) // 1024
+                raw['kcharge'] = current // 1024
+            self.cgroup_charge_keys.add(group.key)
         self.cgroup_raw[group.key] = raw
         some = (data['pressure'] or {}).get('some') or {}
         if 'avg10' in some:
@@ -1121,20 +1152,33 @@ class PmemStat:
         cgroup v2 accounting is hierarchical, so a parent's raw numbers include
         its descendant groups'. Subtracting the descendants' raw values makes
         every row its own share and lets the rows sum to TOTALS; the "+" marker
-        flags the rows that had descendants subtracted.
+        flags the rows that had descendants subtracted. ``oK`` is recomputed on
+        the local slices so the row still reconciles to the (local) total.
         """
-        locals_by_key = local_values(self.cgroup_raw,
-                                     ('cache', 'kmem', 'footprt'))
+        cols = ('anon', 'cache', 'kmem', 'swap', 'kcharge', 'footprt')
+        locals_by_key = local_values(self.cgroup_raw, cols)
+        total_key = self.total_key()
         for group in self.groups.values():
-            if group.alive and group.summary:
-                values = locals_by_key.get(group.key)
-                if values:
-                    group.summary.update(values)
-                    if group.key not in self.cgroup_footprt_keys:
-                        group.summary['footprt'] = None
-                    elif group.summary.get('footprt') is not None:
-                        group.summary['footprt'] = max(
-                            0, group.summary['footprt'])
+            if not (group.alive and group.summary):
+                continue
+            values = locals_by_key.get(group.key)
+            if not values:
+                continue
+            if group.key not in self.cgroup_charge_keys:
+                for key in ('anon', 'cache', 'kmem', 'swap', 'oK',
+                            'kcharge', 'footprt'):
+                    group.summary[key] = None
+                continue
+            group.summary.update(values)
+            for key in cols:
+                if group.summary.get(key) is not None:
+                    group.summary[key] = max(0, group.summary[key])
+            total = group.summary.get(total_key)
+            parts = (group.summary['anon'] + group.summary['cache']
+                     + group.summary['kmem'])
+            if total_key == 'footprt':
+                parts += group.summary['swap']
+            group.summary['oK'] = (total - parts) if total is not None else None
 
     def prep_new_loop(self, regroup):
         """Prepare for a new loop.
@@ -1143,7 +1187,6 @@ class PmemStat:
         """
         if regroup:
             self.groups = {}
-            self.cgroup_footprt_keys = set()
         if self.groups:
             for key in list(self.groups):
                 group = self.groups[key]
@@ -1210,12 +1253,16 @@ class PmemStat:
         return is_over, delta_pss
 
     def group_growth_metric(self, group):
-        """Per-group scalar fed to its growth tracker (KB)."""
+        """Per-group scalar fed to its growth tracker (KB).
+
+        In cgroup mode the metric is the active view total (``footprt`` or
+        ``kcharge``), so the leak annotation tracks whatever charge is shown.
+        """
         summary = group.summary or {}
-        if (self.opts.groupby == 'cgroup' and self.cgroup_data_seen
-                and group.key in self.cgroup_footprt_keys
-                and summary.get('footprt') is not None):
-            return summary['footprt']
+        if self.is_cgroup() and self.cgroup_data_seen:
+            value = summary.get(self.total_key())
+            if value is not None:
+                return value
         if 'pss' not in summary:
             return None
         return self.growth_metric_value(summary)
@@ -1359,7 +1406,7 @@ class PmemStat:
                 group.summary['info'] = f'{prc.exebasename}'
             elif self.opts.groupby == 'cmd':
                 group.summary['info'] = f'{prc.cmdline_trunc}'
-            elif self.opts.groupby == 'cgroup':
+            elif self.is_cgroup():
                 group.summary['info'] = cgroup_leaf(group.key)
             else:
                 group.summary['info'] = f'{prc.pid} {prc.cmdline_trunc}'
@@ -1416,53 +1463,84 @@ class PmemStat:
         if self.debug:
             DB(1 if group.is_changed else 5, f'{group.key}:', group.summary)
 
-    def pr_exclusions(self):
-        """ TBD """
-        exclusions = {'number', 'info'}
-        cgroup_cols = ('memPSI%', 'cache', 'kmem', 'footprt')
-        if not self.opts.cpu:
-            exclusions.add('cpu%')
-        # cgroup v2 columns exist only in cgroup mode, only when the kernel
-        # exposed cgroup v2 data (else they would be misleading zeros), and
-        # memPSI% only when PSI is shown (-P), since it is a PSI column.
-        if self.opts.groupby != 'cgroup' or not self.cgroup_data_seen:
-            exclusions.update(cgroup_cols)
+    def is_cgroup(self):
+        """True when the current grouping is a cgroup v2 grouping."""
+        return is_cgroup_groupby(getattr(self.opts, 'groupby', None))
+
+    def cgroup_view(self):
+        """Active cgroup memory view: ``'footprt'`` or ``'kcharge'``.
+
+        Derived from the grouping method so there is a single source of truth:
+        ``-g cgroup`` shows the footprint view, ``-g cgroupCharge`` the kernel
+        ``memory.current`` view.
+        """
+        return ('kcharge' if getattr(self.opts, 'groupby', None) == 'cgroupCharge'
+                else 'footprt')
+
+    def total_key(self):
+        """Column key holding the current view's memory total."""
+        if self.is_cgroup() and self.cgroup_data_seen:
+            return self.cgroup_view()
+        return 'ptotal'
+
+    def view_columns(self):
+        """Ordered column keys rendered for the current mode/view.
+
+        A single place decides column presence and order, so the header, every
+        row, and the TOTALS row stay aligned. ``number``/``info`` are emitted
+        separately (they are not columns). In cgroup mode ``ptotal`` is kept as
+        a left-hand PSS reference (the tool's namesake) and the kernel
+        decomposition that reconciles to the charge total follows it.
+        """
+        cols = []
+        if self.opts.cpu:
+            cols.append('cpu%')
+        if self.is_cgroup() and self.cgroup_data_seen:
+            if self.opts.psi:
+                cols.append('memPSI%')
+            cols.append('ptotal')
+            cols.append('')  # spacer: ptotal is a reference, not part of the sum
+            cols += ['anon', 'cache', 'kmem']
+            if self.cgroup_view() == 'footprt':
+                cols.append('swap')
+            cols.append('oK')
+            cols.append(self.total_key())
         else:
-            if not self.opts.psi:
-                exclusions.add('memPSI%')
-            if not self.cgroup_cache_seen:
-                exclusions.add('cache')
-        others = ['text', 'shSYSV', 'shOth', 'stack'] if self.opts.others else []
-        if not self.debug:
-            exclusions.add('pss')
-        return others, exclusions
+            cols.append('pswap')
+            if self.opts.others:
+                cols.append(self.OTHER_KEYS[0])
+            else:
+                cols += list(self.OTHER_KEYS)
+            cols += ['data', 'ptotal']
+        if self.debug:
+            cols.append('pss')
+        return cols
 
     def pr_summary(self, lead, summary, attr=None, to_head=False):
-        """Print a summary of memory use"""
+        """Print a summary of memory use (columns from view_columns())."""
         body = ''
-        others, exclusions = self.pr_exclusions()
-        others_mb = 0
+        combined = bool(self.opts.others)
         if self.opts.numbers:
             body += f'{self.number:>4}'
         self.number += 1
-        for item, value in summary.items():
-            if item not in exclusions:
-                if value is None:
-                    body += f'{"n/a":>{self.fwidth}}'
-                    continue
-                if item in ('cpu%', 'memPSI%'):
-                    body += f'{value:>{self.fwidth}.1f}'
-                    continue
-                mbytes = int(round(value*1024/self.divisor))
-                if item in others:
-                    others_mb += mbytes
-                    if item != others[0]:
-                        continue
-                    mbytes = others_mb
-                if self.divisor > 1:
-                    body += f'{mbytes:>{self.fwidth},}'
-                else:
-                    body += f'{human(mbytes):>{self.fwidth}}'
+        for item in self.view_columns():
+            if not item:
+                body += '  '
+                continue
+            value = summary.get(item, 0)
+            if value is None:
+                body += f'{"n/a":>{self.fwidth}}'
+                continue
+            if item in ('cpu%', 'memPSI%'):
+                body += f'{value:>{self.fwidth}.1f}'
+                continue
+            if combined and item == self.OTHER_KEYS[0]:
+                value = sum(summary.get(key, 0) for key in self.OTHER_KEYS)
+            mbytes = int(round(value*1024/self.divisor))
+            if self.divisor > 1:
+                body += f'{mbytes:>{self.fwidth},}'
+            else:
+                body += f'{human(mbytes):>{self.fwidth}}'
         num = summary['number']
         lead = f'{lead:<{self.lead_width}}'
         self.emit(f'{body} {lead} '
@@ -1693,20 +1771,20 @@ class PmemStat:
         # if the group rollup_summary indicates enough change
         grand_summary = ProcMem.make_summary_dict(info=f'--TOTALS in {self.units} --')
         self.cgroup_data_seen = False
-        self.cgroup_cache_seen = False
         self.cgroup_raw = {}
+        self.cgroup_charge_keys = set()
         self.cgroup_keys = {g.key for g in self.groups.values()
                             if isinstance(g.key, str) and g.prcset}
         for group in self.groups.values():
             if group.alive:
                 self.prc_group(group)
-                if self.opts.groupby == 'cgroup':
+                if self.is_cgroup():
                     self.update_cgroup_summary(group)
         # cgroup v2 accounting is hierarchical, so reduce every row to its own
         # ("local") share before totalling - that keeps the rows adding up to
         # TOTALS. A sum of pressure percentages is meaningless, so memPSI% is
         # shown as n/a there.
-        if self.opts.groupby == 'cgroup':
+        if self.is_cgroup():
             self.apply_cgroup_locals()
             grand_summary['memPSI%'] = None
         for group in self.groups.values():
@@ -1744,17 +1822,16 @@ class PmemStat:
         pr_top_of_report(appKB=grand_summary['ptotal'])
 
         header = ''
-        others, exclusions = self.pr_exclusions()
         self.number = 0
         if self.opts.numbers:
             header += '   #'
-        for item in grand_summary:
-            if item not in exclusions:
-                if item in others:
-                    if item != others[0]:
-                        continue
-                    item = 'other'
-                header += f'{item:>{self.fwidth}}'
+        for item in self.view_columns():
+            if not item:
+                header += '  '
+                continue
+            label = ('other' if (self.opts.others and item == self.OTHER_KEYS[0])
+                     else item)
+            header += f'{label:>{self.fwidth}}'
         self.emit(f'{header}   key/info'
                 + f' ({self.opts.groupby} by {self.get_sortby()})',
                 to_head=True, attr=curses.A_BOLD)
@@ -1786,10 +1863,12 @@ class PmemStat:
                                rank(alive_groups[x]) or 0.0), reverse=True)
         else:
             sorted_keys = sorted(alive_groups.keys(),
-                key=lambda x: alive_groups[x].summary['ptotal'], reverse=True)
+                key=lambda x: (alive_groups[x].summary.get(self.total_key()) or 0),
+                reverse=True)
 
         limit = self.window.scroll_view_size if self.is_fit_opted() else 1000000
-        ptotal_limit = (grand_summary['ptotal'] * self.opts.top_pct / 100) * 1.001
+        total_limit = ((grand_summary.get(self.total_key()) or 0)
+                       * self.opts.top_pct / 100) * 1.001
         others_summary = None
         running_summary = ProcMem.make_summary_dict(info='---- RUNNING ----')
         shown_cnt = 0
@@ -1798,10 +1877,11 @@ class PmemStat:
             group = alive_groups[key]
             self.add_to_summary(group.summary, running_summary)
             haystack = group.summary['info']
-            if self.opts.groupby == 'cgroup':
+            if self.is_cgroup():
                 haystack += ' ' + str(group.key)
             if (self.opts.search in haystack and
-              shown_cnt < limit-1 and running_summary['ptotal'] <= ptotal_limit):
+              shown_cnt < limit-1
+              and (running_summary.get(self.total_key()) or 0) <= total_limit):
                 if group.alive and (group.is_new or group.is_changed or self.window):
                     attr = None
                     if self.window:
@@ -1821,7 +1901,7 @@ class PmemStat:
             elif is_first or self.opts.window:
                 if not others_summary:
                     others_summary = ProcMem.make_summary_dict(info='---- OTHERS ----')
-                    if self.opts.groupby == 'cgroup':
+                    if self.is_cgroup():
                         others_summary['memPSI%'] = None
                 self.add_to_summary(group.summary, others_summary)
         if others_summary:
@@ -1932,7 +2012,8 @@ class PmemStat:
         self.spin.add_key('fit_to_window', 'f - fit rows to window',
                           vals=[False, True], obj=self.opts)
         self.spin.add_key('groupby', 'g - group by',
-                          vals=['exe', 'cmd', 'pid', 'cgroup'], obj=self.opts)
+                          vals=['exe', 'cmd', 'pid', 'cgroup',
+                                'cgroupCharge'], obj=self.opts)
         self.spin.add_key('numbers', 'n - line numbers',
                           vals=[False, True], obj=self.opts)
         self.spin.add_key('others', 'o - less category detail',
@@ -1972,7 +2053,7 @@ class PmemStat:
                 if not regroup:
                     regroup = bool(was_others != self.opts.others)
                 self.loop(datetime.now(), is_first=is_first, regroup=regroup)
-                was_groupby, was_others, regroup = self.opts.groupby, self.opts.others, False
+                was_groupby, was_others = self.opts.groupby, self.opts.others
                 regroup = False
                 self.window.set_pick_mode(self.opts.kill_mode)
                 self.window.render()
@@ -2032,11 +2113,11 @@ class PmemStat:
                 assert False, f'unsupported mode ({self.mode})'
 
 # Root auto-elevation is opt-in so the tool never escalates behind the
-# user's back; the caller opts in per invocation with ``--auto-sudo`` (which
+# user's back; the caller opts in per invocation with ``--sudo`` (which
 # ``PMEMSTAT_ARGS`` can supply persistently), never automatically.
 
 # Extra default CLI arguments may be supplied once via PMEMSTAT_ARGS, e.g.:
-#     export PMEMSTAT_ARGS='--auto-sudo --psi --loop 3 -s name'
+#     export PMEMSTAT_ARGS='--sudo --psi --loop 3 -s name'
 # The value is tokenized like a POSIX shell command line and prepended to the
 # real argv, so explicit command-line arguments still take precedence (and any
 # positional pids given on the command line are added to those from the env).
@@ -2092,7 +2173,7 @@ def rerun_module_as_root(module_name, args=None):
     running as the invoking user.
 
     Safety properties compared with the previous unconditional re-exec:
-      * never runs by default: the caller opts in via ``--auto-sudo`` (which
+      * never runs by default: the caller opts in via ``--sudo`` (which
         can be supplied persistently through ``PMEMSTAT_ARGS``);
       * requires an interactive terminal unless sudo is already authorized
         non-interactively, so scripts/CI cannot hang on a password prompt;
@@ -2110,7 +2191,7 @@ def rerun_module_as_root(module_name, args=None):
     if not _isolated_can_import(module_root):
         print(f'pmemstat: not elevating to root: "{module_root}" is not '
               'importable by an isolated interpreter (install system-wide, '
-              'with pipx, or inside a virtualenv to enable auto-sudo).',
+              'with pipx, or inside a virtualenv to enable sudo elevation).',
               file=sys.stderr)
         return False
     if not (sys.stdin.isatty() or _sudo_noninteractive_ok()):
@@ -2138,8 +2219,12 @@ def main():
             help='do NOT report percent CPU (only in window mode)')
     parser.add_argument('-P', '--psi', action='store_true',
             help='show PSI (system pressure in header + memPSI%% column) [dflt=off]')
-    parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid', 'cgroup'),
-            default='exe', help='grouping method for presenting rows')
+    parser.add_argument('-g', '--groupby',
+            choices=('exe', 'cmd', 'pid', 'cgroup', 'cgroupCharge'),
+            default='exe',
+            help='grouping method for presenting rows; the cgroup variants '
+                 'differ only in the memory view: "cgroup" (footprt) or '
+                 '"cgroupCharge" (memory.current)')
     parser.add_argument('-f', '--fit-to-window', action='store_true',
             help='do not overflow window [if -w]')
     parser.add_argument('-k', '--min-delta-kb', type=int, default=None,
@@ -2154,9 +2239,9 @@ def main():
             help='show line numbers in report')
     parser.add_argument('-U', '--run-as-user', action='store_true',
             help='run as user (NOT as root)')
-    parser.add_argument('--auto-sudo', action='store_true',
+    parser.add_argument('--sudo', action='store_true',
             help='re-run self as root via sudo '
-                 '(or set PMEMSTAT_ARGS=--auto-sudo)')
+                 '(or set PMEMSTAT_ARGS=--sudo)')
     parser.add_argument('-o', '--others', action='store_false',
             help='expand "other" into shSYSV, shOth, stack, text')
     parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'),
@@ -2186,13 +2271,13 @@ def main():
     # DB(0, f'opts={opts}')
 
     if not opts.run_as_user and os.geteuid() != 0:
-        if opts.auto_sudo:
+        if opts.sudo:
             # Opted in explicitly: try to elevate, but stay as the user if
             # elevation is declined (reason is printed by the call).
             rerun_module_as_root('pmemstat.main', effective_argv)
         elif not opts.window:
             print("pmemstat: running as user (other users' processes omitted); "
-                  'run "sudo pmemstat" or set PMEMSTAT_ARGS=--auto-sudo for '
+                  'run "sudo pmemstat" or set PMEMSTAT_ARGS=--sudo for '
                   'full coverage.', file=sys.stderr)
 
 
