@@ -23,7 +23,7 @@
 
 Computing proportional memory avoids overstating memory use as many programs do (e.g., `top`). Specifically, proportional memory splits the cost of common memory to the processes sharing it (rather than counting common memory multiple times). And, it does not include uninstantiated virtual memory. 
 
-Without `-o`, `pmemstat` shows less details and is much faster and sometimes less accurate (e.g., it will not report classes of memory such as SysV shared memory which are often are not present anyhow). With `-o` providing full detail, digging out the numbers is slower; thus, `pmemstat -o` may take a few seconds to start, but, in its loop mode, refreshes are relatively fast and efficient by avoiding recomputing unchanged numbers. When in its window mode, typing `o` toggles low/high detail.
+Without `-o`, `pmemstat` shows less detail and is much faster and sometimes less accurate (e.g., it will not report classes of memory such as SysV shared memory, which are often absent anyway). With `-o` providing full detail, digging out the numbers is slower; thus, `pmemstat -o` may take a few seconds to start, but, in its loop mode, refreshes are relatively fast and efficient by avoiding recomputing unchanged numbers. When in its window mode, typing `o` toggles low/high detail.
 
 `pmemstat`'s grouping feature rolls up the resources of multiple processes of a feature (e.g., a browser) to make the total memory/cpu impact much more apparent.
 
@@ -41,7 +41,7 @@ Three of `pmemstat`'s capabilities are **new or substantially overhauled** in re
 | **Proportional swap** per grouping | ✓ | ✗ (flat Swap column) | ✗ | ✗ (total swap only) |
 | **Group processes** by executable/command | ✓ aggregates PIDs into one row | ✓ by command by default | ✗ | ✗ (tree view only) |
 | **Group by cgroup v2** 🆕 (services, scopes, containers) | ✓ (`-g cgroup`) | ✗ | ✓ (its core design) | ✗ |
-| **Memory-leak / growth monitoring** 🆕 (annotates top-N growers; only re-shows significant growth) | ✓ (`L`, `-k`, growth sort) | ✗ | ✗ | ✗ |
+| **Memory-leak / growth monitoring** 🆕 (annotates top-N growers; only re-shows significant growth) | ✓ (`G`, `--growth-style`, growth sort) | ✗ | ✗ | ✗ |
 | **zRAM-aware effective RAM** (eTot/eUsed/eAvail) | ✓ | ✗ | ✗ | ✗ |
 | **System pressure (PSI)** 🆕 in header (memory/cpu/io, some/full) | ✓ (`-P`) | ✗ | ✗ | ✗ |
 | **Data source** | `/proc/{PID}/smaps*` | `/proc/{PID}/smaps` | `/sys/fs/cgroup` | `/proc` + libs |
@@ -63,18 +63,21 @@ Note that:
 * For a persistent set of default flags, export `PMEMSTAT_ARGS` with a shell-quoted argument string, e.g. `export PMEMSTAT_ARGS='--sudo --psi --loop 3 -s name'`. It is tokenized like a command line and prepended to the real arguments, so anything typed on the command line still takes precedence.
 * When `--sudo` is requested but elevation cannot happen (no terminal for a `sudo` prompt and sudo not pre-authorized, or the install is not importable by the isolated interpreter), `pmemstat` fails with a clear message and a non-zero exit instead of silently downgrading to a user-only view. It never hangs waiting for a password.
 * To force user-only operation and disable auto-elevation, use the `--run-as-user` or `-U` option.
-* `pmemstat` depends on `console-window`, pinned to an **exact version** on purpose. That package provides the curses UI and is deliberately not allowed to float: the pin protects against unexpected upstream changes and preserves the author's freedom to make backwards-incompatible UI revisions. Installing `pmemstat` pulls the pinned version automatically; do not "upgrade" `console-window` independently.
+* `pmemstat` depends on `console-window` (the curses UI), pinned to an **exact version** on purpose. Installing `pmemstat` pulls the pinned version automatically; do not "upgrade" `console-window` independently.
 
 See the Quick Start at the top for preferred install instructions using `pipx`. If not acceptable, see the "Alternative Installation Options" section below.
 
 
 ## Usage
 ```
-usage: pmemstat [-h] [-D] [-C] [-P] [-g {exe,cmd,pid,cgroup,cgroupCharge}]
-        [-f] [-k MIN_DELTA_KB] [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT]
-        [-n] [-U] [--sudo] [--save-history-now] [-o] [-u {MB,mB,KB,human}]
-        [-s {mem,cpu,name,growth}] [--growth-style {off,both,growth,rate}]
-        [--growth-top {3,10,30,all}] [-/ SEARCH] [-W] [pids ...]
+usage: pmemstat [-h] [-D] [-C] [-a CPU_AVG_SECS] [-P]
+                [-g {exe,cmd,pid,cgroup,cgroupCharge}] [-f] [-k MIN_DELTA_KB]
+                [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-U] [--sudo]
+                [--save-history-now] [--reset-history-now] [-o]
+                [-u {MB,KB,human}] [-s {mem,cpu,name,growth}]
+                [--growth-style {off,both,growth,rate}] [--growth-top {all,10}]
+                [--no-growth-history] [--dont-save-growth-history] [-/ SEARCH]
+                [-W] [pids ...]
 
 positional arguments:
   pids                  list of pids/groups (none means every accessible pid)
@@ -83,36 +86,47 @@ options:
   -h, --help            show this help message and exit
   -D, --debug           debug mode (the more Ds, the higher the debug level)
   -C, --no-cpu          do NOT report percent CPU (only in window mode)
+  -a, --cpu-avg-secs CPU_AVG_SECS
+                        CPU moving-average smoothing window in seconds [5-90,
+                        dflt=20]
   -P, --psi             show PSI (system pressure in header + memPSI% column)
                         [dflt=off]
-  -g {exe,cmd,pid,cgroup}, --groupby {exe,cmd,pid,cgroup}
-                        grouping method for presenting rows
+  -g, --groupby {exe,cmd,pid,cgroup,cgroupCharge}
+                        grouping method for presenting rows; the cgroup
+                        variants differ only in the memory view: "cgroup"
+                        (footprt) or "cgroupCharge" (memory.current)
   -f, --fit-to-window   do not overflow window [if -w]
-  -k MIN_DELTA_KB, --min-delta-kb MIN_DELTA_KB
-                        minimum delta KB to show again [dflt=100 if DB else 1000]
-  -l LOOP_SECS, --loop LOOP_SECS
-                        loop interval in secs [dflt=5 if -w else 0]
-  -L CMDLEN, --cmdlen CMDLEN
-                        max shown command length [dflt=36 if not -w]
-  -t TOP_PCT, --top-pct TOP_PCT
-                        report group contributing to top pct of ptotal [dflt=100]
-  -n, --numbers         show line numbers in report
+  -k, --min-delta-kb MIN_DELTA_KB
+                        minimum delta KB to show again [dflt=100 if DB else
+                        1000]
+  -l, --loop LOOP_SECS  loop interval in secs [dflt=5 if -w else 0]
+  -L, --cmdlen CMDLEN   max shown command length [dflt=36 if not -w]
+  -t, --top-pct TOP_PCT
+                        report group contributing to top pct of ptotal
+                        [dflt=100]
   -U, --run-as-user     run as user (NOT as root)
   --sudo                re-run self as root via sudo (or set
                         PMEMSTAT_ARGS=--sudo)
-  --save-history-now    save current stats to the history ledger and exit
-                        (implies --sudo; ignores other options/environment)
+  --save-history-now    save the current stats to the history ledger and exit
+                        (implies --sudo; ignores other options and the
+                        environment)
+  --reset-history-now   reset the history ledger so all growth is measured
+                        from the current values, then exit (implies --sudo;
+                        ignores other options and the environment)
   -o, --others          expand "other" into shSYSV, shOth, stack, text
-  -u {MB,mB,KB,human}, --units {MB,mB,KB,human}
+  -u, --units {MB,KB,human}
                         units of memory [dflt=MB]
-  -s {mem,cpu,name,growth}, --sortby {mem,cpu,name,growth}
+  -s, --sortby {mem,cpu,name,growth}
                         sort method for presenting rows
   --growth-style {off,both,growth,rate}
                         leak/growth style: off|both|growth|rate [dflt=off]
-  --growth-top {3,10,30,all}
-                        annotate only the top-N growers [dflt=3]
-  -/ SEARCH, --search SEARCH
-                        show items with search string in name
+  --growth-top {all,10}
+                        annotate only the top-N growers: all|10 [dflt=all]
+  --no-growth-history   do NOT seed growth from the cross-run ledger (fresh
+                        baseline)
+  --dont-save-growth-history
+                        do NOT write the cross-run growth ledger
+  -/, --search SEARCH   show items with search string in name
   -W, --no-window       show in "curses" window [disables: -D,-t,-L]
 
 ```
@@ -123,14 +137,17 @@ Explanation of some options and arguments:
     * `pid` - group by one process
     * `cgroup` - group by cgroup v2 path (services, scopes and containers), showing the derived **footprint** total; see "Grouping by cgroup v2" below
     * `cgroupCharge` - the same cgroup v2 grouping, but each row's slices and total show the kernel's `memory.current` charge instead of the derived footprint; see "Grouping by cgroup v2" below
+* `-a CPU_AVG_SECS, --cpu-avg-secs CPU_AVG_SECS` - the CPU smoothing window in seconds, an integer from 5 to 90 (default 20). Each process's `cpu%` is averaged over this window so brief spikes are damped without hiding sustained load.
 * `-P, --psi` - show PSI (off by default): adds a **system pressure (PSI)** table to the header *and* the per-cgroup `memPSI%` column; see "System pressure (PSI)" and "Grouping by cgroup v2" below. In window mode this can also be toggled with the `p` key.
 * `-k MIN_DELTA_KB, --min-delta-kb MIN_DELTA_KB` - when looping, how much change in memory use is required to show the grouping in subsequent loops; note:
-    * a positive `MIN_DELTA_KB` means the total memory of the groupin must **grow** by that amount (in KB)
+    * a positive `MIN_DELTA_KB` means the total memory of the grouping must **grow** by that amount (in KB)
     * a non-positive `MIN_DELTA_KB` means the total memory of the grouping must **change** by that amount (in KB)
     * it also gates the growth annotation: a row is annotated only if its absolute growth (in KB) is at least `-k`
 * `--growth-style {off,both,growth,rate}` - the inline growth ("leak") annotation for the groups that are growing (default `off`); in window mode the `G` key cycles it. The baseline is geometric and self-forgetting, so startup bursts age out. See "Memory growth (leak) detection" below.
-* `--growth-top {3,10,30,all}` - annotate only the top-N growers by the displayed metric (default `3`; `all` = no cap); in window mode the `t` key cycles it
-* `pids` - the positional arguments may be pids (i.e., numbers) or the names of executables (as shown by `-gexe`) 
+* `--growth-top {all,10}` - annotate only the top-N growers by the displayed metric (default `all` = no cap); in window mode the `t` key cycles `all`/`10`
+* `--no-growth-history` / `--dont-save-growth-history` - opt out of (respectively) seeding growth from the cross-run ledger and writing it; `PMEMSTAT_NO_HISTORY` disables both. See "Memory growth (leak) detection" below.
+* `-W, --no-window` - report once to the terminal instead of the interactive curses window (with `-l` it loops there too). Window mode (the default) forces `-t 100`, `-L 100` and off `-D`; `-W` forces `-C` (no CPU).
+* `pids` - the positional arguments may be pids (i.e., numbers) or the names of executables (as shown by `-gexe`)
 
 
 ## Grouping by cgroup v2
@@ -149,11 +166,11 @@ The kernel columns, read from `/sys/fs/cgroup/<path>/` in the same units as ever
     * `kcharge` - `memory.current`, the kernel's own charge (the verifiable number behind `systemd-cgtop`/`docker stats`, and what `memory.max`/the OOM killer act on)
 * `memPSI%` - `memory.pressure`'s `some avg10`: memory-pressure stall time as a percentage; shown only with `-P` (PSI), beside `cpu%`
 
-So the memory columns of a `-g cgroup` row read `ptotal | anon cache kmem [swap] oK | <total>`: the leftmost value is pmemstat's proportional total (for comparison), and the bracketed slice block sums to the view total on the right. The raw `memory.current` is visible in the `kcharge` view (and is used internally by `--growth-style`/`Oth*` attribution).
+So the memory columns of a `-g cgroup` row read `ptotal | anon cache kmem [swap] oK | <total>`: the leftmost value is pmemstat's proportional total (for comparison), and the bracketed slice block sums to the view total on the right. The raw `memory.current` is visible in the `kcharge` view.
 
 These columns appear only in the cgroup groupings (`-g cgroup` / `-g cgroupCharge`), and are omitted entirely when the kernel exposes no cgroup v2 data (e.g. a cgroup v1 host).
 
-cgroup v2 accounting is **hierarchical**: a cgroup's `anon`/`cache`/`kmem`/`swap`/`footprt`/`kcharge` already include its descendant cgroups. A row whose cgroup also contains descendant cgroups listed separately is flagged with a trailing `+`, and **those descendants' figures are subtracted** so the row shows only that cgroup's own share. Consequently every row is its own share and the rows add up to the `TOTALS` row, and within each row the slice block adds up to the view total. (Because `footprt` is *derived* (`memory.current - inactive_file - slab_reclaimable + swap`), a `footprt`-view row does not equal the raw `cat /sys/fs/cgroup/.../memory.current`; switch to the `kcharge` view to see that raw value.) The unified root (`/`, labelled `(root)`) is the ancestor of every cgroup, so if a process lives directly in it — as can happen inside a container, where it may be the only cgroup visible — that `(root)+` row counts every other row as its descendant. `memPSI%` is not totalled — it shows `n/a` in `TOTALS` and in the `---- OTHERS ----` row, since a sum of pressure percentages is meaningless.
+cgroup v2 accounting is **hierarchical**: a cgroup's `anon`/`cache`/`kmem`/`swap`/`footprt`/`kcharge` already include its descendant cgroups. A row whose cgroup also contains descendant cgroups listed separately is flagged with a trailing `+`, and **those descendants' figures are subtracted** so the row shows only that cgroup's own share. Consequently every row is its own share and the rows add up to the `TOTALS` row, and within each row the slice block adds up to the view total. The unified root (`/`, labelled `(root)`) is the ancestor of every cgroup, so if a process lives directly in it — as can happen inside a container, where it may be the only cgroup visible — that `(root)+` row counts every other row as its descendant. `memPSI%` is not totalled — it shows `n/a` in `TOTALS` and in the `---- OTHERS ----` row, since a sum of pressure percentages is meaningless.
 
 Reading `/proc/<pid>/cgroup` and `/sys/fs/cgroup` does not require root, so the grouping and these numbers are available even in non-root mode (the proportional PSS columns still reflect only the processes you are permitted to read).
 
@@ -174,8 +191,8 @@ cpuPSI%    0.00    0.03    0.00            -       -       -
 
 ## Example Usage with Explanation of Output
 ```
-20:49:12 Tot=7.6G Used=6.2G Avail=1.4G OthK=512.0M OthU=3.6G Sh+Tmp=477.7M PIDs=174
-     2.4%/ker MajF/s=2  zRAM=813.2M CR=4.3 eTot:16.8G eUsed:8.8G eAvail:8.0G
+20:49:12 Tot=7.6G Used=6.2G Avail=1.4G OthK=512M OthU=3.6G Sh+Tmp=477M PIDs=174
+     2.4%/ker MajF/s=2  zRAM=813M CR=4.3 eTot:16.8G eUsed:8.8G eAvail:8.0G
  cpu%      pswap   other    data  ptotal   key/info (exe by mem)
     60.8   2,535     593   3,988   7,116 T 174x --TOTALS in MB --
 ───────────────────────────────────────────────────────────────────────────────
@@ -184,14 +201,14 @@ cpuPSI%    0.00    0.03    0.00            -       -       -
      5.9     270      32     291     593 3.5G 2h3m 1x firefox
      1.6      95      68     335     497   6x exe
      2.4     150      66      94     310   6x brave
-    16.0      52      73     152     277   3x VQ6B1EUZqoCU04zoRU
+    16.0      52      73     152     277   3x vivaldi
      0.1      39      19      13      70   2x konsole
 ```
 
 In the default refreshed window loop, we see
 * a **leader line** with:
     * the current time
-    * from `/proc/meminfo` in MemTotal (Tot), MemAvailable (Avail), Tmp (Shmem+TmpFS), and Dirty.
+    * from `/proc/meminfo`: MemTotal (Tot), MemAvailable (Avail), Used (Tot-Avail) and Shmem+tmpfs (Sh+Tmp).
     * 'Oth' is the unaccounted for memory belonging to the kernel, reserve,
        drivers, imprecision, etc.; `Oth = Tot - Avail - Tmp - ptotal`.
        * Features such as BTRFS, ZFS, zRAM, unattached SysV Shared Memory, etc., can cause 'Oth' to be significant;
@@ -202,7 +219,7 @@ In the default refreshed window loop, we see
     * how many PIDs are contributing to the report vs the total number of PIDs excluding kernel threads
 * an optional **PSI block** (only with `-P`) as described in "System pressure (PSI)" above
 * a **second leader line for zRAM** only if zRAM is active with:
-    * percent cpu consumed by kernel processes (not normalized ... if there 4 CPUs, then the total CPU can 400%). This is important because, with zRAM, this often is mostly the swap process.
+    * percent cpu consumed by kernel processes (not normalized ... if there are 4 CPUs, then the total CPU can 400%). This is important because, with zRAM, this often is mostly the swap process.
     * **MajF/s** - the number of "major" page faults per second.
       * 100+/s is high/worrisome.	Indicates significant memory pressure and heavy swapping or repeated large file access. System thrashing/slowdown is likely noticeable slow response.
       * 1000+/s is extreme.	Indicates severe memory overcommitment, likely with processes constantly fighting for RAM, or an application aggressively accessing disk-mapped memory.
@@ -218,16 +235,14 @@ In the default refreshed window loop, we see
       * **shOth** - proportional use of other shared memory (per smaps)
       * **stack** - exclusive use of stack memory per smaps
       * **text** - proportional use of memory for text (i.e., the read-only binary code, per smaps)
-    * **data** - exclusive use of memory for data (i.e., exclusively used of "heap" memory, per smaps)
-    * **ptotal** - proportional use of memory of all categories (i.e, sum of columns to the left); **note**, if zRAM, this includes **pswap**, else not.
+    * **data** - exclusive use of memory for data (i.e., exclusive use of "heap" memory, per smaps)
+    * **ptotal** - proportional use of memory of all categories (i.e., sum of columns to the left); **note**, if zRAM, this includes **pswap**, else not.
     * *empty* - type of the entry which may be:
         * **T** - the grand total
         * **A** - a newly added grouping
-        * **O** - combined overflow groupings below the `--top-pct` threshold (only on first loop)
+        * **O** - combined overflow groupings below the `--top-pct` threshold (on the first loop, or always in window mode)
         * **{growth} {interval}** - inline growth annotation for the top-N growers (e.g. `3.5G 2h3m`), shown only when the growth mode is not `off` (`G` in window mode)
-    * **key/info** which is a quantifier plus the grouping key. The quantifier may be:
-        * **{PID}** - when the grouping line represents one process (for option `-gexe`).
-        * **{num}x** - where {num} is the number of processes in the grouping.
+    * **key/info** - a quantifier plus the grouping key. The quantifier is **{num}x**, the number of processes in the grouping (e.g. `24x browser`); in the `pid` grouping each row shows `1x` followed by the pid and command line.
         
 ## Memory growth (leak) detection
 
@@ -241,20 +256,19 @@ groups that are growing, making slow leaks visible without scrolling history:
 * The annotation is `{human growth} {interval}` (e.g. `3.5G 2h3m`); the `rate`
   mode shows a per-day projection (`/d`, e.g. `3.5G/d`) once the baseline
   interval is at least a minute, and `growth` shows just the size.
-* It is measured against a **geometric, self-forgetting baseline** (anchors at
-  16, 64, 256, ... seconds): a process's first 16 seconds never count, so
-  startup bursts age out, and growth is never negative (a reduction is zero).
-* The baseline is kept **per grouping, from the moment the tool starts**, so
-  changing the grouping (`g` in window mode) does not reset the leak history:
-  every grouping is tracked in parallel. The cost is one extra pass over the
-  already-read per-process rollups for the non-cgroup views, plus one read per
-  distinct cgroup (shared by both cgroup views, and reused when a cgroup view
-  is the active one).
-* A row is annotated only if its absolute growth (KB) is at least `-k` **and**
-  it is among the top-N growers (`--growth-top`, default 3; `t` cycles
-  3/10/30/all). The `G` key cycles `off -> both -> growth -> rate -> off`.
-  (In window mode every row is listed, so annotations are always visible; in
-  non-window loop mode a row is re-shown only when it changes enough for `-k`.)
+* The baseline comes from a **per-boot history ledger** (see "Updating History
+  from Cron / Startup") that `pmemstat` writes as it runs and on exit, so growth
+  is measured from the group's **first observation this boot** — possibly an
+  earlier run — rather than merely since this invocation began; a reboot resets
+  it. Pass `--no-growth-history` to instead measure only from this run's start,
+  `--dont-save-growth-history` to stop writing the ledger, or
+  `PMEMSTAT_NO_HISTORY` to disable both.
+* Within a run the baseline is **geometric and self-forgetting**: a group's
+  first 16 seconds never count, so startup bursts age out. Growth is clamped at
+  zero (a reduction is not reported).
+* A row is annotated only if its growth (KB) is at least `-k` **and** it is
+  among the top-N growers (`--growth-top`, default `all`; `t` cycles
+  `all`/`10`). The `G` key cycles `off -> both -> growth -> rate -> off`.
 * `-s growth` sorts rows by the displayed growth metric (rate in `both`/`rate`).
 * With a cgroup grouping the metric is that grouping's total (`footprt` for
   `-g cgroup`, or `kcharge` for `-g cgroupCharge`; see "Grouping by cgroup v2")
@@ -263,7 +277,11 @@ groups that are growing, making slow leaks visible without scrolling history:
   accounting identity `ΔUsed = ΔTOTALS(ptotal) + Δ(Sh+Tmp) + ΔOthK + ΔOthU`,
   where `OthK = SUnreclaim + KernelStack + PageTables` and `OthU` is the
   remainder, so kernel/driver growth (`ΔOthK`/`ΔOthU`) is separable from
-  userspace (`ΔTOTALS`) and tmpfs (`Δ(Sh+Tmp)`).
+  userspace (`ΔTOTALS`) and tmpfs (`Δ(Sh+Tmp)`). The shared baseline interval
+  is printed once, as a trailing `[1h58m]`, in **every** growth mode
+  (`both`/`growth`/`rate`); the brackets distinguish it from the last
+  (`ΔOthU`) value and, in `rate` mode, give the window the `/d` projection was
+  drawn from.
 * Caveats: `Oth*` are only meaningful when run as root; when not root the `OthU`
   remainder also includes other users' memory.
 
@@ -277,6 +295,13 @@ per invoking user (`/tmp/pmemstat-<uid>`, or `PMEMSTAT_STATE_DIR` if set), so ru
 it as the user whose history you want to keep; a root cron job without
 `SUDO_UID` updates the root ledger instead.
 
+Run `pmemstat --reset-history-now` for the same silent scan but with the ledger
+**replaced** rather than merged: the current system and per-group values become
+the new baseline, exactly as if the tool had first run just after this boot, so
+every later growth annotation and delta is measured from that moment onward. It
+likewise implies `--sudo`, ignores the other options and `PMEMSTAT_ARGS`, and
+returns `0` on success / `1` on failure (nothing on success).
+
 ## Key Legend (Window Mode)
 The top line of the header is an always-visible key legend (dimmed, left-aligned
 so it sits under the leader's `Tot=` value) with the live search field appended
@@ -289,14 +314,37 @@ Because `?` is listed first, a narrow terminal truncates only the least-critical
 trailing entries, never the way to the full help screen.
 
 ## Help Screen (in Window Mode, Press '?')
-In window mode, press '?' to enter the help screen which looks like:
+In window mode, press '?' to enter the help screen, which looks like:
 
-![helpscreen example](https://github.com/joedefen/pmemstat/blob/main/images/help-screen.png?raw=true)
+```
+-- HELP SCREEN ['?' or ENTER closes Help; Ctrl-C exits ] --
+Navigation:      H/M/L:      top/middle/end-of-page
+  k, UP:  up one row             0, HOME:  first row
+j, DOWN:  down one row           $, END:  last row
+  Ctrl-u:  half-page up     Ctrl-b, PPAGE:  page up
+  Ctrl-d:  half-page down     Ctrl-f, NPAGE:  page down
+──────────────────────────────────────────────────────────────────────────────
+Type keys to alter choice:
+? - help screen····················  normal help
+K - kill mode······················  off ON
+                                   :  Select line + ENTER to kill selected
+f - fit rows to window·············  off ON
+g - group by·······················  exe cmd pid cgroup cgroupCharge
+o - less category detail···········  off ON
+s - sort by························  mem cpu name growth
+G - leak/growth mode···············  off both growth rate
+t - top-N growers··················  all 10
+u - memory units···················  MB KB human
+c - show cpu·······················  off ON
+p - show PSI (header + memPSI%)····  off ON
+```
+
+> **Note:** in the live window the *current* choice of each option is shown in reverse video (e.g. `help`, `off`); which value is highlighted depends on your live state, so it may differ from the text above.
 
 **Notes:**
-* There are a number of navigation keys (mostly following vim conventions); in the help screen, they apply to help screen; otherwise, they apply to main screen.
-* Below the line, there are a number of keys/options; when you type an option key (e.g, "c"), it will highlight the next option value (e.g., "off"); when you change options, they will be applied to the next loop of the main menu.
-    * These option keys can be used in the main menu (e.g., pressing "c" will change hide or reveal the CPU column w/o entering the help screen).
+* There are a number of navigation keys (mostly following vim conventions); in the help screen, they apply to the help screen; otherwise, they apply to the main screen.
+* Below the line, there are a number of keys/options; when you type an option key (e.g. "c"), it highlights the next option value (e.g. "off"); changed options are applied on the next loop of the main screen.
+    * These option keys can be used in the main screen too (e.g. pressing "c" hides or reveals the CPU column without entering the help screen).
     
 ## Inline Search (Window Mode)
 Press `/` to activate inline search mode. The live search field is the trailing `/{regex}` on the first header line (next to the key legend):
@@ -332,21 +380,29 @@ Sometimes, the horizontal line between the header and scrollable region has a re
 * Again, you can press 'f' to fit the document to the screen with a "rollup" line summarizing the lines that would not fit.
 
 ## Quirks and Details
-* **pswap** seems to be only provided by the `smaps_rollups` file, and thus it may be slightly out of sync with the data gathered by `smaps`.
-* the **ptotal** (from 'smaps') and **pss** (from `smaps_rollups` and usually hidden) seem differ more than expected but still close.
+* **pswap** seems to be only provided by the `smaps_rollup` file, and thus it may be slightly out of sync with the data gathered by `smaps`.
+* the **ptotal** (from 'smaps') and **pss** (from `smaps_rollup` and usually hidden) seem to differ more than expected but still close.
 * after the first loop, **pss** is read and only groups with sufficient aggregate change are probed for the details.  Thus, subsequent loops are more efficient by avoiding the reading of `smaps` in many cases (with some loss of accuracy).
-* the "exe" value comes from the command line (based `/proc/{PID}/cmdline` which is a bit funky). Firstly, the leading path is stripped; secondly, if the resulting executable is a script interpreter (e.g., python, perl, bash, ...) AND the first argument seems to be a full path (i.e., starts with "/"), then the "exe" will be represented as "{interpreter}->{basename(script)}".  For example, "python3->pmemstat.py" in the example above.
+* the "exe" value comes from the command line (based on `/proc/{PID}/cmdline`, which is a bit funky). Firstly, the leading path is stripped; secondly, if the resulting executable is a script interpreter (e.g., python, perl, bash, ...) AND the first argument seems to be a full path (i.e., starts with "/"), then the "exe" is shown as "{interpreter}->{basename(script)}" (e.g. `python3->pmemstat.py`).
 
 
 ## Test Program and Test Suggestions
 The C program, `memtest.c` is included and can be compiled by running `cc memtest.c -o memtest`.  This program:
-* regularly allocates more memory of all types
+* regularly allocates more memory of all types -- about **3 MiB per loop** by default (SysV shared memory, a memory-mapped file and the heap, plus a little stack),
 * can be run several times simultaneously,
 * will share SysV shared memory and memory mapped files,
+* bounds its own growth so it will not push the system into the OOM killer (the total is capped near `min(256 MiB, RAM/16)`).
 
-When running `pmemstat` to monitor its memory use and changes, you should use `-uKB` and `-k{small-number}` so that you can "see" the very modest memory use of the test program and its changes.
+Because the default growth per loop (~3 MiB) exceeds `pmemstat`'s default `-k` gate (1000 KB), the test program stays visible from loop to loop and -- with `--growth-style` enabled and `--growth-top all` -- is annotated as a grower **without** having to relax `-k`. Options to tune it:
+* `-q` - quick: sleep 1s between loops instead of 10s
+* `-s` - short: only 16 loops
+* `-n LOOPS` - number of loops
+* `-c KiB` - bytes added to each pool per loop (default 1024 KiB)
+* `-b MiB` - total memory budget (default `min(256 MiB, RAM/16)`)
 
-Running a number of sleeps of various durations in the background in a loop, plus one foreground sleep, can make for a robustness tests with lots of processes coming and going.  There are many "races" (i.e., a process may appear in `/proc`, but its`smaps` is gone), and this test helps ensure the races are handled properly.
+With the more aggressive default you no longer need `-uKB`/`-k{small-number}`; those remain useful only when you deliberately shrink the test with `-c`.
+
+Running a number of sleeps of various durations in the background in a loop, plus one foreground sleep, can make for a robustness test with lots of processes coming and going.  There are many "races" (i.e., a process may appear in `/proc`, but its `smaps` is gone), and this test helps ensure the races are handled properly.
 
 ## Alternative Installation Options
 If the `pipx` install is not acceptable, choose the best way to install:

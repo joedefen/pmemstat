@@ -20,7 +20,7 @@ from pmemstat.main import (human, human_kb, ago_str, GrowthTracker,
                            compute_zram_effective, ProcMem, PmemStat,
                            args_from_env, ARGS_ENV, seed_from_baselines,
                            seed_sys_from_baselines, HISTORY_ENV_DISABLE,
-                           save_history_now, _resolve_argv)
+                           save_history_now, reset_history_now, _resolve_argv)
 from pmemstat.CGroup import CGroup
 
 GIB = 1024 ** 3
@@ -531,6 +531,79 @@ class TestSaveHistoryNow(unittest.TestCase):
              mock.patch('sys.stderr', err):
             self.assertEqual(save_history_now(self._opts()), 1)
         self.assertIn('FAILED', err.getvalue())
+
+
+class TestResetHistoryNow(unittest.TestCase):
+    """``--reset-history-now`` rewrites the ledger (new baseline) silently."""
+
+    @staticmethod
+    def _opts():
+        return SimpleNamespace(window=True, loop_secs=5, debug=False, cpu=True,
+                               fit_to_window=True, min_delta_kb=None,
+                               units='MB')
+
+    def test_resolve_argv_bypasses_environment(self):
+        argv, err = _resolve_argv(['--reset-history-now', '--loop', '9'],
+                                  '--debug --bad')
+        self.assertIsNone(err)
+        self.assertEqual(argv, ['--reset-history-now'])
+
+    def test_non_root_elevation_failure_returns_1(self):
+        err = io.StringIO()
+        with mock.patch.object(main_module.os, 'geteuid', return_value=1), \
+             mock.patch.object(main_module, 'rerun_module_as_root',
+                               return_value='not-importable'), \
+             mock.patch('sys.stderr', err):
+            self.assertEqual(reset_history_now(self._opts()), 1)
+        self.assertIn('FAILED', err.getvalue())
+
+    def test_success_resets_ledger_not_updates(self):
+        calls = {}
+
+        class FakePm:  # pylint: disable=too-few-public-methods
+            def __init__(self, opts):
+                self.growth_samples = {}
+                self.sys_samples = {}
+                self.history_boot = 'b'
+
+            def loop(self, now, is_first):
+                self.growth_samples = {'exe': {'a': 1}}
+                self.sys_samples = {'Used': 2}
+
+        def fake_reset(samples, sys_samples, boot=None):
+            calls['args'] = (samples, sys_samples, boot)
+            return True
+
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+             mock.patch.object(main_module, 'PmemStat', FakePm), \
+             mock.patch.object(main_module.History, 'reset_ledger',
+                               side_effect=fake_reset) as reset_mock, \
+             mock.patch.object(main_module.History, 'update_ledger') as upd:
+            self.assertEqual(reset_history_now(self._opts()), 0)
+        self.assertEqual(calls['args'], ({'exe': {'a': 1}}, {'Used': 2}, 'b'))
+        reset_mock.assert_called_once()
+        upd.assert_not_called()
+
+    def test_ledger_write_failure_returns_1(self):
+        err = io.StringIO()
+
+        class FakePm:  # pylint: disable=too-few-public-methods
+            def __init__(self, opts):
+                self.growth_samples = {}
+                self.sys_samples = {}
+                self.history_boot = 'b'
+
+            def loop(self, now, is_first):
+                self.growth_samples = {'exe': {'a': 1}}
+                self.sys_samples = {}
+
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+             mock.patch.object(main_module, 'PmemStat', FakePm), \
+             mock.patch.object(main_module.History, 'reset_ledger',
+                               return_value=False), \
+             mock.patch('sys.stderr', err):
+            self.assertEqual(reset_history_now(self._opts()), 1)
+        self.assertIn('reset FAILED', err.getvalue())
 
 
 class TestSeedFromBaselines(unittest.TestCase):

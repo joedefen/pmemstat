@@ -658,7 +658,8 @@ class ProcMem:
     def refresh_cpu(self):
         """Get the Cpu Number for the PID (if possible)"""
         if not self.cpu:
-            self.cpu = CpuSmooth(self.pid, avg_secs= ProcMem.opts.cpu_avg_secs)
+            self.cpu = CpuSmooth(self.pid, avg_secs=getattr(
+                ProcMem.opts, 'cpu_avg_secs', 20))
         return self.cpu.refresh_cpu() # sets self.cpu.percent
 
     def _get_exebasename(self, exepath, wds):
@@ -1115,11 +1116,9 @@ class PmemStat:
         self.vmstat = None
         self.pressure = {}  # PSI snapshot (only read when opts.psi)
         self.spin = OptionSpinner()
-        self.number = 0  # line number for opts.numbers
         self.units, self.divisor, self.fwidth = 0, 0, 0
         self.mode = 'normal' # (or 'help' or ?'psi')
         setattr(opts, 'kill_mode', False) # pseudo option
-        setattr(opts, 'cpu_avg_secs', 20) # pseudo option
         self.groups_by_line = {}
         # Persistent per-(view, key) growth trackers. They live on the singleton
         # rather than on the groups, so changing the grouping (which rebuilds
@@ -1198,10 +1197,7 @@ class PmemStat:
 
     def _set_units(self):
         self.units = self.opts.units
-        if self.units == 'mB':
-            self.divisor = 1000*1000
-            self.fwidth = 8
-        elif self.units == 'MB':
+        if self.units == 'MB':
             self.divisor = 1024*1024
             self.fwidth = 8
         elif self.units == 'KB':
@@ -1648,7 +1644,7 @@ class PmemStat:
             rank = (group.growth_rate if mode in ('both', 'rate')
                     else growth)
             candidates.append((rank if rank is not None else 0.0, key))
-        limit = getattr(self.opts, 'growth_top_n', 3)
+        limit = getattr(self.opts, 'growth_top_n', None)
         if limit is not None:
             candidates.sort(reverse=True)
             candidates = candidates[:limit]
@@ -1674,8 +1670,13 @@ class PmemStat:
         """One line: system growth for Used/TOTALS/Sh+Tmp/OthK/OthU.
 
         Values (non-negative, so no ``+``) are left-justified to a common width
-        for the current mode. The interval is shown once, at the end, in
-        ``both`` mode, because all five trackers share one baseline age.
+        for the current mode.  The shared baseline interval is shown once, as a
+        trailing ``[interval]`` in every growth mode (``both``/``growth``/
+        ``rate``).  The brackets make it clear that the age applies to all five
+        deltas (all five trackers share one baseline) rather than looking like
+        an attribute of the last (``OthU``) field, and it gives the context
+        needed to judge the numbers -- in particular a ``rate`` projection,
+        which is otherwise silent about the window it extrapolates from.
         """
         def value_of(key):
             result = self.sys_growth.get(key)
@@ -1697,10 +1698,11 @@ class PmemStat:
             self.sys_growth_width, width, self._sysgrow_small)
         line = '    ' + '  '.join(
             f'Δ{key} {values[key]:<{self.sys_growth_width}}' for key in keys)
-        if self.opts.growth_style == 'both':
-            result = self.sys_growth.get('Used') or self.sys_growth.get('OthU')
+        if self.opts.growth_style != 'off':
+            result = next((self.sys_growth.get(key) for key in keys
+                           if self.sys_growth.get(key)), None)
             if result:
-                line = line.rstrip() + ' ' + ago_str(result[1])
+                line = line.rstrip() + f' [{ago_str(result[1])}]'
         return line.rstrip()
 
     def prc_group(self, group):
@@ -1833,9 +1835,6 @@ class PmemStat:
         """Print a summary of memory use (columns from view_columns())."""
         body = ''
         combined = bool(self.opts.others)
-        if self.opts.numbers:
-            body += f'{self.number:>4}'
-        self.number += 1
         for item in self.view_columns():
             if not item:
                 body += '  '
@@ -2136,9 +2135,6 @@ class PmemStat:
         pr_top_of_report(appKB=grand_summary['ptotal'])
 
         header = ''
-        self.number = 0
-        if self.opts.numbers:
-            header += '   #'
         for item in self.view_columns():
             if not item:
                 header += '  '
@@ -2328,8 +2324,6 @@ class PmemStat:
         self.spin.add_key('groupby', 'g - group by',
                           vals=['exe', 'cmd', 'pid', 'cgroup',
                                 'cgroupCharge'], obj=self.opts)
-        self.spin.add_key('numbers', 'n - line numbers',
-                          vals=[False, True], obj=self.opts)
         self.spin.add_key('others', 'o - less category detail',
                           vals=[False, True], obj=self.opts)
         self.spin.add_key('sortby', 's - sort by',
@@ -2338,13 +2332,11 @@ class PmemStat:
         self.spin.add_key('growth_style', 'G - leak/growth mode',
                           vals=['off', 'both', 'growth', 'rate'], obj=self.opts)
         self.spin.add_key('growth_top', 't - top-N growers',
-                          vals=['3', '10', '30', 'all'], obj=self.opts)
+                          vals=['all', '10'], obj=self.opts)
         self.spin.add_key('units', 'u - memory units',
-                          vals=['MB', 'mB', 'KB', 'human'], obj=self.opts)
+                          vals=['MB', 'KB', 'human'], obj=self.opts)
         self.spin.add_key('cpu', 'c - show cpu',
                           vals=[False, True], obj=self.opts)
-        self.spin.add_key('cpu_avg_secs', 'a - cpu moving avg secs',
-                          vals=[5, 10, 20, 45, 90], obj=self.opts)
         self.spin.add_key('psi', 'p - show PSI (header + memPSI%)',
                           vals=[False, True], obj=self.opts)
 
@@ -2450,15 +2442,17 @@ def args_from_env():
 def _resolve_argv(raw_argv, env_text):
     """Effective argv for ``main``; returns ``(argv, error)``.
 
-    ``--save-history-now`` is special: it must work from cron regardless of the
-    ambient configuration, so its presence bypasses ``PMEMSTAT_ARGS`` (and, by
-    extension, every other environment setting) entirely.  Otherwise
-    ``env_text`` is tokenized and prepended to ``raw_argv``; a tokenization
-    error is returned as a message rather than raised.
+    ``--save-history-now`` and ``--reset-history-now`` are special: they must
+    work from cron regardless of the ambient configuration, so the presence of
+    either bypasses ``PMEMSTAT_ARGS`` (and, by extension, every other
+    environment setting) entirely.  Otherwise ``env_text`` is tokenized and
+    prepended to ``raw_argv``; a tokenization error is returned as a message
+    rather than raised.
     """
     raw_argv = list(raw_argv)
-    if '--save-history-now' in raw_argv:
-        return ['--save-history-now'], None
+    for flag in ('--save-history-now', '--reset-history-now'):
+        if flag in raw_argv:
+            return [flag], None
     try:
         return shlex.split(env_text) + raw_argv, None
     except ValueError as exc:
@@ -2584,13 +2578,34 @@ def save_history_now(opts):
     return 1
 
 
-def _collect_and_save_history(opts):
+def reset_history_now(opts):
+    """Reset the ledger so every growth/delta is measured from the current values.
+
+    Like :func:`save_history_now` it performs one silent scan (implying
+    ``--sudo`` and ignoring the other options/environment) and exits, but it
+    *replaces* the ledger instead of merging: the current system and process
+    values become the new baseline, exactly as if the tool had first run just
+    after this boot.  Prints nothing on success and returns ``0``; on failure it
+    prints an explanation to stderr and returns ``1``.
+    """
+    if os.geteuid() == 0:
+        return _collect_and_save_history(opts, reset=True)
+    reason = rerun_module_as_root('pmemstat.main', ['--reset-history-now'])
+    print('pmemstat: history reset FAILED: could not elevate to root '
+          f'({reason})', file=sys.stderr)
+    return 1
+
+
+def _collect_and_save_history(opts, reset=False):
     """One silent scan and ledger write; returns ``0`` on success, else ``1``.
 
     Every other option is ignored: the scan is forced to a non-window one-shot
     whose report is suppressed, and the ledger write is done here so its
-    success/failure becomes the exit code.
+    success/failure becomes the exit code.  When ``reset`` is set the existing
+    ledger is replaced (the current values become the new baseline) rather than
+    merged.
     """
+    verb = 'reset' if reset else 'update'
     opts.window = False
     opts.loop_secs = 0
     opts.debug = False
@@ -2614,25 +2629,43 @@ def _collect_and_save_history(opts):
             finally:
                 sys.stdout = saved_stdout
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        print(f'pmemstat: history update FAILED: {exc}', file=sys.stderr)
+        print(f'pmemstat: history {verb} FAILED: {exc}', file=sys.stderr)
         return 1
     if not pmemstat.growth_samples:
-        print('pmemstat: history update FAILED: no process data collected',
+        print(f'pmemstat: history {verb} FAILED: no process data collected',
               file=sys.stderr)
         return 1
     try:
-        ok = History.update_ledger(pmemstat.growth_samples,
-                                   pmemstat.sys_samples,
-                                   boot=pmemstat.history_boot)
+        write = History.reset_ledger if reset else History.update_ledger
+        ok = write(pmemstat.growth_samples, pmemstat.sys_samples,
+                   boot=pmemstat.history_boot)
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        print(f'pmemstat: history update FAILED: {exc}', file=sys.stderr)
+        print(f'pmemstat: history {verb} FAILED: {exc}', file=sys.stderr)
         return 1
     if not ok:
-        print('pmemstat: history update FAILED: ledger not written '
+        print(f'pmemstat: history {verb} FAILED: ledger not written '
               '(another run holds the lock, or the state dir is unwritable)',
               file=sys.stderr)
         return 1
     return 0
+
+
+def _cpu_avg_secs(value):
+    """Argparse type for the CPU smoothing window: an integer in ``5..90``.
+
+    Raising ``argparse.ArgumentTypeError`` gives a clean, tailored message for
+    both non-integers and out-of-range integers.
+    """
+    import argparse
+    try:
+        secs = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f'invalid integer: {value!r}') from None
+    if not 5 <= secs <= 90:
+        raise argparse.ArgumentTypeError(
+            'must be between 5 and 90 seconds')
+    return secs
 
 
 def main():
@@ -2644,6 +2677,8 @@ def main():
             help='debug mode (the more Ds, the higher the debug level)')
     parser.add_argument('-C', '--no-cpu', action='store_false', dest='cpu',
             help='do NOT report percent CPU (only in window mode)')
+    parser.add_argument('-a', '--cpu-avg-secs', type=_cpu_avg_secs, default=20,
+            help='CPU moving-average smoothing window in seconds [5-90, dflt=20]')
     parser.add_argument('-P', '--psi', action='store_true',
             help='show PSI (system pressure in header + memPSI%% column) [dflt=off]')
     parser.add_argument('-g', '--groupby',
@@ -2662,8 +2697,6 @@ def main():
             help='max shown command length [dflt=36 if not -w]')
     parser.add_argument('-t', '--top-pct', type=int, default=100,
             help='report group contributing to top pct of ptotal [dflt=100]')
-    parser.add_argument('-n', '--numbers', action='store_true',
-            help='show line numbers in report')
     parser.add_argument('-U', '--run-as-user', action='store_true',
             help='run as user (NOT as root)')
     parser.add_argument('--sudo', action='store_true',
@@ -2672,9 +2705,13 @@ def main():
     parser.add_argument('--save-history-now', action='store_true',
             help='save the current stats to the history ledger and exit '
                  '(implies --sudo; ignores other options and the environment)')
+    parser.add_argument('--reset-history-now', action='store_true',
+            help='reset the history ledger so all growth is measured from the '
+                 'current values, then exit '
+                 '(implies --sudo; ignores other options and the environment)')
     parser.add_argument('-o', '--others', action='store_false',
             help='expand "other" into shSYSV, shOth, stack, text')
-    parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'),
+    parser.add_argument('-u', '--units', choices=('MB', 'KB', 'human'),
             default='MB', help='units of memory [dflt=MB]')
     parser.add_argument('-s', '--sortby',
             choices=('mem', 'cpu', 'name', 'growth'),
@@ -2683,8 +2720,8 @@ def main():
             choices=('off', 'both', 'growth', 'rate'), default='off',
             help='leak/growth style: off|both|growth|rate [dflt=off]')
     parser.add_argument('--growth-top',
-            choices=('3', '10', '30', 'all'), default='3',
-            help='annotate only the top-N growers: 3|10|30|all [dflt=3]')
+            choices=('all', '10'), default='all',
+            help='annotate only the top-N growers: all|10 [dflt=all]')
     parser.add_argument('--no-growth-history', action='store_true',
             help='do NOT seed growth from the cross-run ledger (fresh baseline)')
     parser.add_argument('--dont-save-growth-history', action='store_true',
@@ -2705,6 +2742,8 @@ def main():
 
     if opts.save_history_now:
         return save_history_now(opts)
+    if opts.reset_history_now:
+        return reset_history_now(opts)
 
     if not opts.run_as_user and os.geteuid() != 0:
         if opts.sudo:

@@ -255,5 +255,49 @@ class TestOwnershipAndStateDir(HistoryTestCase):
                              History.DIR_MODE)
 
 
+class TestResetLedger(HistoryTestCase):
+    """``reset_ledger`` replaces baselines so all growth starts from "now"."""
+
+    def test_reset_discards_previous_baselines(self):
+        History.update_ledger({'exe': {'a': 100, 'b': 7}}, boot='b', now=T0)
+        later = T0 + timedelta(seconds=3600)
+        self.assertTrue(History.reset_ledger({'exe': {'a': 250}},
+                                             boot='b', now=later))
+        ledger = History.load_ledger()
+        entry = ledger['views']['exe']['a']
+        # The old base (100) is gone; the value now seen becomes the base.
+        self.assertEqual(entry['base'], 250)
+        self.assertEqual(entry['last'], 250)
+        self.assertEqual(entry['base_ts'], later.isoformat())
+        self.assertEqual(entry['last_ts'], later.isoformat())
+        # A key absent from the reset samples is dropped (no grace carry-over).
+        self.assertNotIn('b', ledger['views']['exe'])
+
+    def test_reset_refreshes_sys_baselines(self):
+        History.update_ledger({'exe': {'a': 1}}, sys_samples={'Used': 500},
+                              boot='b', now=T0)
+        later = T0 + timedelta(seconds=60)
+        History.reset_ledger({'exe': {'a': 1}}, sys_samples={'Used': 900},
+                             boot='b', now=later)
+        base = History.sys_baselines(boot='b')
+        self.assertEqual(base['Used']['base'], 900)
+        self.assertEqual(base['Used']['base_ts'], later.isoformat())
+
+    def test_reset_replaces_a_ledger_from_another_boot(self):
+        History.update_ledger({'exe': {'a': 5}}, boot='old', now=T0)
+        self.assertTrue(History.reset_ledger({'exe': {'a': 42}}, boot='b',
+                                             now=T0))
+        self.assertEqual(History.baselines(boot='b')['exe']['a']['base'], 42)
+        self.assertEqual(History.baselines(boot='old'), {})
+
+    def test_reset_contention_returns_false_and_writes_nothing(self):
+        path = self._path(History.LOCK_NAME)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, History.FILE_MODE)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.assertFalse(History.reset_ledger({'exe': {'a': 1}}, boot='b'))
+        self.assertIsNone(History.load_ledger())
+
+
 if __name__ == '__main__':
     unittest.main()

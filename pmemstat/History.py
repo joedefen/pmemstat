@@ -379,20 +379,25 @@ def _merge_ledger(ledger, samples, sys_samples, now, boot, grace):
     return ledger
 
 
-def update_ledger(samples, sys_samples=None, boot=None, now=None):
-    """Merge ``samples`` into the ledger under an exclusive non-blocking lock.
-
-    ``samples`` maps ``view -> {key: KB}`` and ``sys_samples`` (optional) maps a
-    system metric (``Used``/``TOTALS``/``ShTmp``/``OthK``/``OthU``) to KB, both
-    merged into the same ledger.  Returns ``True`` when the ledger was written,
-    ``False`` when the update was skipped (another pmemstat holds the lock, or
-    the state directory is unusable).  Never blocks and never raises for a busy
-    lock.
-    """
+def _normalize_meta(boot, now):
+    """Resolve ``boot``/``now`` defaults for a ledger write (aware UTC ``now``)."""
     boot = current_boot() if boot is None else boot
     now = datetime.now(timezone.utc) if now is None else now
     if isinstance(now, datetime) and now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
+    return boot, now
+
+
+def _write_ledger(samples, sys_samples, boot, now, fresh):
+    """Locked read-modify-write of the ledger; returns ``True`` when written.
+
+    ``fresh`` starts from an empty ledger (every key stored with
+    ``base == last == value``; used by :func:`reset_ledger`); otherwise the
+    existing baselines are preserved (used by :func:`update_ledger`).  Returns
+    ``False`` when the write is skipped (another pmemstat holds the lock, or the
+    state directory is unusable).  Never blocks and never raises for a busy
+    lock.
+    """
     try:
         lock_path = _state_path(LOCK_NAME, create=True)
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | _NOFOLLOW, FILE_MODE)
@@ -404,7 +409,8 @@ def update_ledger(samples, sys_samples=None, boot=None, now=None):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             return False
-        ledger = _merge_ledger(load_ledger(), samples, sys_samples, now, boot,
+        base = _empty_ledger(boot, now=now) if fresh else load_ledger()
+        ledger = _merge_ledger(base, samples, sys_samples, now, boot,
                                gc_grace_secs())
         try:
             body = json.dumps(ledger, separators=(',', ':')).encode('utf-8')
@@ -414,6 +420,35 @@ def update_ledger(samples, sys_samples=None, boot=None, now=None):
         return True
     finally:
         os.close(fd)
+
+
+def update_ledger(samples, sys_samples=None, boot=None, now=None):
+    """Merge ``samples`` into the ledger under an exclusive non-blocking lock.
+
+    ``samples`` maps ``view -> {key: KB}`` and ``sys_samples`` (optional) maps a
+    system metric (``Used``/``TOTALS``/``ShTmp``/``OthK``/``OthU``) to KB, both
+    merged into the same ledger.  Returns ``True`` when the ledger was written,
+    ``False`` when the update was skipped (another pmemstat holds the lock, or
+    the state directory is unusable).  Never blocks and never raises for a busy
+    lock.
+    """
+    boot, now = _normalize_meta(boot, now)
+    return _write_ledger(samples, sys_samples, boot, now, fresh=False)
+
+
+def reset_ledger(samples, sys_samples=None, boot=None, now=None):
+    """Replace the ledger with ``samples`` as the new baseline measured from now.
+
+    Unlike :func:`update_ledger`, every previous baseline is discarded: each key
+    is stored with ``base == last == value`` and ``base_ts == last_ts == now``,
+    the same state as the first observation right after a reboot.  All later
+    growth and deltas are therefore relative to ``now``.  ``samples`` and
+    ``sys_samples`` have the same shape as for :func:`update_ledger`.  Returns
+    ``True`` when the ledger was written, ``False`` when the write was skipped
+    (another pmemstat holds the lock, or the state directory is unusable).
+    """
+    boot, now = _normalize_meta(boot, now)
+    return _write_ledger(samples, sys_samples, boot, now, fresh=True)
 
 
 def cleanup_obsolete():
