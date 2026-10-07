@@ -178,6 +178,11 @@ class CGroup:
         text = self._read_text('memory.current')
         return None if text is None else parse_memory_current(text)
 
+    def read_swap_current(self):
+        """``memory.swap.current`` in bytes (or ``None`` when unavailable)."""
+        text = self._read_text('memory.swap.current')
+        return None if text is None else parse_memory_current(text)
+
     def read_stat(self):
         """``memory.stat`` as a dict of ints (empty dict when unavailable)."""
         text = self._read_text('memory.stat')
@@ -197,6 +202,7 @@ class CGroup:
         """
         return {
             'current': self.read_current(),
+            'swap_current': self.read_swap_current(),
             'stat': self.read_stat(),
             'pressure': self.read_pressure(),
         }

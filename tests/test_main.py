@@ -11,8 +11,9 @@ import os
 import unittest
 from types import SimpleNamespace
 
-from pmemstat.main import (human, compute_zram_effective, ProcMem,
-                           auto_sudo_opted_in, AUTO_SUDO_ENV)
+from pmemstat.main import (human, human_kb, ago_str, GrowthTracker,
+                           compute_zram_effective, ProcMem, PmemStat,
+                           args_from_env, ARGS_ENV)
 
 GIB = 1024 ** 3
 FIXTURES = os.path.join(os.path.dirname(__file__), 'fixtures')
@@ -43,7 +44,13 @@ class TestHuman(unittest.TestCase):
     def test_boundary_rolls_to_next_unit(self):
         # 1000 KiB is >= 999.95, so it rolls over to MiB.
         self.assertEqual(human(1000 * 1024), '1.0M')
-        self.assertEqual(human(999 * 1024), '999.0K')
+        # three+ leading digits drop the decimal (truncated, not rounded)
+        self.assertEqual(human(999 * 1024), '999K')
+
+    def test_decimal_dropped_at_three_digits(self):
+        self.assertEqual(human(100 * 1024), '100K')
+        self.assertEqual(human(int(99.9 * 1024)), '99.9K')
+        self.assertEqual(human(int(10.1 * 1024)), '10.1K')
 
 
 class TestComputeZramEffective(unittest.TestCase):
@@ -285,36 +292,201 @@ class TestKernelFixtures(unittest.TestCase):
                          summary['data'] + summary['text'] + summary['shOth'])
 
 
-class TestAutoSudoOptIn(unittest.TestCase):
-    """Auto-elevation is strictly opt-in via the PMEMSTAT_AUTO_SUDO variable."""
+class TestEnvArgs(unittest.TestCase):
+    """``PMEMSTAT_ARGS`` is tokenized like a POSIX shell command line."""
 
     def _with_env(self, value):
-        saved = os.environ.get(AUTO_SUDO_ENV)
+        saved = os.environ.get(ARGS_ENV)
         if value is None:
-            os.environ.pop(AUTO_SUDO_ENV, None)
+            os.environ.pop(ARGS_ENV, None)
         else:
-            os.environ[AUTO_SUDO_ENV] = value
+            os.environ[ARGS_ENV] = value
         try:
-            return auto_sudo_opted_in()
+            return args_from_env()
         finally:
             if saved is None:
-                os.environ.pop(AUTO_SUDO_ENV, None)
+                os.environ.pop(ARGS_ENV, None)
             else:
-                os.environ[AUTO_SUDO_ENV] = saved
+                os.environ[ARGS_ENV] = saved
 
-    def test_unset_is_off(self):
-        self.assertFalse(self._with_env(None))
+    def test_unset_is_empty(self):
+        self.assertEqual(self._with_env(None), [])
 
-    def test_empty_is_off(self):
-        self.assertFalse(self._with_env(''))
+    def test_empty_is_empty(self):
+        self.assertEqual(self._with_env(''), [])
 
-    def test_falsy_values_are_off(self):
-        for value in ('0', 'false', 'False', 'no', 'off', '  OFF  '):
-            self.assertFalse(self._with_env(value), value)
+    def test_simple_split(self):
+        self.assertEqual(self._with_env('--psi --loop 3 -s name'),
+                         ['--psi', '--loop', '3', '-s', 'name'])
 
-    def test_truthy_values_are_on(self):
-        for value in ('1', 'true', 'TRUE', 'yes', 'on', 'anything'):
-            self.assertTrue(self._with_env(value), value)
+    def test_quotes_are_honored(self):
+        self.assertEqual(self._with_env('--search "two words"'),
+                         ['--search', 'two words'])
+
+    def test_unbalanced_quotes_raise(self):
+        with self.assertRaises(ValueError):
+            self._with_env('--search "oops')
+
+
+class TestAgoStr(unittest.TestCase):
+    """``ago_str()`` renders a compact, at-most-two-component interval."""
+
+    def test_zero_and_seconds(self):
+        self.assertEqual(ago_str(0), '0s')
+        self.assertEqual(ago_str(45), '45s')
+
+    def test_one_minute_plus_seconds(self):
+        self.assertEqual(ago_str(90), '1m30s')
+
+    def test_exact_values_drop_zero_lower_unit(self):
+        self.assertEqual(ago_str(120), '2m')
+        self.assertEqual(ago_str(3600), '1h')
+        self.assertEqual(ago_str(86400), '1d')
+
+    def test_two_components(self):
+        self.assertEqual(ago_str(18 * 3600 + 39 * 60), '18h39m')
+        self.assertEqual(ago_str(86400 + 3600), '1d1h')
+
+    def test_negative_uses_magnitude(self):
+        self.assertEqual(ago_str(-90), '1m30s')
+
+
+class TestHumanKb(unittest.TestCase):
+    """``human_kb()`` is the byte-based ``human()`` fed KB."""
+
+    def test_kb_to_human(self):
+        self.assertEqual(human_kb(1), '1.0K')
+        self.assertEqual(human_kb(1024), '1.0M')
+        self.assertEqual(human_kb(1024 * 1024), '1.0G')
+
+
+class TestGrowthTracker(unittest.TestCase):
+    """The geometric multi-resolution baseline math."""
+
+    def test_no_growth_before_first_anchor(self):
+        tracker = GrowthTracker()
+        self.assertIsNone(tracker.update(0.0, 100))
+
+    def test_growth_after_first_anchor(self):
+        tracker = GrowthTracker()
+        tracker.update(0.0, 100)
+        self.assertEqual(tracker.update(20.0, 150), (50, 4.0))
+
+    def test_negative_growth_is_clamped(self):
+        tracker = GrowthTracker()
+        tracker.update(0.0, 100)
+        self.assertEqual(tracker.update(20.0, 80), (0, 4.0))
+
+    def test_zero_interval_at_anchor_returns_none(self):
+        tracker = GrowthTracker()
+        tracker.update(0.0, 100)
+        self.assertIsNone(tracker.update(16.0, 100))
+
+    def test_anchor_values_are_non_decreasing(self):
+        tracker = GrowthTracker()
+        tracker.update(0.0, 200)
+        tracker.update(20.0, 50)
+        # the anchor recorded for 16s keeps the 200 high-water mark
+        self.assertEqual(tracker.snaps[0], (16, 200))
+
+    def test_rebase_moves_to_newer_anchor(self):
+        tracker = GrowthTracker()
+        tracker.update(0.0, 100)
+        tracker.update(20.0, 200)
+        tracker.update(300.0, 400)
+        self.assertEqual(tracker.snaps[0], (16, 100))
+        # age 600 >= 32*16, so the 16s anchor is dropped
+        self.assertEqual(tracker.update(600.0, 500), (300, 536.0))
+        self.assertEqual(tracker.snaps[0], (64, 200))
+
+
+class TestDebouncedWidth(unittest.TestCase):
+    """Growth-column width grows at once and shrinks with hysteresis."""
+
+    # pylint: disable=protected-access
+
+    def setUp(self):
+        self.pm = PmemStat(SimpleNamespace(units='MB', debug=0))
+
+    def test_grows_immediately(self):
+        """A wider need is adopted at once."""
+        self.assertEqual(self.pm._debounced_width(1, 5, 0), (5, 0))
+
+    def test_shrink_waits(self):
+        """A narrower need keeps the old width until the delay elapses."""
+        self.assertEqual(self.pm._debounced_width(5, 2, 0), (5, 1))
+        self.assertEqual(self.pm._debounced_width(5, 2, 2), (5, 3))
+
+    def test_shrinks_after_delay(self):
+        """The width shrinks once enough smaller refreshes accrue."""
+        delay = PmemStat.WIDTH_SHRINK_DELAY
+        self.assertEqual(self.pm._debounced_width(5, 2, delay - 1), (2, 0))
+
+    def test_equal_resets_count(self):
+        """An unchanged need clears the smaller-refresh counter."""
+        self.assertEqual(self.pm._debounced_width(5, 5, 3), (5, 0))
+
+
+class TestRateFloor(unittest.TestCase):
+    """Rate mode hides the wild short-window projection."""
+
+    def setUp(self):
+        self.pm = PmemStat(SimpleNamespace(units='MB', debug=0,
+                                           growth_style='rate'))
+
+    def test_rate_hidden_before_floor(self):
+        """A 5s window is not projected to a day."""
+        group = SimpleNamespace(growth_val=1000, growth_interval=5.0,
+                                growth_rate=12000.0)
+        self.assertEqual(self.pm.growth_text(group), '')
+
+    def test_rate_shown_after_floor(self):
+        """Once past the floor the value is a per-day rate."""
+        group = SimpleNamespace(growth_val=1000, growth_interval=120.0,
+                                growth_rate=500.0)
+        self.assertTrue(self.pm.growth_text(group).endswith('/d'))
+
+    def test_system_line_hides_rate_before_floor(self):
+        """The system line shows no /d until the rate floor is reached."""
+        self.pm.sys_growth = {'Used': (1000, 5.0)}
+        self.assertNotIn('/d', self.pm.format_sys_growth())
+
+
+class TestCgroupLabel(unittest.TestCase):
+    """Launcher-named app scopes are relabelled by their dominant app."""
+
+    def setUp(self):
+        self.pm = PmemStat(SimpleNamespace(units='MB', debug=0))
+
+    def _group(self, key, exes):
+        prcset = [SimpleNamespace(exebasename=e) for e in exes]
+        return SimpleNamespace(key=key, prcset=prcset)
+
+    def test_keeps_leaf_when_a_member_matches(self):
+        """A firefox scope keeps its systemd name."""
+        group = self._group('/app.slice/app-niri-firefox-3646.scope',
+                            ['firefox', 'firefox'])
+        self.assertEqual(self.pm.cgroup_label(group),
+                         'app-niri-firefox-3646.scope')
+
+    def test_keeps_leaf_for_proper_app_id(self):
+        """A vivaldi scope keeps its name (member prefix matches)."""
+        group = self._group('/x/app-com.vivaldi.Vivaldi-18013.scope',
+                            ['vivaldi-stable'])
+        self.assertEqual(self.pm.cgroup_label(group),
+                         'app-com.vivaldi.Vivaldi-18013.scope')
+
+    def test_replaces_launcher_scope_with_dominant_app(self):
+        """A fuzzel scope hosting code is relabelled 'code'."""
+        group = self._group('/x/app-niri-fuzzel-32513.scope',
+                            ['code', 'code', 'vim'])
+        self.assertEqual(self.pm.cgroup_label(group), 'code')
+
+    def test_plus_marker_preserved(self):
+        """A relabelled row still gets the descendant '+' marker."""
+        self.pm.cgroup_keys = {'/x', '/x/app-niri-fuzzel-32513.scope'}
+        group = self._group('/x', ['code'])
+        self.assertEqual(self.pm.cgroup_label(group), 'code+')
 
 
 if __name__ == '__main__':

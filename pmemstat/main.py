@@ -38,10 +38,12 @@ NOTE: kB is a misnomer ... should be "KB".  Morons.
 # pylint: disable=too-many-arguments,too-many-branches
 # pylint: disable=too-many-statements,too-many-locals
 # pylint: disable=multiple-statements,too-few-public-methods
+# pylint: disable=too-many-public-methods
 
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 import traceback
@@ -119,8 +121,93 @@ def human(number):
         suffix = suffixes.pop(0)
         number /= 1024
         if number < 999.95 or not suffixes:
+            # Drop the decimal once there are three+ digits before it
+            # (100.0G -> 100G): one column narrower and easier to read.
+            # Truncate (not round) so 999.9 stays '999', not '1000'.
+            if number >= 100:
+                return f'{int(number)}{suffix}'
             return f'{number:.1f}{suffix}'
     return '' # impossible, but make pylint happy
+
+
+def human_kb(kb):
+    """Human form of a KB value (``human()`` expects bytes)."""
+    return human(kb * 1024)
+
+
+def ago_str(delta_secs):
+    """Compact two-component interval, e.g. '18h39m', '2m1s', '45s'.
+
+    The lower unit is omitted when it is zero, so exact values show '1h'
+    rather than '1h0m'.
+    """
+    ago = int(max(0, round(abs(delta_secs))))
+    divs = (60, 60, 24, 7, 52, 9999999)
+    units = ('s', 'm', 'h', 'd', 'w', 'y')
+    vals = (ago % 60, int(ago / 60))  # seed with secs, mins
+    uidx = 1
+    for div in divs[1:]:
+        if vals[1] < div:
+            break
+        vals = (vals[1] % div, int(vals[1] / div))
+        uidx += 1
+    if vals[1]:
+        rv = f'{vals[1]}{units[uidx]}'
+        if vals[0]:
+            rv += f'{vals[0]}{units[uidx-1]}'
+        return rv
+    return f'{vals[0]}{units[uidx-1]}'
+
+
+class GrowthTracker:
+    """Geometric multi-resolution growth baseline.
+
+    Anchors are at ``16 * 4**k`` seconds. The oldest anchor still within
+    ``RETENTION`` times its own age is the base. Growth is measured against the
+    base's high-water mark and clamped at zero; anchor values never decrease.
+    The first 16 seconds are never inside the window, so startup bursts are
+    excluded by construction. Each anchor roll (rebase) may step the displayed
+    growth down ~10%; that is accepted because the rate is invariant, so a real
+    leak stays visible.
+    """
+    BASE = 16
+    RETENTION = 32
+
+    def __init__(self):
+        self.t0 = None
+        self.peak = None
+        self.snaps = []          # list of (anchor_age, high_water_value)
+        self._next_age = self.BASE
+
+    def reset(self):
+        """Forget all history (used on regroup)."""
+        self.t0 = None
+        self.peak = None
+        self.snaps = []
+        self._next_age = self.BASE
+
+    def update(self, now, value):
+        """Feed a sample; return ``(growth, interval)`` in (KB, secs) or None."""
+        if value is None:
+            return None
+        if self.t0 is None:
+            self.t0 = now
+            self.peak = value
+            return None
+        age = now - self.t0
+        while age >= self._next_age:
+            self.snaps.append((self._next_age,
+                               self.peak if self.peak is not None else value))
+            self._next_age *= 4
+        if self.peak is None or value > self.peak:
+            self.peak = value
+        while (len(self.snaps) > 1
+               and age >= self.RETENTION * self.snaps[0][0]):
+            self.snaps.pop(0)
+        if not self.snaps or age <= self.snaps[0][0]:
+            return None
+        base_age, base_val = self.snaps[0]
+        return max(value - base_val, 0), age - base_age
 
 ####################################################################################
 # PORTABLE FUNCTION - Copy-pasted from zram-advisor
@@ -674,7 +761,7 @@ class ProcMem:
                 'ptotal': 0,
                 'cache': 0,    # cgroup v2 file - file_mapped (KB): unmapped page cache
                 'kmem': 0,     # cgroup v2 kernel (KB): kernel stacks + slab + pagetables
-                'kcharge': 0,  # cgroup v2 memory.current (KB): total kernel charge
+                'footprt': 0,  # cgroup v2 derived footprint (KB): current - reclaimable + swap
                 'pss': 0,  # comes from rollups
                 'number': -pid if pid else 0, # count if positive; else -pid
                 'info': info,
@@ -815,11 +902,14 @@ class PmemStat:
     # '?' is deliberately first: if the terminal is too narrow to render the
     # whole line, only the least-critical trailing entries are truncated while
     # the gateway to the complete list (and the navigation keys) stays visible.
-    KEY_LEGEND = '[?]help [g]roup [u]nits [s]ort [c]pu [K]ill [/]find [p]SI'
-    # The legend is drawn center-ish. Shift it this many columns to the left of
-    # true center so a narrow terminal is less likely to chop its tail, while
-    # the remaining indent keeps it from being visually scanned with data rows.
-    KEY_LEGEND_LEFT_SHIFT = 18
+    KEY_LEGEND = ('[?]help [g]roup [u]nits [s]ort [c]pu [K]ill [p]SI'
+                  ' [G]rowth [t]op')
+    # Grow a width immediately; shrink it only after this many consecutive
+    # smaller refreshes (hysteresis against frame-to-frame jitter).
+    WIDTH_SHRINK_DELAY = 4
+    # Below this interval the per-day rate is a wild extrapolation (a few
+    # seconds projected to a day), so rate mode shows nothing until then.
+    RATE_MIN_SECS = 60
 
     def __init__(self, opts):
         self.opts = opts
@@ -842,6 +932,16 @@ class PmemStat:
         self.cgroup_raw = {}            # cgroup key -> raw (hierarchical) values
         self.cgroup_data_seen = False   # any group had readable cgroup v2 data
         self.cgroup_cache_seen = False  # memory.stat exposed file_mapped
+        self.cgroup_footprt_keys = set()  # cgroups with a computable footprt
+        self.lead_width = 1             # width of the growth column
+        self.sys_growth_width = 1       # width of the system line values
+        self._lead_small = 0            # consecutive smaller-refresh counts
+        self._sysgrow_small = 0
+        self._last_growth_mode = None
+        # System-wide growth trackers (fed each loop; see update_growth).
+        self.sys_trackers = {key: GrowthTracker() for key in (
+            'Used', 'TOTALS', 'ShTmp', 'OthK', 'OthU')}
+        self.sys_growth = {}
         self._set_units()
         self.zram_projector = ZramProjector()
         # Initialize inline search bar
@@ -895,7 +995,7 @@ class PmemStat:
             self.fwidth = 7
         # Right-aligned header labels touch when a label is as wide as the
         # column, so keep the width at least one wider than the longest label
-        # (e.g. "kmem"+"kcharge", or "cpu%"+"memPSI%" at human width).
+        # (e.g. "kmem"+"footprt", or "cpu%"+"memPSI%" at human width).
         label_width = max(len(name) for name in ProcMem.make_summary_dict())
         self.fwidth = max(self.fwidth, label_width + 1)
 
@@ -915,10 +1015,48 @@ class PmemStat:
                     o_summary=None,
                     summary=None,
                     first_summary=None,
-                    growth_pct=0.0)
+                    growth_pct=0.0,
+                    growth=GrowthTracker(),
+                    growth_val=None,
+                    growth_interval=0.0,
+                    growth_rate=None,
+                    growth_txt='')
             self.groups[key] = group
             # DB(0, f'add group[{key}]')
         return group
+
+    def cgroup_label(self, group):
+        """Display label for a cgroup row.
+
+        Usually the cgroup leaf unit name (with a trailing '+' when it has
+        listed descendants). But systemd app scopes are often named after the
+        launcher that spawned the app (e.g. an ``app-niri-fuzzel-*.scope`` that
+        actually hosts VS Code), so when the leaf name matches none of the
+        member executables the row is labelled with the dominant member app
+        instead. The full cgroup path stays searchable (see the report loop).
+        """
+        label = cgroup_leaf(group.key)
+        exes = {}
+        for prc in group.prcset:
+            name = prc.exebasename
+            if name:
+                exes[name] = exes.get(name, 0) + 1
+        if exes:
+            leaf = label.lower().rstrip('+')
+
+            def matches(name):
+                low = name.lower()
+                if low in leaf:
+                    return True
+                tokens = re.findall(r'[a-z0-9]+', low)
+                return bool(tokens) and len(tokens[0]) >= 3 and tokens[0] in leaf
+
+            if not any(matches(name) for name in exes):
+                label = max(exes.items(), key=lambda kv: (kv[1], kv[0]))[0]
+        if isinstance(group.key, str) and has_descendant(
+                self.cgroup_keys, group.key):
+            label += '+'
+        return label
 
     def update_cgroup_summary(self, group):
         """Read the kernel's cgroup v2 numbers for a group (raw/subtree).
@@ -932,8 +1070,9 @@ class PmemStat:
           * ``cache``   = ``file - file_mapped``: page cache not mapped into
             userspace, i.e. invisible to PSS.
           * ``kmem``    = ``kernel``: kernel stacks + slab + pagetables.
-          * ``kcharge`` = ``memory.current``: the kernel's total charge for the
-            cgroup (what memory.max and the OOM killer enforce).
+          * ``footprt`` = ``memory.current - inactive_file - slab_reclaimable
+            + swap``: the cgroup's memory footprint (reclaimable cache and slab
+            removed, swap added), also used as the growth metric.
 
         The values read here are *raw* (they include descendant cgroups); they
         are cached in ``self.cgroup_raw`` and :meth:`apply_cgroup_locals`
@@ -941,21 +1080,18 @@ class PmemStat:
         values are stored in KB (like every other column) so ``-u`` applies;
         ``memPSI%`` is a percentage, handled like ``cpu%``.
         """
-        label = cgroup_leaf(group.key)
-        if isinstance(group.key, str) and has_descendant(self.cgroup_keys, group.key):
-            label += '+'
-        group.summary['info'] = label
+        group.summary['info'] = self.cgroup_label(group)
         # Reset the cgroup columns (the summary may be a reused object); the
         # three memory columns are filled by apply_cgroup_locals().
         group.summary['cache'] = 0
         group.summary['kmem'] = 0
-        group.summary['kcharge'] = 0
+        group.summary['footprt'] = None
         group.summary['memPSI%'] = 0
         if not isinstance(group.key, str):
             return
         data = CGroup(group.key).read()
         stat = data['stat'] or {}
-        raw = {'cache': 0, 'kmem': 0, 'kcharge': 0}
+        raw = {'cache': 0, 'kmem': 0, 'footprt': 0}
         if 'file_mapped' in stat:
             self.cgroup_cache_seen = True
             raw['cache'] = (stat.get('file', 0) - stat.get('file_mapped', 0)) // 1024
@@ -963,7 +1099,17 @@ class PmemStat:
             raw['kmem'] = stat['kernel'] // 1024
         if data['current'] is not None:
             self.cgroup_data_seen = True
-            raw['kcharge'] = data['current'] // 1024
+            # footprt = memory.current - inactive_file - slab_reclaimable + swap:
+            # absent optional inputs count as 0, and the result is clamped at 0.
+            swap = stat.get('swap')
+            if swap is None:
+                swap = data.get('swap_current') or 0
+            footprt = (data['current']
+                       - stat.get('inactive_file', 0)
+                       - stat.get('slab_reclaimable', 0)
+                       + swap) // 1024
+            raw['footprt'] = max(0, footprt)
+            self.cgroup_footprt_keys.add(group.key)
         self.cgroup_raw[group.key] = raw
         some = (data['pressure'] or {}).get('some') or {}
         if 'avg10' in some:
@@ -977,12 +1123,18 @@ class PmemStat:
         every row its own share and lets the rows sum to TOTALS; the "+" marker
         flags the rows that had descendants subtracted.
         """
-        locals_by_key = local_values(self.cgroup_raw, ('cache', 'kmem', 'kcharge'))
+        locals_by_key = local_values(self.cgroup_raw,
+                                     ('cache', 'kmem', 'footprt'))
         for group in self.groups.values():
             if group.alive and group.summary:
                 values = locals_by_key.get(group.key)
                 if values:
                     group.summary.update(values)
+                    if group.key not in self.cgroup_footprt_keys:
+                        group.summary['footprt'] = None
+                    elif group.summary.get('footprt') is not None:
+                        group.summary['footprt'] = max(
+                            0, group.summary['footprt'])
 
     def prep_new_loop(self, regroup):
         """Prepare for a new loop.
@@ -991,6 +1143,7 @@ class PmemStat:
         """
         if regroup:
             self.groups = {}
+            self.cgroup_footprt_keys = set()
         if self.groups:
             for key in list(self.groups):
                 group = self.groups[key]
@@ -1028,12 +1181,23 @@ class PmemStat:
                 elif isinstance(val, (int, float)):
                     total[key] += val
 
+    def growth_metric_value(self, summary):
+        """Scalar used for loop filtering and growth ("total incl. swap").
+
+        Under zRAM the rollup ``ptotal`` already contains ``SwapPss`` (see
+        :meth:`ProcMem.parse_rollups`), so ``pswap`` must not be added again;
+        without zRAM it must be. This keeps the metric correct in both cases
+        and fixes a latent double count.
+        """
+        return summary['pss'] + (0 if self.has_zram() else summary['pswap'])
+
     def test_delta(self, group, summary, o_summary):
         """Check whether the group rollup or smaps summary exceeds threshold """
         # pylint: disable=chained-comparison
         is_over = False
         # DB(0, f'{group.key} o=[{group.o_summary}]\n          n=[{group.summary}]')
-        delta_pss = summary['pss'] - o_summary['pss'] + summary['pswap'] - o_summary['pswap']
+        delta_pss = (self.growth_metric_value(summary)
+                     - self.growth_metric_value(o_summary))
         thresh = self.opts.min_delta_kb
 
         # DB(0, f'{group.key} ~pss {delta_pss}KB min={self.opts.min_delta_kb}')
@@ -1044,6 +1208,140 @@ class PmemStat:
             if self.debug:
                 DB(2, f'{group.key} ~pss {delta_pss}KB thresh={thresh}')
         return is_over, delta_pss
+
+    def group_growth_metric(self, group):
+        """Per-group scalar fed to its growth tracker (KB)."""
+        summary = group.summary or {}
+        if (self.opts.groupby == 'cgroup' and self.cgroup_data_seen
+                and group.key in self.cgroup_footprt_keys
+                and summary.get('footprt') is not None):
+            return summary['footprt']
+        if 'pss' not in summary:
+            return None
+        return self.growth_metric_value(summary)
+
+    def update_growth(self, now, grand_summary, meminfoKB):
+        """Feed every alive group and the system trackers a sample.
+
+        Trackers run unconditionally (even when the growth annotation is
+        ``off``) so data is ready the moment it is switched on.
+        """
+        for group in self.groups.values():
+            if not group.alive:
+                continue
+            result = group.growth.update(now, self.group_growth_metric(group))
+            if result is None:
+                group.growth_val = None
+                group.growth_interval = 0.0
+                group.growth_rate = None
+            else:
+                group.growth_val, group.growth_interval = result
+                minutes = group.growth_interval / 60.0
+                group.growth_rate = (group.growth_val / minutes
+                                     if minutes > 0 else 0.0)
+        total = meminfoKB['MemTotal']
+        avail = meminfoKB['MemAvailable']
+        sh_tmp = meminfoKB['Shmem']
+        othk = (meminfoKB['SUnreclaim'] + meminfoKB['KernelStack']
+                + meminfoKB['PageTables'])
+        oth = total - grand_summary['ptotal'] - avail - sh_tmp
+        samples = {
+            'Used': total - avail,
+            'TOTALS': grand_summary['ptotal'],
+            'ShTmp': sh_tmp,
+            'OthK': othk,
+            'OthU': oth - othk,
+        }
+        self.sys_growth = {key: self.sys_trackers[key].update(now, value)
+                           for key, value in samples.items()}
+
+    def growth_text(self, group):
+        """Format a group's growth annotation for the current mode."""
+        if group.growth_val is None:
+            return ''
+        mode = self.opts.growth_style
+        if mode == 'growth':
+            return human_kb(group.growth_val)
+        if mode == 'rate':
+            if group.growth_interval < self.RATE_MIN_SECS:
+                return ''
+            minutes = group.growth_interval / 60.0
+            per_day = (group.growth_val * 1440.0 / minutes
+                       if minutes > 0 else 0)
+            return f'{human_kb(per_day)}/d'
+        return f'{human_kb(group.growth_val)} {ago_str(group.growth_interval)}'
+
+    def select_growth_rows(self, alive_groups):
+        """Group keys allowed to annotate: absolute ``-k`` gate plus top-N."""
+        mode = self.opts.growth_style
+        if mode == 'off':
+            return set()
+        thresh = self.opts.min_delta_kb
+        candidates = []
+        for key, group in alive_groups.items():
+            growth = group.growth_val
+            if growth is None:
+                continue
+            if not ((thresh <= 0 and abs(growth) >= -thresh)
+                    or (thresh > 0 and growth >= thresh)):
+                continue
+            rank = (group.growth_rate if mode in ('both', 'rate')
+                    else growth)
+            candidates.append((rank if rank is not None else 0.0, key))
+        limit = getattr(self.opts, 'growth_top_n', 3)
+        if limit is not None:
+            candidates.sort(reverse=True)
+            candidates = candidates[:limit]
+        return {key for _, key in candidates}
+
+    def _debounced_width(self, current, need, count):
+        """Grow ``current`` to ``need`` at once; shrink after a delay.
+
+        Returns ``(width, new_count)``. Shrinking waits for
+        ``WIDTH_SHRINK_DELAY`` consecutive smaller refreshes so the column does
+        not flap.
+        """
+        if need > current:
+            return need, 0
+        if need < current:
+            count += 1
+            if count >= self.WIDTH_SHRINK_DELAY:
+                return need, 0
+            return current, count
+        return current, 0
+
+    def format_sys_growth(self):
+        """One line: system growth for Used/TOTALS/Sh+Tmp/OthK/OthU.
+
+        Values (non-negative, so no ``+``) are left-justified to a common width
+        for the current mode. The interval is shown once, at the end, in
+        ``both`` mode, because all five trackers share one baseline age.
+        """
+        def value_of(key):
+            result = self.sys_growth.get(key)
+            if not result:
+                return '-'
+            growth, interval = result
+            if self.opts.growth_style == 'rate':
+                if interval < self.RATE_MIN_SECS:
+                    return '-'
+                minutes = interval / 60.0
+                per_day = (growth * 1440.0 / minutes) if minutes > 0 else 0
+                return f'{human_kb(per_day)}/d'
+            return str(human_kb(growth))
+
+        keys = ('Used', 'TOTALS', 'ShTmp', 'OthK', 'OthU')
+        values = {key: value_of(key) for key in keys}
+        width = max(len(text) for text in values.values())
+        self.sys_growth_width, self._sysgrow_small = self._debounced_width(
+            self.sys_growth_width, width, self._sysgrow_small)
+        line = '    ' + '  '.join(
+            f'Δ{key} {values[key]:<{self.sys_growth_width}}' for key in keys)
+        if self.opts.growth_style == 'both':
+            result = self.sys_growth.get('Used') or self.sys_growth.get('OthU')
+            if result:
+                line = line.rstrip() + ' ' + ago_str(result[1])
+        return line.rstrip()
 
     def prc_group(self, group):
         """Process on group"""
@@ -1121,7 +1419,7 @@ class PmemStat:
     def pr_exclusions(self):
         """ TBD """
         exclusions = {'number', 'info'}
-        cgroup_cols = ('memPSI%', 'cache', 'kmem', 'kcharge')
+        cgroup_cols = ('memPSI%', 'cache', 'kmem', 'footprt')
         if not self.opts.cpu:
             exclusions.add('cpu%')
         # cgroup v2 columns exist only in cgroup mode, only when the kernel
@@ -1166,6 +1464,7 @@ class PmemStat:
                 else:
                     body += f'{human(mbytes):>{self.fwidth}}'
         num = summary['number']
+        lead = f'{lead:<{self.lead_width}}'
         self.emit(f'{body} {lead} '
                   + (f'{-num}' if num <= 0 else f'{num}x')
                   + ' ' + summary['info'], attr=attr, to_head=to_head)
@@ -1174,7 +1473,9 @@ class PmemStat:
     def get_meminfo():
         """Get most vital stats from /proc/meminfo'"""
         meminfofile = '/proc/meminfo'
-        meminfoKB = {'MemTotal': 0, 'MemAvailable': 0, 'Dirty':0, 'Shmem':0}
+        meminfoKB = {'MemTotal': 0, 'MemAvailable': 0, 'Dirty': 0,
+                     'Shmem': 0, 'SUnreclaim': 0, 'KernelStack': 0,
+                     'PageTables': 0}
         keys = list(meminfoKB.keys())
 
         with open(meminfofile, encoding='utf-8') as fileh:
@@ -1257,30 +1558,29 @@ class PmemStat:
             leader += f' Tot={human(meminfoKB["MemTotal"]*1024)}'
             leader += f' Used={human(used*1024)}'
             leader += f' Avail={human(meminfoKB["MemAvailable"]*1024)}'
+            othk = (meminfoKB["SUnreclaim"] + meminfoKB["KernelStack"]
+                    + meminfoKB["PageTables"])
             if appKB:
                 other = (meminfoKB["MemTotal"] - appKB
                          - meminfoKB["MemAvailable"] - meminfoKB["Shmem"])
-                leader += f' Oth={human(other*1024)}'
+                leader += f' OthK={human(othk*1024)}'
+                leader += f' OthU={human((other-othk)*1024)}'
+            elif othk:
+                leader += f' OthK={human(othk*1024)}'
             leader += f' Sh+Tmp={human(meminfoKB["Shmem"]*1024)}'
             if len(wanted_prcs) < total_user_pids:
                 leader += f' PIDs={len(wanted_prcs)}/{total_user_pids}'
             else:
                 leader += f' PIDs={total_user_pids}'
 
-            # Always show search indicator on the right
-            self.emit(leader + ' /', to_head=True, resume=resume)
+            self.emit(leader, to_head=True, resume=resume)
             resume = True
 
-            # Show search text with appropriate formatting
-            if self.search_bar.is_active:
-                # Active search mode: show pattern in reverse video with cursor
-                before = self.search_bar.text[:self.search_bar.cursor_pos]
-                after = self.search_bar.text[self.search_bar.cursor_pos:]
-                search_display = f'{before}|{after}'
-                self.emit(search_display, to_head=True, resume=resume, attr=curses.A_REVERSE)
-            elif self.opts.search:
-                # Finalized search: show pattern in normal video
-                self.emit(self.opts.search, to_head=True, resume=resume)
+            # System growth line (attribution identity), only when enabled and
+            # a baseline exists.
+            if self.opts.growth_style != 'off' and self.sys_growth:
+                self.emit(self.format_sys_growth(), to_head=True, resume=False)
+                resume = True
 
             if self.has_zram(): # second line if zRAM
                 resume = False
@@ -1419,6 +1719,27 @@ class PmemStat:
             print('DONE: no pids to report ... exiting now')
             sys.exit(0)
 
+        # Growth: feed the trackers (always, even when the annotation is off)
+        # and pick which rows may annotate.
+        top = self.opts.growth_top
+        self.opts.growth_top_n = None if top == 'all' else int(top)
+        if regroup or self.opts.growth_style != self._last_growth_mode:
+            self.lead_width = 1
+            self.sys_growth_width = 1
+            self._lead_small = 0
+            self._sysgrow_small = 0
+            self._last_growth_mode = self.opts.growth_style
+        self.update_growth(time.monotonic(), grand_summary, meminfoKB)
+        alive_for_growth = {k: g for k, g in self.groups.items() if g.alive}
+        allowed = self.select_growth_rows(alive_for_growth)
+        need = 1
+        for key, group in alive_for_growth.items():
+            group.growth_txt = (self.growth_text(group)
+                                if key in allowed else '')
+            need = max(need, len(group.growth_txt))
+        self.lead_width, self._lead_small = self._debounced_width(
+            self.lead_width, need, self._lead_small)
+
         # print header and  grand totals
         pr_top_of_report(appKB=grand_summary['ptotal'])
 
@@ -1453,10 +1774,19 @@ class PmemStat:
         elif self.get_sortby() == 'name':
             sorted_keys = sorted(alive_groups.keys(),
                 key=lambda x: str(alive_groups[x].key).lower())
+        elif self.get_sortby() == 'growth':
+            def rank(group):
+                if group.growth_val is None:
+                    return None
+                if self.opts.growth_style in ('both', 'rate'):
+                    return group.growth_rate
+                return group.growth_val
+            sorted_keys = sorted(alive_groups.keys(),
+                key=lambda x: (rank(alive_groups[x]) is not None,
+                               rank(alive_groups[x]) or 0.0), reverse=True)
         else:
             sorted_keys = sorted(alive_groups.keys(),
-                key=lambda x: (alive_groups[x].is_changed and self.opts.rise_to_top,
-                               alive_groups[x].summary['ptotal']), reverse=True)
+                key=lambda x: alive_groups[x].summary['ptotal'], reverse=True)
 
         limit = self.window.scroll_view_size if self.is_fit_opted() else 1000000
         ptotal_limit = (grand_summary['ptotal'] * self.opts.top_pct / 100) * 1.001
@@ -1467,21 +1797,18 @@ class PmemStat:
         for key in sorted_keys:
             group = alive_groups[key]
             self.add_to_summary(group.summary, running_summary)
-            if (self.opts.search in group.summary['info'] and
+            haystack = group.summary['info']
+            if self.opts.groupby == 'cgroup':
+                haystack += ' ' + str(group.key)
+            if (self.opts.search in haystack and
               shown_cnt < limit-1 and running_summary['ptotal'] <= ptotal_limit):
                 if group.alive and (group.is_new or group.is_changed or self.window):
-                    attr = curses.A_REVERSE if group.is_new or group.is_changed else None
-                    # Suppress the highlight on the first render and on the first
-                    # refresh after the grouping changes: regrouping recreates
-                    # every group as "new", so without this every row would flash
-                    # as changed (reverse/bold) for one refresh.
-                    attr = None if is_first or regroup else attr
+                    attr = None
                     if self.window:
                         current_row = self.window.body.row_cnt
                         self.groups_by_line[current_row] = group
-                    self.pr_summary('A' if group.is_new
-                        else f'{group.delta_pss:+,}K' if group.is_changed
-                        else ' ', group.summary, attr=attr)
+                    lead = 'A' if group.is_new else group.growth_txt
+                    self.pr_summary(lead, group.summary, attr=attr)
                     # Show confirmation prompt right after the selected line
                     if (self.window and self.confirmation.active and
                         current_row == self.window.pick_pos):
@@ -1509,25 +1836,28 @@ class PmemStat:
             self.emit('')
 
     def emit_key_legend(self):
-        """Emit the persistent key legend as the top line of the header.
+        """Emit the key legend (first header line) plus the live search field.
 
-        This is the always-visible evidence of the available keys; the complete
-        list (plus the navigation keys) stays one '?' press away. The legend is
-        drawn dim, and indented left-of-center (see KEY_LEGEND_LEFT_SHIFT) so it
-        reads as chrome rather than as report data and is less likely to be
-        chopped on a narrow terminal.
-        No-op outside window (curses) mode, where there are no interactive keys.
+        The legend is left-aligned so '[?]help' sits above the first digit of
+        the leader's 'Tot=' value; the search field is appended after it and is
+        drawn non-dimmed to signal that it is live. No-op outside window mode,
+        where there are no interactive keys.
         """
         if not self.window:
             return
-        # Refresh the terminal dimensions so the padding math uses the real
-        # width (self.window.cols is 0 until the first calc()).
-        self.window.calc()
-        cols = self.window.cols or 80
-        pad = max((cols - len(self.KEY_LEGEND)) // 2 - self.KEY_LEGEND_LEFT_SHIFT,
-                  0)
-        self.emit(f'{" " * pad}{self.KEY_LEGEND}', to_head=True,
-                  attr=curses.A_DIM)
+        # 'HH:MM:SS Tot=' is the leader prefix; offset the legend under the
+        # first digit of the Tot= value.
+        pad = len('00:00:00 Tot=')
+        self.emit(f'{" " * pad}{self.KEY_LEGEND} ', to_head=True,
+                  attr=curses.A_DIM, resume=False)
+        if self.search_bar.is_active:
+            before = self.search_bar.text[:self.search_bar.cursor_pos]
+            after = self.search_bar.text[self.search_bar.cursor_pos:]
+            self.emit(f'/{before}|{after}', to_head=True,
+                      attr=curses.A_REVERSE, resume=True)
+        else:
+            self.emit(f'/{self.opts.search or ""}', to_head=True,
+                      attr=curses.A_BOLD, resume=True)
 
     def emit(self, line, to_head=False, attr=None, resume=False):
         """ Emit a line of the report"""
@@ -1607,10 +1937,13 @@ class PmemStat:
                           vals=[False, True], obj=self.opts)
         self.spin.add_key('others', 'o - less category detail',
                           vals=[False, True], obj=self.opts)
-        self.spin.add_key('rise_to_top', 'r - raise new/changed to top',
-                          vals=[False, True], obj=self.opts)
         self.spin.add_key('sortby', 's - sort by',
-                          vals=['mem', 'cpu', 'name'], obj=self.opts)
+                          vals=['mem', 'cpu', 'name', 'growth'], obj=self.opts)
+        # NB: 'L' is a console_window navigation key (end-of-page), so use 'G'.
+        self.spin.add_key('growth_style', 'G - leak/growth mode',
+                          vals=['off', 'both', 'growth', 'rate'], obj=self.opts)
+        self.spin.add_key('growth_top', 't - top-N growers',
+                          vals=['3', '10', '30', 'all'], obj=self.opts)
         self.spin.add_key('units', 'u - memory units',
                           vals=['MB', 'mB', 'KB', 'human'], obj=self.opts)
         self.spin.add_key('cpu', 'c - show cpu',
@@ -1630,7 +1963,9 @@ class PmemStat:
                 self.window.set_pick_mode(False)
                 self.help_screen()
                 self.window.render()
-                do_key(self.window.prompt(self.opts.loop_secs))
+                key = self.window.prompt(self.opts.loop_secs)
+                if key is not None:
+                    do_key(key)
                 self.window.clear()
             elif self.mode == 'normal':
                 regroup = bool(was_groupby != self.opts.groupby)
@@ -1642,6 +1977,12 @@ class PmemStat:
                 self.window.set_pick_mode(self.opts.kill_mode)
                 self.window.render()
                 key = self.window.prompt(self.opts.loop_secs)
+                if key is None:
+                    # prompt() timed out (refresh interval): redraw only; never
+                    # pass None into the key handlers (search bar compares it).
+                    self.window.clear()
+                    is_first = False
+                    continue
                 # Let confirmation handle keys when active (highest priority)
                 enter_kill_loop = True
                 if self.confirmation.active:
@@ -1675,6 +2016,8 @@ class PmemStat:
                             break
                         self.window.render()
                         key = self.window.prompt(self.opts.loop_secs)
+                        if key is None:
+                            continue
                         # Let search bar handle keys when active
                         if self.search_bar.is_active and self.search_bar.handle_key(key):
                             pass  # Key was handled by search bar
@@ -1689,16 +2032,24 @@ class PmemStat:
                 assert False, f'unsupported mode ({self.mode})'
 
 # Root auto-elevation is opt-in so the tool never escalates behind the
-# user's back. Opt in once in a shell profile with, e.g.:
-#     export PMEMSTAT_AUTO_SUDO=1
-# or per invocation with the equivalent --auto-sudo flag. Falsy values
-# ("0", "false", "no", "off") leave auto-elevation disabled.
-AUTO_SUDO_ENV = 'PMEMSTAT_AUTO_SUDO'
+# user's back; the caller opts in per invocation with ``--auto-sudo`` (which
+# ``PMEMSTAT_ARGS`` can supply persistently), never automatically.
 
-def auto_sudo_opted_in():
-    """True when the user has explicitly opted into automatic root elevation."""
-    value = os.environ.get(AUTO_SUDO_ENV, '').strip().lower()
-    return value not in ('', '0', 'false', 'no', 'off')
+# Extra default CLI arguments may be supplied once via PMEMSTAT_ARGS, e.g.:
+#     export PMEMSTAT_ARGS='--auto-sudo --psi --loop 3 -s name'
+# The value is tokenized like a POSIX shell command line and prepended to the
+# real argv, so explicit command-line arguments still take precedence (and any
+# positional pids given on the command line are added to those from the env).
+ARGS_ENV = 'PMEMSTAT_ARGS'
+
+def args_from_env():
+    """CLI arguments supplied via ``PMEMSTAT_ARGS`` (``[]`` when unset).
+
+    ``shlex.split`` performs POSIX-shell tokenization, so quoting works as it
+    would on a command line (``--search "two words"`` -> ``['--search',
+    'two words']``). Raises ``ValueError`` on unbalanced quotes.
+    """
+    return shlex.split(os.environ.get(ARGS_ENV, ''))
 
 def _isolated_can_import(module_root):
     """Whether an isolated interpreter (``python -I``) would find module_root.
@@ -1728,16 +2079,21 @@ def _sudo_noninteractive_ok():
         return False
     return proc.returncode == 0
 
-def rerun_module_as_root(module_name):
+def rerun_module_as_root(module_name, args=None):
     """Re-exec ``module_name`` as root via sudo, but only in a safe, opt-in way.
+
+    ``args`` is the effective argv (``PMEMSTAT_ARGS`` already merged in) to
+    replay for the root process; it defaults to ``sys.argv[1:]``. Passing the
+    merged list matters because ``sudo`` resets the environment, so an
+    ``PMEMSTAT_ARGS``-provided flag would otherwise be lost after elevation.
 
     Returns ``True`` if the process was replaced (which does not return) and
     ``False`` if elevation was declined, in which case the caller should keep
     running as the invoking user.
 
     Safety properties compared with the previous unconditional re-exec:
-      * never runs by default: the caller opts in via ``--auto-sudo`` or the
-        ``PMEMSTAT_AUTO_SUDO`` environment variable;
+      * never runs by default: the caller opts in via ``--auto-sudo`` (which
+        can be supplied persistently through ``PMEMSTAT_ARGS``);
       * requires an interactive terminal unless sudo is already authorized
         non-interactively, so scripts/CI cannot hang on a password prompt;
       * re-execs the *same interpreter* in isolated mode (``-I``), so the
@@ -1762,7 +2118,9 @@ def rerun_module_as_root(module_name):
               'prompt); run "sudo pmemstat" for full detail.',
               file=sys.stderr)
         return False
-    cmd = ['sudo', sys.executable, '-I', '-m', module_name] + sys.argv[1:]
+    if args is None:
+        args = sys.argv[1:]
+    cmd = ['sudo', sys.executable, '-I', '-m', module_name] + list(args)
     try:
         os.execvp('sudo', cmd)
     except OSError as exc:
@@ -1779,7 +2137,7 @@ def main():
     parser.add_argument('-C', '--no-cpu', action='store_false', dest='cpu',
             help='do NOT report percent CPU (only in window mode)')
     parser.add_argument('-P', '--psi', action='store_true',
-            help='show PSI (system pressure in header + memPSI% column) [dflt=off]')
+            help='show PSI (system pressure in header + memPSI%% column) [dflt=off]')
     parser.add_argument('-g', '--groupby', choices=('exe', 'cmd', 'pid', 'cgroup'),
             default='exe', help='grouping method for presenting rows')
     parser.add_argument('-f', '--fit-to-window', action='store_true',
@@ -1797,33 +2155,45 @@ def main():
     parser.add_argument('-U', '--run-as-user', action='store_true',
             help='run as user (NOT as root)')
     parser.add_argument('--auto-sudo', action='store_true',
-            help='re-run self as root via sudo (same as PMEMSTAT_AUTO_SUDO)')
+            help='re-run self as root via sudo '
+                 '(or set PMEMSTAT_ARGS=--auto-sudo)')
     parser.add_argument('-o', '--others', action='store_false',
             help='expand "other" into shSYSV, shOth, stack, text')
     parser.add_argument('-u', '--units', choices=('MB', 'mB', 'KB', 'human'),
             default='MB', help='units of memory [dflt=MB]')
-    parser.add_argument('-R', '--no-rise', action='store_false', dest='rise_to_top',
-            help='do NOT raise change/adds to top (only in window mode)')
-    parser.add_argument('-s', '--sortby', choices=('mem', 'cpu', 'name'),
+    parser.add_argument('-s', '--sortby',
+            choices=('mem', 'cpu', 'name', 'growth'),
             default='mem', help='sort method for presenting rows')
+    parser.add_argument('--growth-style',
+            choices=('off', 'both', 'growth', 'rate'), default='off',
+            help='leak/growth style: off|both|growth|rate [dflt=off]')
+    parser.add_argument('--growth-top',
+            choices=('3', '10', '30', 'all'), default='3',
+            help='annotate only the top-N growers: 3|10|30|all [dflt=3]')
     parser.add_argument('-/', '--search', default='',
             help='show items with search string in name')
     parser.add_argument('-W', '--no-window', action='store_false', dest='window',
             help='show in "curses" window [disables: -D,-t,-L]')
     parser.add_argument('pids', nargs='*', action='store',
             help='list of pids/groups (none means every accessible pid)')
-    opts = parser.parse_args()
+    try:
+        env_args = args_from_env()
+    except ValueError as exc:
+        print(f'pmemstat: bad {ARGS_ENV}: {exc}', file=sys.stderr)
+        sys.exit(2)
+    effective_argv = env_args + sys.argv[1:]
+    opts = parser.parse_args(effective_argv)
     # DB(0, f'opts={opts}')
 
     if not opts.run_as_user and os.geteuid() != 0:
-        if opts.auto_sudo or auto_sudo_opted_in():
+        if opts.auto_sudo:
             # Opted in explicitly: try to elevate, but stay as the user if
             # elevation is declined (reason is printed by the call).
-            rerun_module_as_root('pmemstat.main')
+            rerun_module_as_root('pmemstat.main', effective_argv)
         elif not opts.window:
             print("pmemstat: running as user (other users' processes omitted); "
-                  'run "sudo pmemstat" or set PMEMSTAT_AUTO_SUDO=1 for full '
-                  'coverage.', file=sys.stderr)
+                  'run "sudo pmemstat" or set PMEMSTAT_ARGS=--auto-sudo for '
+                  'full coverage.', file=sys.stderr)
 
 
     if opts.min_delta_kb is None:

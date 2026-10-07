@@ -136,9 +136,15 @@ class TestCGroupRead(unittest.TestCase):
         self.assertEqual(data['stat']['kernel'], 4096)
         self.assertAlmostEqual(data['pressure']['some']['avg10'], 1.5)
 
+    def test_read_swap_current(self):
+        self._write('memory.swap.current', '4096\n')
+        data = self.cg.read()
+        self.assertEqual(data['swap_current'], 4096)
+
     def test_read_missing_files(self):
         data = self.cg.read()
         self.assertIsNone(data['current'])
+        self.assertIsNone(data['swap_current'])
         self.assertEqual(data['stat'], {})
         self.assertEqual(data['pressure'], {})
 
