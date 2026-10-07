@@ -114,10 +114,42 @@ def DB(level, *opts, **kwargs):
 # ``memory.current`` charge shown instead; they differ only in the memory view.
 CGROUP_GROUPS = ('cgroup', 'cgroupCharge')
 
+# Every grouping whose growth history is tracked independently, so that changing
+# the grouping never resets the leak baseline (see PmemStat.update_growth).
+GROWTH_VIEWS = ('exe', 'cmd', 'pid') + CGROUP_GROUPS
+
 
 def is_cgroup_groupby(groupby):
     """True when ``groupby`` selects a cgroup v2 grouping (either view)."""
     return groupby in CGROUP_GROUPS
+
+
+def cgroup_view_totals(data):
+    """Raw (hierarchical) ``footprt``/``kcharge`` totals in KB from a read.
+
+    ``data`` is a :meth:`pmemstat.CGroup.CGroup.read` result. Both totals come
+    from the same file access so the two cgroup groupings can share one read.
+    Returns ``None`` when the cgroup has no ``memory.current`` (nothing to
+    charge):
+
+      * ``footprt`` = ``current - inactive_file - slab_reclaimable + swap``
+        (the derived footprint, i.e. what the cgroup really holds).
+      * ``kcharge`` = ``current`` (the kernel's own charge).
+    """
+    stat = data['stat'] or {}
+    if data['current'] is None:
+        return None
+    current = data['current']
+    swap = stat.get('swap')
+    if swap is None:
+        swap = data.get('swap_current') or 0
+    inactive_file = stat.get('inactive_file', 0)
+    slab_reclaimable = stat.get('slab_reclaimable', 0)
+    return {
+        'footprt': max(0, (current - inactive_file
+                           - slab_reclaimable + swap) // 1024),
+        'kcharge': current // 1024,
+    }
 
 
 ##############################################################################
@@ -189,6 +221,7 @@ class GrowthTracker:
         self.peak = None
         self.snaps = []          # list of (anchor_age, high_water_value)
         self._next_age = self.BASE
+        self.last_seen = None    # monotonic time of the last fed sample
 
     def reset(self):
         """Forget all history (used on regroup)."""
@@ -196,6 +229,7 @@ class GrowthTracker:
         self.peak = None
         self.snaps = []
         self._next_age = self.BASE
+        self.last_seen = None
 
     def update(self, now, value):
         """Feed a sample; return ``(growth, interval)`` in (KB, secs) or None."""
@@ -492,6 +526,9 @@ class ProcMem:
         self.exebasename = None, None
         self.key, self.cmdline, self.cmdline_trunc = None, None, None
         self.cgroup_path = None # cached cgroup v2 path (when grouping by cgroup)
+        self.cgroup_read = False # whether the cgroup path has been read yet
+        self.view_keys = None   # {grouping: key} for every supported view
+        self.rollup = None      # last rollup summary (for view growth tracking)
 
     def refresh_cpu(self):
         """Get the Cpu Number for the PID (if possible)"""
@@ -633,8 +670,9 @@ class ProcMem:
 
     def read_cgroup(self):
         """Read and cache this process's cgroup v2 path (``None`` if absent)."""
-        if self.cgroup_path is not None:
+        if self.cgroup_read:
             return self.cgroup_path
+        self.cgroup_read = True
         try:
             with open(f'/proc/{self.pid}/cgroup', encoding='utf-8') as fhandle:
                 lines = fhandle.read().splitlines()
@@ -646,20 +684,22 @@ class ProcMem:
         return self.cgroup_path
 
     def set_key(self):
-        """Compute the grouping key for this process.
+        """Compute the grouping key for this process, for every view.
 
-        The key is opaque to the rest of the program; it merely has to be
-        equal for every process that belongs in the same displayed row.
+        ``self.key`` is the key for the *active* grouping; ``self.view_keys``
+        carries the key for every supported grouping so that growth history can
+        be tracked for all of them at once (see :meth:`PmemStat.update_growth`),
+        which keeps the leak baseline across a change of grouping.
         """
-        groupby = ProcMem.opts.groupby
-        if groupby == 'cmd':
-            self.key = self.cmdline_trunc
-        elif groupby == 'exe':
-            self.key = self.exebasename
-        elif is_cgroup_groupby(groupby):
-            self.key = self.read_cgroup() or '(no-cgroup)'
-        else: # 'pid'
-            self.key = self.pid
+        cgroup = self.read_cgroup() or '(no-cgroup)'
+        self.view_keys = {
+            'exe': self.exebasename,
+            'cmd': self.cmdline_trunc,
+            'pid': self.pid,
+            'cgroup': cgroup,
+            'cgroupCharge': cgroup,
+        }
+        self.key = self.view_keys[ProcMem.opts.groupby]
 
     def read_lines(self, filename):
         """ Get the lines of the smaps """
@@ -883,6 +923,7 @@ class ProcMem:
         """Process one PID"""
         self.alive = True
         self.is_changed = False
+        self.rollup = None
         if not self.why_not and not self.cmdline:
             self.get_cmdline()
             if not self.cmdline:
@@ -895,6 +936,7 @@ class ProcMem:
             return
         self.is_changed = False
         rollup_summary = self.parse_rollups(rollup_lines)
+        self.rollup = rollup_summary
         if self.opts.cpu:
             rollup_summary['cpu%'] = self.cpu.percent
         group = self.pmemstat.get_group(self.key)
@@ -932,6 +974,10 @@ class PmemStat:
     # Below this interval the per-day rate is a wild extrapolation (a few
     # seconds projected to a day), so rate mode shows nothing until then.
     RATE_MIN_SECS = 60
+    # A tracker not fed for this long is dropped. This bounds memory as pids
+    # churn in the 'pid' view; a key absent for an hour has no leak history
+    # worth resuming.
+    GROWTH_PRUNE_SECS = 3600
 
     def __init__(self, opts):
         self.opts = opts
@@ -950,6 +996,12 @@ class PmemStat:
         setattr(opts, 'kill_mode', False) # pseudo option
         setattr(opts, 'cpu_avg_secs', 20) # pseudo option
         self.groups_by_line = {}
+        # Persistent per-(view, key) growth trackers. They live on the singleton
+        # rather than on the groups, so changing the grouping (which rebuilds
+        # self.groups) does not discard the leak history; update_growth feeds
+        # every view each loop.
+        self.growth_trackers = {}
+        self.growth_results = {}
         self.cgroup_keys = set()
         self.cgroup_raw = {}            # cgroup key -> raw (hierarchical) values
         self.cgroup_data_seen = False   # any group had readable cgroup v2 data
@@ -1037,7 +1089,6 @@ class PmemStat:
                     summary=None,
                     first_summary=None,
                     growth_pct=0.0,
-                    growth=GrowthTracker(),
                     growth_val=None,
                     growth_interval=0.0,
                     growth_rate=None,
@@ -1121,25 +1172,26 @@ class PmemStat:
         stat = data['stat'] or {}
         raw = {'anon': 0, 'cache': 0, 'kmem': 0, 'swap': 0,
                'kcharge': 0, 'footprt': 0}
-        if data['current'] is not None:
+        totals = cgroup_view_totals(data)
+        if totals is not None:
             self.cgroup_data_seen = True
-            current = data['current']
             swap = stat.get('swap')
             if swap is None:
                 swap = data.get('swap_current') or 0
             inactive_file = stat.get('inactive_file', 0)
             slab_reclaimable = stat.get('slab_reclaimable', 0)
             raw['anon'] = stat.get('anon', 0) // 1024
+            # Record *both* totals, not just the active view's, so the growth
+            # loop can reuse this single read for both cgroup groupings.
+            raw['footprt'] = totals['footprt']
+            raw['kcharge'] = totals['kcharge']
             if self.cgroup_view() == 'footprt':
                 raw['cache'] = (stat.get('file', 0) - inactive_file) // 1024
                 raw['kmem'] = (stat.get('kernel', 0) - slab_reclaimable) // 1024
                 raw['swap'] = swap // 1024
-                raw['footprt'] = max(0, (current - inactive_file
-                                         - slab_reclaimable + swap) // 1024)
             else:
                 raw['cache'] = stat.get('file', 0) // 1024
                 raw['kmem'] = stat.get('kernel', 0) // 1024
-                raw['kcharge'] = current // 1024
             self.cgroup_charge_keys.add(group.key)
         self.cgroup_raw[group.key] = raw
         some = (data['pressure'] or {}).get('some') or {}
@@ -1252,31 +1304,94 @@ class PmemStat:
                 DB(2, f'{group.key} ~pss {delta_pss}KB thresh={thresh}')
         return is_over, delta_pss
 
-    def group_growth_metric(self, group):
-        """Per-group scalar fed to its growth tracker (KB).
+    def prc_growth_metric(self, prc):
+        """Per-process scalar fed to the non-cgroup view trackers (KB).
 
-        In cgroup mode the metric is the active view total (``footprt`` or
-        ``kcharge``), so the leak annotation tracks whatever charge is shown.
+        Uses the rollup total including swap (zRAM-aware), i.e. the same metric
+        the non-cgroup rows display.
         """
-        summary = group.summary or {}
-        if self.is_cgroup() and self.cgroup_data_seen:
-            value = summary.get(self.total_key())
-            if value is not None:
-                return value
-        if 'pss' not in summary:
-            return None
-        return self.growth_metric_value(summary)
+        return self.growth_metric_value(prc.rollup)
+
+    def cgroup_growth_samples(self, samples):
+        """Override the cgroup views' samples with kernel charge totals.
+
+        Reuses the reads already done for an active cgroup grouping when
+        possible; otherwise reads each distinct cgroup once (both cgroup
+        groupings are fed from the single read). Values are reduced to each
+        cgroup's own ("local") share so they match the displayed rows.
+        """
+        keys = set()
+        for prc in self.prcs.values():
+            if prc.wanted and not prc.why_not and prc.view_keys:
+                key = prc.view_keys['cgroup']
+                if key != '(no-cgroup)':
+                    keys.add(key)
+        if not keys:
+            return
+        if self.is_cgroup() and self.cgroup_charge_keys:
+            raw = {key: {'footprt': self.cgroup_raw[key]['footprt'],
+                         'kcharge': self.cgroup_raw[key]['kcharge']}
+                   for key in self.cgroup_charge_keys}
+        else:
+            raw = {}
+            for key in keys:
+                totals = cgroup_view_totals(CGroup(key).read())
+                if totals is not None:
+                    raw[key] = totals
+        for key, values in local_values(raw, ('footprt', 'kcharge')).items():
+            samples['cgroup'][key] = max(0, values['footprt'])
+            samples['cgroupCharge'][key] = max(0, values['kcharge'])
+
+    def feed_growth(self, now, view, key, value):
+        """Feed one ``(view, key)`` sample into its persistent tracker."""
+        skey = (view, key)
+        tracker = self.growth_trackers.get(skey)
+        if tracker is None:
+            tracker = GrowthTracker()
+            self.growth_trackers[skey] = tracker
+        tracker.last_seen = now
+        return tracker.update(now, value)
+
+    def prune_growth_trackers(self, now):
+        """Drop trackers whose key has not been seen for GROWTH_PRUNE_SECS."""
+        stale = [skey for skey, tracker in self.growth_trackers.items()
+                 if now - tracker.last_seen > self.GROWTH_PRUNE_SECS]
+        for skey in stale:
+            del self.growth_trackers[skey]
 
     def update_growth(self, now, grand_summary, meminfoKB):
-        """Feed every alive group and the system trackers a sample.
+        """Feed every view's growth trackers a sample (history survives regroup).
 
-        Trackers run unconditionally (even when the growth annotation is
-        ``off``) so data is ready the moment it is switched on.
+        Trackers are keyed by ``(view, key)`` and live on the singleton, so the
+        leak history is continuous from the start of the tool no matter how the
+        grouping is switched. Every view is fed each loop, not just the active
+        one: the non-cgroup views share a single pass over the per-process
+        rollups (cheap), and the cgroup views share one read per distinct cgroup
+        (reused from the cgroup view when it is active). Trackers run
+        unconditionally (even when the growth annotation is ``off``) so data is
+        ready the moment it is switched on.
         """
+        samples = {view: {} for view in GROWTH_VIEWS}
+        for prc in self.prcs.values():
+            if (not prc.wanted or prc.why_not or not prc.view_keys
+                    or prc.rollup is None):
+                continue
+            metric = self.prc_growth_metric(prc)
+            for view, key in prc.view_keys.items():
+                samples[view][key] = samples[view].get(key, 0) + metric
+        self.cgroup_growth_samples(samples)
+        self.growth_results = {}
+        for view, by_key in samples.items():
+            self.growth_results[view] = {
+                key: self.feed_growth(now, view, key, value)
+                for key, value in by_key.items()}
+        self.prune_growth_trackers(now)
+        # Attach the active grouping's results to its group objects.
+        results = self.growth_results.get(self.opts.groupby, {})
         for group in self.groups.values():
             if not group.alive:
                 continue
-            result = group.growth.update(now, self.group_growth_metric(group))
+            result = results.get(group.key)
             if result is None:
                 group.growth_val = None
                 group.growth_interval = 0.0
@@ -1292,7 +1407,7 @@ class PmemStat:
         othk = (meminfoKB['SUnreclaim'] + meminfoKB['KernelStack']
                 + meminfoKB['PageTables'])
         oth = total - grand_summary['ptotal'] - avail - sh_tmp
-        samples = {
+        sys_samples = {
             'Used': total - avail,
             'TOTALS': grand_summary['ptotal'],
             'ShTmp': sh_tmp,
@@ -1300,7 +1415,7 @@ class PmemStat:
             'OthU': oth - othk,
         }
         self.sys_growth = {key: self.sys_trackers[key].update(now, value)
-                           for key, value in samples.items()}
+                           for key, value in sys_samples.items()}
 
     def growth_text(self, group):
         """Format a group's growth annotation for the current mode."""

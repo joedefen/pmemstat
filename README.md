@@ -58,7 +58,7 @@ Reach for `top` or `ps` when you need a tool that is always installed, and `htop
 | **Inline search-as-you-type** | ✓ (`/`) | ✗ | ✗ | ✓ (F3) |
 | **Requires root for all-process detail** | ✓ (else only your own) | ✓ (else only your own) | ✗ | ✗ |
 
-In short: reach for `top`/`htop` when you want a fast, broad system overview, and reach for `pmemstat` when you need to know **how much memory a program (or group of programs) is truly responsible for**, to break that memory down by type or by cgroup, or to watch for creeping growth that suggests a leak.
+In short: reach for `top`/`htop` when you want a fast, broad system overview, and reach for `pmemstat` when you need to know **how much memory a program (or group of programs) is truly responsible for**, to break that memory down by type or by cgroup, or to watch for creeping growth that suggests a leak. For **per-mapped-file attribution** (which shared library or mmap'd file costs the most RAM), use `smem -m` or `pmap`; `pmemstat` deliberately stays focused on per-process and per-cgroup responsibility rather than rolling PSS up by mapped file.
 
 ## Installation Options
 Note that:
@@ -249,6 +249,12 @@ groups that are growing, making slow leaks visible without scrolling history:
 * It is measured against a **geometric, self-forgetting baseline** (anchors at
   16, 64, 256, ... seconds): a process's first 16 seconds never count, so
   startup bursts age out, and growth is never negative (a reduction is zero).
+* The baseline is kept **per grouping, from the moment the tool starts**, so
+  changing the grouping (`g` in window mode) does not reset the leak history:
+  every grouping is tracked in parallel. The cost is one extra pass over the
+  already-read per-process rollups for the non-cgroup views, plus one read per
+  distinct cgroup (shared by both cgroup views, and reused when a cgroup view
+  is the active one).
 * A row is annotated only if its absolute growth (KB) is at least `-k` **and**
   it is among the top-N growers (`--growth-top`, default 3; `t` cycles
   3/10/30/all). The `G` key cycles `off -> both -> growth -> rate -> off`.
