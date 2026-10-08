@@ -743,6 +743,99 @@ class TestHistoryFlags(unittest.TestCase):
         self.assertFalse(pm.history_save)
 
 
+class TestZapHistory(unittest.TestCase):
+    """The window 'z' key resets growth in memory and rewrites the ledger."""
+
+    @staticmethod
+    def _pm(**over):
+        fields = dict(units='MB', debug=0, search='')
+        fields.update(over)
+        return PmemStat(SimpleNamespace(**fields))
+
+    def test_non_root_is_a_noop(self):
+        """A non-root run neither resets trackers nor touches the ledger."""
+        pm = self._pm()
+        tracker = GrowthTracker()
+        tracker.update(0.0, 100)  # establish t0
+        pm.growth_trackers = {('exe', 'a'): tracker}
+        with mock.patch.object(main_module.os, 'geteuid', return_value=1), \
+             mock.patch.object(main_module.History, 'reset_ledger') as reset:
+            self.assertFalse(pm.zap_history())
+        reset.assert_not_called()
+        self.assertIsNotNone(tracker.t0)  # untouched
+
+    def test_root_resets_memory_and_ledger(self):
+        """Root: every tracker is reset and reset_ledger gets the samples."""
+        pm = self._pm()
+        pm.growth_samples = {'exe': {'a': 1}}
+        pm.sys_samples = {'Used': 2}
+        pm.history_boot = 'b'
+        tracker = GrowthTracker()
+        tracker.update(0.0, 100)
+        pm.growth_trackers = {('exe', 'a'): tracker}
+        pm.sys_trackers['Used'].update(0.0, 5)
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+             mock.patch.object(main_module.History, 'reset_ledger',
+                               return_value=True) as reset:
+            self.assertTrue(pm.zap_history())
+        reset.assert_called_once_with({'exe': {'a': 1}}, {'Used': 2}, boot='b')
+        self.assertIsNone(tracker.t0)                  # in-memory reset
+        self.assertIsNone(pm.sys_trackers['Used'].t0)  # in-memory reset
+        self.assertTrue(pm._history_seeded)  # pylint: disable=protected-access
+
+    def test_root_without_saving_still_resets_memory(self):
+        """--dont-save-growth-history: memory resets, the ledger is untouched."""
+        pm = self._pm(dont_save_growth_history=True)
+        pm.growth_samples = {'exe': {'a': 1}}
+        tracker = GrowthTracker()
+        tracker.update(0.0, 100)
+        pm.growth_trackers = {('exe', 'a'): tracker}
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+             mock.patch.object(main_module.History, 'reset_ledger') as reset:
+            self.assertFalse(pm.zap_history())
+        reset.assert_not_called()
+        self.assertIsNone(tracker.t0)
+
+    def test_root_ledger_failure_returns_false(self):
+        """A refused ledger write reports failure (memory is still reset)."""
+        pm = self._pm()
+        pm.growth_samples = {'exe': {'a': 1}}
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+             mock.patch.object(main_module.History, 'reset_ledger',
+                               return_value=False):
+            self.assertFalse(pm.zap_history())
+
+
+class TestKeyLegend(unittest.TestCase):
+    """The legend advertises [z]ap only for root and no longer shows [t]op."""
+
+    def _pm(self):
+        return PmemStat(SimpleNamespace(units='MB', debug=0, search=''))
+
+    def _legend(self, euid):
+        """Return the emitted legend line for the given effective uid."""
+        pm = self._pm()
+        pm.window = SimpleNamespace()
+        lines = []
+        with mock.patch.object(main_module.os, 'geteuid', return_value=euid), \
+             mock.patch.object(pm, 'emit',
+                               side_effect=lambda line, **kw: lines.append(line)):
+            pm.emit_key_legend()
+        return lines[0]
+
+    def test_top_is_not_advertised(self):
+        self.assertNotIn('[t]op', PmemStat.KEY_LEGEND)
+
+    def test_zap_suffix_definition(self):
+        self.assertEqual(PmemStat.KEY_LEGEND_ZAP, ' [z]ap')
+
+    def test_root_legend_has_zap(self):
+        self.assertIn('[z]ap', self._legend(0))
+
+    def test_non_root_legend_has_no_zap(self):
+        self.assertNotIn('[z]ap', self._legend(1))
+
+
 class TestDebouncedWidth(unittest.TestCase):
     """Growth-column width grows at once and shrinks with hysteresis."""
 

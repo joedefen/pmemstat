@@ -1090,7 +1090,11 @@ class PmemStat:
     # whole line, only the least-critical trailing entries are truncated while
     # the gateway to the complete list (and the navigation keys) stays visible.
     KEY_LEGEND = ('[?]help [g]roup [u]nits [s]ort [c]pu [K]ill [p]SI'
-                  ' [G]rowth [t]op')
+                  ' [G]rowth')
+    # Appended to the legend only when running as root: 'z' zaps (resets) the
+    # cross-run growth history, which is only meaningful with root's complete
+    # process view (the ledger's coverage depends on it). See zap_history().
+    KEY_LEGEND_ZAP = ' [z]ap'
     # PSS categories folded into the single combined "other" column when -o is
     # not given; the first entry is the rendered slot (the sum is shown there).
     OTHER_KEYS = ('shSYSV', 'shOth', 'stack', 'text')
@@ -1610,6 +1614,39 @@ class PmemStat:
             return
         self._history_finalized = True
         self.history_update(force=True)
+
+    def zap_history(self):
+        """Runtime equivalent of ``--reset-history-now`` (the ``z`` key).
+
+        Forgets every in-memory growth anchor and rewrites the ledger from the
+        current samples, so all later growth annotations and deltas are measured
+        from this moment -- exactly as if the tool had first run just now. The
+        in-memory trackers are reset unconditionally (they are what the live
+        display reads); the ledger write happens only when history saving is
+        enabled, matching :func:`reset_history_now`.
+
+        Root-only: the ledger's coverage depends on seeing every process, so the
+        caller offers the key only when running as root. Returns ``True`` when
+        the ledger was rewritten, ``False`` otherwise.
+        """
+        if os.geteuid() != 0:
+            return False
+        for tracker in self.growth_trackers.values():
+            tracker.reset()
+        for tracker in self.sys_trackers.values():
+            tracker.reset()
+        self.growth_results = {}
+        self.sys_growth = {}
+        # The ledger baselines are being replaced, so never re-seed the (now
+        # fresh) in-memory trackers from a stale ledger.
+        self._history_seeded = True
+        if not (self.history_save and self.growth_samples):
+            return False
+        try:
+            return History.reset_ledger(self.growth_samples, self.sys_samples,
+                                        boot=self.history_boot)
+        except OSError:
+            return False
 
     def growth_text(self, group):
         """Format a group's growth annotation for the current mode."""
@@ -2235,10 +2272,15 @@ class PmemStat:
         """
         if not self.window:
             return
-        # 'HH:MM:SS Tot=' is the leader prefix; offset the legend under the
-        # first digit of the Tot= value.
-        pad = len('00:00:00 Tot=')
-        self.emit(f'{" " * pad}{self.KEY_LEGEND} ', to_head=True,
+        # 'HH:MM:SS Tot=' is the leader prefix; the legend sits under the first
+        # digit of the Tot= value, shifted 5 columns left so the '[z]ap' entry
+        # (added only when root) does not push the trailing live search field
+        # any further right.
+        pad = max(0, len('00:00:00 Tot=') - 5)
+        legend = self.KEY_LEGEND
+        if os.geteuid() == 0:
+            legend += self.KEY_LEGEND_ZAP
+        self.emit(f'{" " * pad}{legend} ', to_head=True,
                   attr=curses.A_DIM, resume=False)
         if self.search_bar.is_active:
             before = self.search_bar.text[:self.search_bar.cursor_pos]
@@ -2265,7 +2307,10 @@ class PmemStat:
         self.emit("-- HELP SCREEN ['?' or ENTER closes Help; Ctrl-C exits ] --",
                    to_head=True, attr=curses.A_BOLD)
         self.spin.show_help_nav_keys(self.window)
-        if os.geteuid() != 0:
+        if os.geteuid() == 0:
+            self.emit('Key: z - zap the growth history (current values become '
+                      'the new baseline)', attr=curses.A_BOLD)
+        else:
             self.emit('Hint: run "sudo pmemstat" to show all PIDs',
                        attr=curses.A_BOLD)
         self.spin.show_help_body(self.window)
@@ -2279,6 +2324,12 @@ class PmemStat:
                 # Start inline search mode
                 self.search_bar.start(self.opts.search)
                 self.window.passthrough_mode = True
+                return regroup
+            if key in (ord('z'), ):
+                # Runtime equivalent of --reset-history-now (root only; the key
+                # is only routed here when root -- see keys_we_handle).
+                if self.zap_history():
+                    self.window.flash('Growth history zapped', duration=1.2)
                 return regroup
             if key in self.spin.keys:
                 self.spin.do_key(key, self.window)
@@ -2341,6 +2392,10 @@ class PmemStat:
                           vals=[False, True], obj=self.opts)
 
         keys_we_handle =  [ord('K'), ord('/'), 27, curses.KEY_ENTER, 10] + list(self.spin.keys)
+        if os.geteuid() == 0:
+            # 'z' zaps the growth history; offered only to root, since the
+            # cross-run ledger's coverage depends on root's process view.
+            keys_we_handle.append(ord('z'))
         self.window = ConsoleWindow(head_line=True, keys=keys_we_handle)
         is_first = True
         was_groupby, regroup = self.opts.groupby, True

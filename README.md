@@ -153,6 +153,11 @@ Explanation of some options and arguments:
 ## Grouping by cgroup v2
 With `-g cgroup` (or cycling `g` in window mode) `pmemstat` groups processes by their **cgroup v2** path (read from `/proc/<pid>/cgroup`), which corresponds to systemd services/scopes and to container sandboxes. Each row is labelled with the cgroup's leaf unit name (e.g. `foo.service`); systemd's `\xNN` escapes are decoded for readability, and a trailing `+` marks a cgroup that also contains descendant cgroups listed on their own rows. If the leaf name matches none of the row's member executables — common with launcher-created app scopes (e.g. niri's `app-niri-fuzzel-*.scope`, which actually host the launched app such as VS Code or Vivaldi) — the row is labelled with the dominant member executable instead; the full cgroup path stays searchable with `/`.
 
+You can select either of two cgroup memory views, `kcharge` and `footprt`:
+
+* `kcharge` answers "what does the kernel charge, and what does `memory.max` / the OOM killer act on?" — the verifiable `systemd-cgtop`/`docker stats` number.
+* `footprt` answers "what does this cgroup really need to keep resident?" — a more stable working-set proxy that does not balloon just because the page cache filled up, and that still accounts for swapped-out pages.
+
 Because `pmemstat` computes **proportional** memory (PSS), the `ptotal` column is *not* the same number that `systemd-cgtop`, `docker stats` or `podman stats` report: those use the kernel's `memory.current`, which is not proportional and over-counts pages shared between processes. For that reason the cgroup groupings keep `ptotal` as a left-hand **reference** column (the tool's namesake proportional total) but do **not** use it as the row total; the row total is the kernel charge, and the grouping chooses which charge: `-g cgroup` shows the derived `footprt`, `-g cgroupCharge` shows `memory.current` (`kcharge`).
 
 The kernel columns, read from `/sys/fs/cgroup/<path>/` in the same units as every other column (`-u`), are a decomposition of that charge. The slices to the left of the total add up to it exactly:
@@ -162,8 +167,8 @@ The kernel columns, read from `/sys/fs/cgroup/<path>/` in the same units as ever
 * `swap` - the kernel swap charge (`footprt` view only; swap is not part of `memory.current`). Distinct from `pswap` (the smaps-proportional swap shown in other modes)
 * `oK` - the remainder, `total - (anon + cache + kmem [+ swap])`; normally just `sock`, it guarantees the row adds up
 * `footprt` / `kcharge` - the row **total** for the active grouping (`cgroup` -> `footprt`; `cgroupCharge` -> `kcharge`):
-    * `footprt` (default) - a derived **footprint**: `memory.current - inactive_file - slab_reclaimable + swap`, a stable "what this cgroup really holds" number; also the growth metric
-    * `kcharge` - `memory.current`, the kernel's own charge (the verifiable number behind `systemd-cgtop`/`docker stats`, and what `memory.max`/the OOM killer act on)
+    * `footprt` (default) - the derived **footprint**: `memory.current - inactive_file - slab_reclaimable + swap`; also the growth metric
+    * `kcharge` - `memory.current`, the kernel's own charge
 * `memPSI%` - `memory.pressure`'s `some avg10`: memory-pressure stall time as a percentage; shown only with `-P` (PSI), beside `cpu%`
 
 So the memory columns of a `-g cgroup` row read `ptotal | anon cache kmem [swap] oK | <total>`: the leftmost value is pmemstat's proportional total (for comparison), and the bracketed slice block sums to the view total on the right. The raw `memory.current` is visible in the `kcharge` view.
@@ -300,14 +305,23 @@ Run `pmemstat --reset-history-now` for the same silent scan but with the ledger
 the new baseline, exactly as if the tool had first run just after this boot, so
 every later growth annotation and delta is measured from that moment onward. It
 likewise implies `--sudo`, ignores the other options and `PMEMSTAT_ARGS`, and
-returns `0` on success / `1` on failure (nothing on success).
+returns `0` on success / `1` on failure (nothing on success). Inside the window,
+pressing `z` (shown as `[z]ap` in the key legend, and only offered when running
+as root) performs the same reset at run time: the in-memory growth anchors are
+cleared and the ledger is rewritten from the current values.
 
 ## Key Legend (Window Mode)
 The top line of the header is an always-visible key legend (dimmed, left-aligned
-so it sits under the leader's `Tot=` value) with the live search field appended
-in bold, so the available keys are in evidence without opening the help screen:
+under the leader's `Tot=` value, shifted 5 columns left so the optional `[z]ap`
+entry below still leaves room for the live search field) with the live search
+field appended in bold, so the available keys are in evidence without opening
+the help screen:
 
-    [?]help [g]roup [u]nits [s]ort [c]pu [K]ill [p]SI [G]rowth [t]op /{regex}
+    [?]help [g]roup [u]nits [s]ort [c]pu [K]ill [p]SI [G]rowth /{regex}
+
+When running as root, `[z]ap` is appended for the run-time history reset:
+
+    [?]help [g]roup [u]nits [s]ort [c]pu [K]ill [p]SI [G]rowth [z]ap /{regex}
 
 `?` remains the gateway to the complete list of keys plus the navigation keys.
 Because `?` is listed first, a narrow terminal truncates only the least-critical
@@ -324,6 +338,7 @@ j, DOWN:  down one row           $, END:  last row
   Ctrl-u:  half-page up     Ctrl-b, PPAGE:  page up
   Ctrl-d:  half-page down     Ctrl-f, NPAGE:  page down
 ──────────────────────────────────────────────────────────────────────────────
+Key: z - zap the growth history (current values become the new baseline)
 Type keys to alter choice:
 ? - help screen····················  normal help
 K - kill mode······················  off ON
