@@ -229,12 +229,18 @@ class GrowthTracker:
         self.last_seen = None    # monotonic time of the last fed sample
 
     def reset(self):
-        """Forget all history (used on regroup)."""
+        """Forget all growth history (used by zap_history).
+
+        ``last_seen`` is deliberately preserved: it is pruning bookkeeping, not
+        history.  Clearing it left every reset tracker with a ``None`` timestamp
+        that :meth:`PmemStat.prune_growth_trackers` then subtracted from
+        ``now``, crashing with ``float - NoneType`` for keys that were no longer
+        being fed.
+        """
         self.t0 = None
         self.peak = None
         self.snaps = []
         self._next_age = self.BASE
-        self.last_seen = None
 
     def seed(self, now, base_val, peak, interval):
         """Pre-load a baseline carried over from a previous run's ledger.
@@ -1499,7 +1505,8 @@ class PmemStat:
     def prune_growth_trackers(self, now):
         """Drop trackers whose key has not been seen for GROWTH_PRUNE_SECS."""
         stale = [skey for skey, tracker in self.growth_trackers.items()
-                 if now - tracker.last_seen > self.GROWTH_PRUNE_SECS]
+                 if tracker.last_seen is None
+                 or now - tracker.last_seen > self.GROWTH_PRUNE_SECS]
         for skey in stale:
             del self.growth_trackers[skey]
 

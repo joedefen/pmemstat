@@ -438,6 +438,14 @@ class TestGrowthTrackerSeed(unittest.TestCase):
         tracker.seed(1000.0, 300, 500, 100.0)
         self.assertEqual(tracker.last_seen, 1000.0)
 
+    def test_reset_preserves_last_seen(self):
+        """reset() clears growth history but keeps the pruning timestamp."""
+        tracker = GrowthTracker()
+        tracker.seed(1000.0, 300, 500, 100.0)
+        tracker.reset()
+        self.assertIsNone(tracker.t0)
+        self.assertEqual(tracker.last_seen, 1000.0)
+
 
 class TestSaveHistoryNow(unittest.TestCase):
     """``--save-history-now`` writes the ledger silently, exit code = status."""
@@ -804,6 +812,33 @@ class TestZapHistory(unittest.TestCase):
              mock.patch.object(main_module.History, 'reset_ledger',
                                return_value=False):
             self.assertFalse(pm.zap_history())
+
+    def test_zap_then_prune_does_not_crash_on_stale_trackers(self):
+        """Regression: reset() used to clear ``last_seen``, so the next prune
+        computed ``now - None`` and raised ``TypeError`` for keys that were no
+        longer being fed (the reported ``float - NoneType`` crash)."""
+        pm = self._pm()
+        pm.growth_samples = {'exe': {'a': 1}}
+        pm.sys_samples = {'Used': 2}
+        pm.history_boot = 'b'
+        tracker = GrowthTracker()
+        tracker.seed(1000.0, 300, 500, 100.0)  # last_seen = 1000.0
+        pm.growth_trackers = {('exe', 'a'): tracker}
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+             mock.patch.object(main_module.History, 'reset_ledger',
+                               return_value=True):
+            self.assertTrue(pm.zap_history())
+        self.assertIsNone(tracker.t0)
+        # 'a' is never fed again, so its stale tracker must prune cleanly.
+        pm.prune_growth_trackers(1000.0 + pm.GROWTH_PRUNE_SECS + 1)
+        self.assertEqual(pm.growth_trackers, {})
+
+    def test_prune_drops_tracker_with_no_last_seen(self):
+        """A tracker with no ``last_seen`` is dropped, never subtracted from."""
+        pm = self._pm()
+        pm.growth_trackers = {('exe', 'a'): GrowthTracker()}
+        pm.prune_growth_trackers(123.0)  # must not raise
+        self.assertEqual(pm.growth_trackers, {})
 
 
 class TestKeyLegend(unittest.TestCase):
