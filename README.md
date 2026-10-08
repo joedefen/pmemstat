@@ -7,6 +7,14 @@
 
 > **Note (v4.0.0 — breaking change):** `pmemstat` no longer re-runs itself as root automatically; in 3.x that was the default. Use `pmemstat --sudo` (or `PMEMSTAT_ARGS=--sudo`) for the full, all-process view.
 
+> **Run `pmemstat` as root if you can. `sudo pmemstat` (or `--sudo`) is strongly recommended; an unprivileged (`-U`) run is a degraded, partial view, not a smaller-but-equivalent one:**
+> 1. **You see only your own processes.** Every other user's (and most of root's) memory and CPU is missing, so totals understate real usage; the `PIDs=shown/total` count makes the gap explicit.
+> 2. **System-wide header numbers degrade.** The unaccounted residual `Oth` cannot be split into its kernel (`OthK`) and user (`OthU`) parts — it silently absorbs every process you cannot read, so it is inflated and misleading.
+> 3. **Growth / leak monitoring is crippled.** The cross-run, per-boot history is root-only, so an unprivileged run measures growth only from *this run's start* (no "since boot" baseline), and the `z` zap reset is unavailable.
+> 4. **Kill mode reaches only your own processes.**
+>
+> Use `-U` only when you deliberately want a user-only view (or cannot elevate); otherwise elevate — the tool then works as designed.
+
 
 # pmemstat - Proportional Memory Status
 
@@ -52,7 +60,7 @@ In short: reach for `top`/`htop` when you want a fast, broad system overview, an
 * `pmemstat` runs as the invoking user by default and never silently escalates to root.
 * For a persistent set of default flags, export `PMEMSTAT_ARGS` with a shell-quoted argument string, e.g. `export PMEMSTAT_ARGS='--sudo --psi --loop 3 -s name'`. It is tokenized like a command line and prepended to the real arguments, so anything typed on the command line still takes precedence.
 * When `--sudo` is requested but elevation cannot happen (no terminal for a `sudo` prompt and sudo not pre-authorized, or the install is not importable by the isolated interpreter), `pmemstat` fails with a clear message and a non-zero exit instead of silently downgrading to a user-only view. It never hangs waiting for a password.
-* To force user-only operation and disable auto-elevation, use the `--run-as-user` or `-U` option.
+* To force user-only operation and disable auto-elevation, use the `--user` or `-U` option. A non-root run shows a dimmed `--user` marker on the header's first line so the degraded (partial) view is always obvious.
 * `pmemstat` depends on `console-window` (the curses UI), pinned to an **exact version** on purpose. Installing `pmemstat` pulls the pinned version automatically; do not "upgrade" `console-window` independently.
 
 See the **Quick Start** above for the basic install. For system-wide/root or non-`pipx` installs, see **Alternative Installation Options** below.
@@ -94,7 +102,8 @@ options:
   -t, --top-pct TOP_PCT
                         report group contributing to top pct of ptotal
                         [dflt=100]
-  -U, --run-as-user     run as user (NOT as root)
+  -U, --user            run as user (NOT as root); marks the header with a
+                        dimmed "--user" so the degraded view is obvious
   --sudo                re-run self as root via sudo (or set
                         PMEMSTAT_ARGS=--sudo)
   --save-history-now    save the current stats to the history ledger and exit
@@ -135,7 +144,7 @@ Explanation of some options and arguments:
     * it also gates the growth annotation: a row is annotated only if its absolute growth (in KB) is at least `-k`
 * `--growth-style {off,both,growth,rate}` - the inline growth ("leak") annotation for the groups that are growing (default `off`); in window mode the `G` key cycles it. The baseline is geometric and self-forgetting, so startup bursts age out. See "Memory growth (leak) detection" below.
 * `--growth-top {all,10}` - annotate only the top-N growers by the displayed metric (default `all` = no cap); in window mode the `t` key cycles `all`/`10`
-* `--no-growth-history` / `--dont-save-growth-history` - opt out of (respectively) seeding growth from the cross-run ledger and writing it; `PMEMSTAT_NO_HISTORY` disables both. See "Memory growth (leak) detection" below.
+* `--no-growth-history` / `--dont-save-growth-history` - opt out of (respectively) seeding growth from the cross-run ledger and writing it; `PMEMSTAT_NO_HISTORY` disables both. A non-root run (`-U`) asserts both regardless, since it cannot produce or interpret system-wide baselines. See "Memory growth (leak) detection" below.
 * `-W, --no-window` - report once to the terminal instead of the interactive curses window (with `-l` it loops there too). Window mode (the default) forces `-t 100`, `-L 100` and off `-D`; `-W` forces `-C` (no CPU).
 * `pids` - the positional arguments may be pids (i.e., numbers) or the names of executables (as shown by `-gexe`)
 
@@ -200,12 +209,31 @@ cpuPSI%    0.00    0.03    0.00            -       -       -
      0.1      39      19      13      70   2x konsole
 ```
 
+This example is a **root** (`--sudo`) run, so the unaccounted memory is shown
+split as `OthK`/`OthU`; a non-root run (the default, e.g. `-U`) shows a single
+`Oth` instead (see the leader-line notes below).
+
 In the default refreshed window loop, we see
 * a **leader line** with:
     * the current time
     * from `/proc/meminfo`: MemTotal (Tot), MemAvailable (Avail), Used (Tot-Avail) and Shmem+tmpfs (Sh+Tmp).
-    * 'Oth' is the unaccounted for memory belonging to the kernel, reserve,
-       drivers, imprecision, etc.; `Oth = Tot - Avail - Tmp - ptotal`.
+    * the unaccounted-for memory, i.e. whatever is neither in `ptotal` (the sum
+       of the proportional process totals) nor in `Sh+Tmp`:
+       `Oth = Tot - Avail - Tmp - ptotal`.  This is memory belonging to the
+       kernel, reserve, drivers, imprecision, etc., plus -- when **not** root --
+       every process whose `smaps` you are not permitted to read.
+       * When running as **root** (e.g. `--sudo`) every process is accounted for,
+         so `Oth` is split into two fields:
+           * **OthK** = `SUnreclaim + KernelStack + PageTables` -- memory the
+             kernel itself owns (read straight from `/proc/meminfo`, so accurate
+             regardless of privilege)
+           * **OthU** = `Oth - OthK` -- the remainder (userland other than
+             `ptotal`, plus reserve/imprecision)
+       * When **not root** (`-U`, or the default without `--sudo`) only your own
+         processes are in `ptotal`, so other users' memory is folded into the
+         residual; splitting it there would mislabel that memory as userland
+         `OthU`, so a single **Oth** is shown instead.  (The `PIDs=shown/total`
+         count on the same line is the clue that `ptotal` is incomplete.)
        * Features such as BTRFS, ZFS, zRAM, unattached SysV Shared Memory, etc., can cause 'Oth' to be significant;
          that is, MemAvail is often greatly understated (and 'Oth' is overstated).  As a test (not intended for regular use), try:
          `sudo sync; sudo sh -c "echo 3 > /proc/sys/vm/drop_caches"`; if that reduces `Oth` significantly,
@@ -252,12 +280,16 @@ groups that are growing, making slow leaks visible without scrolling history:
   mode shows a per-day projection (`/d`, e.g. `3.5G/d`) once the baseline
   interval is at least a minute, and `growth` shows just the size.
 * The baseline comes from a **per-boot history ledger** (see "Updating History
-  from Cron / Startup") that `pmemstat` writes as it runs and on exit, so growth
-  is measured from the group's **first observation this boot** — possibly an
-  earlier run — rather than merely since this invocation began; a reboot resets
-  it. Pass `--no-growth-history` to instead measure only from this run's start,
-  `--dont-save-growth-history` to stop writing the ledger, or
-  `PMEMSTAT_NO_HISTORY` to disable both.
+  from Cron / Startup") that root runs of `pmemstat` write as they run and on
+  exit, so growth is measured from the group's **first observation this boot** —
+  possibly an earlier run — rather than merely since this invocation began; a
+  reboot resets it. The ledger holds system-wide samples, so it is **root-only**:
+  a non-root run (`-U`) never reads or writes it and instead measures growth
+  from this run's start — a root-written baseline compared against a user-only
+  view would be meaningless, and a user-only write would corrupt the baseline a
+  later root run trusts. Pass `--no-growth-history` to likewise measure only from
+  this run's start even as root, `--dont-save-growth-history` to stop writing the
+  ledger, or `PMEMSTAT_NO_HISTORY` to disable both.
 * Within a run the baseline is **geometric and self-forgetting**: a group's
   first 16 seconds never count, so startup bursts age out. Growth is clamped at
   zero (a reduction is not reported).
@@ -269,16 +301,17 @@ groups that are growing, making slow leaks visible without scrolling history:
   `-g cgroup`, or `kcharge` for `-g cgroupCharge`; see "Grouping by cgroup v2")
   rather than proportional PSS.
 * A system-wide line is shown beneath the leader (same mode) and closes the
-  accounting identity `ΔUsed = ΔTOTALS(ptotal) + Δ(Sh+Tmp) + ΔOthK + ΔOthU`,
-  where `OthK = SUnreclaim + KernelStack + PageTables` and `OthU` is the
-  remainder, so kernel/driver growth (`ΔOthK`/`ΔOthU`) is separable from
-  userspace (`ΔTOTALS`) and tmpfs (`Δ(Sh+Tmp)`). The shared baseline interval
-  is printed once, as a trailing `[1h58m]`, in **every** growth mode
-  (`both`/`growth`/`rate`); the brackets distinguish it from the last
-  (`ΔOthU`) value and, in `rate` mode, give the window the `/d` projection was
-  drawn from.
-* Caveats: `Oth*` are only meaningful when run as root; when not root the `OthU`
-  remainder also includes other users' memory.
+  accounting identity `ΔUsed = ΔTOTALS(ptotal) + Δ(Sh+Tmp) + ΔOth`, where `Oth`
+  is the residual described in the leader-line notes above. As **root** — where
+  every process is accounted for — the residual is split into `ΔOthK`/`ΔOthU`,
+  with `OthK = SUnreclaim + KernelStack + PageTables`, so kernel/driver growth
+  (`ΔOthK`) is separable from userspace (`ΔTOTALS`) and tmpfs (`Δ(Sh+Tmp)`);
+  when **not** root (e.g. `-U`) the line shows a single `ΔOth` instead, matching
+  the leader, because otherwise `ΔOthU` would silently include other users'
+  memory. The shared baseline interval is printed once, as a trailing `[1h58m]`,
+  in **every** growth mode (`both`/`growth`/`rate`); the brackets distinguish it
+  from the last value and, in `rate` mode, give the window the `/d` projection
+  was drawn from.
 
 ## Updating History from Cron / Startup
 Run `pmemstat --save-history-now` to perform a single **silent** scan and write
@@ -288,7 +321,9 @@ failure (with an explanation on stderr; nothing on success). It implies
 cron or a system-startup unit, e.g. `pmemstat --save-history-now`. The ledger is
 per invoking user (`/tmp/pmemstat-<uid>`, or `PMEMSTAT_STATE_DIR` if set), so run
 it as the user whose history you want to keep; a root cron job without
-`SUDO_UID` updates the root ledger instead.
+`SUDO_UID` updates the root ledger instead. Only root runs use the ledger:
+non-root (`-U`) runs never read or write it (see "Memory growth (leak)
+detection" above).
 
 Run `pmemstat --reset-history-now` for the same silent scan but with the ledger
 **replaced** rather than merged: the current system and per-group values become

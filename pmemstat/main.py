@@ -364,7 +364,7 @@ def seed_sys_from_baselines(trackers, baselines, samples, now_mono, now_wall):
     """Seed the flat system trackers from ledger system baselines.
 
     Like :func:`seed_from_baselines` but for the unscoped system metrics
-    (``Used``/``TOTALS``/``ShTmp``/``OthK``/``OthU``): ``trackers`` and
+    (``Used``/``TOTALS``/``ShTmp``/``Oth``/``OthK``/``OthU``): ``trackers`` and
     ``samples`` are flat ``{key: value}`` maps and ``baselines`` is
     ``{key: {'base': kb, 'base_ts': iso}}``.  Returns the set of seeded keys.
     """
@@ -1101,6 +1101,11 @@ class PmemStat:
     # cross-run growth history, which is only meaningful with root's complete
     # process view (the ledger's coverage depends on it). See zap_history().
     KEY_LEGEND_ZAP = ' [z]ap'
+    # Shown in place of the legend line's leading pad when running degraded
+    # (not root): a non-root run omits other users' processes, so the first
+    # header line is stamped with the '--user' flag that selects this mode. It
+    # shares the legend's dim attribute so it reads as status, not as a key.
+    KEY_LEGEND_USER = '--user'
     # PSS categories folded into the single combined "other" column when -o is
     # not given; the first entry is the rendered slot (the sum is shown there).
     OTHER_KEYS = ('shSYSV', 'shOth', 'stack', 'text')
@@ -1147,7 +1152,7 @@ class PmemStat:
         self._last_growth_mode = None
         # System-wide growth trackers (fed each loop; see update_growth).
         self.sys_trackers = {key: GrowthTracker() for key in (
-            'Used', 'TOTALS', 'ShTmp', 'OthK', 'OthU')}
+            'Used', 'TOTALS', 'ShTmp', 'Oth', 'OthK', 'OthU')}
         self.sys_growth = {}
         # Cross-run growth ledger.  The boot id is captured once (it is stable
         # for the life of the process); growth_samples is refreshed every loop by
@@ -1160,6 +1165,17 @@ class PmemStat:
             opts, 'no_growth_history', False)
         self.history_save = not no_history and not getattr(
             opts, 'dont_save_growth_history', False)
+        # The ledger holds system-wide samples, which only root can produce (and
+        # only a root run's coverage is a consistent sample space across runs).
+        # Non-root sees just one user's processes, so seeding from a
+        # root-written baseline -- or writing a user-only baseline into the same
+        # per-user ledger for a later root run to trust -- would mix two
+        # incompatible sample spaces.  Non-root therefore ignores the ledger
+        # entirely and measures growth from this run's start only (the same
+        # behaviour as --no-growth-history).
+        if os.geteuid() != 0:
+            self.history_use = False
+            self.history_save = False
         self.history_boot = History.current_boot()
         self.update_secs = History.update_secs()
         self.growth_samples = {}
@@ -1543,6 +1559,7 @@ class PmemStat:
             'Used': total - avail,
             'TOTALS': grand_summary['ptotal'],
             'ShTmp': sh_tmp,
+            'Oth': oth,
             'OthK': othk,
             'OthU': oth - othk,
         }
@@ -1711,16 +1728,19 @@ class PmemStat:
         return current, 0
 
     def format_sys_growth(self):
-        """One line: system growth for Used/TOTALS/Sh+Tmp/OthK/OthU.
+        """One line: system growth for Used/TOTALS/Sh+Tmp and the residual.
 
-        Values (non-negative, so no ``+``) are left-justified to a common width
-        for the current mode.  The shared baseline interval is shown once, as a
-        trailing ``[interval]`` in every growth mode (``both``/``growth``/
-        ``rate``).  The brackets make it clear that the age applies to all five
-        deltas (all five trackers share one baseline) rather than looking like
-        an attribute of the last (``OthU``) field, and it gives the context
-        needed to judge the numbers -- in particular a ``rate`` projection,
-        which is otherwise silent about the window it extrapolates from.
+        As root (where every process is accounted for) the residual is split
+        into ``OthK``/``OthU``; otherwise it is shown as a single ``Oth`` to
+        match the leader line (see :meth:`oth_text`).  Values (non-negative, so
+        no ``+``) are left-justified to a common width for the current mode.
+        The shared baseline interval is shown once, as a trailing
+        ``[interval]`` in every growth mode (``both``/``growth``/``rate``).
+        The brackets make it clear that the age applies to all the deltas (all
+        trackers share one baseline) rather than looking like an attribute of
+        the last field, and it gives the context needed to judge the numbers --
+        in particular a ``rate`` projection, which is otherwise silent about the
+        window it extrapolates from.
         """
         def value_of(key):
             result = self.sys_growth.get(key)
@@ -1735,7 +1755,10 @@ class PmemStat:
                 return f'{human_kb(per_day)}/d'
             return str(human_kb(growth))
 
-        keys = ('Used', 'TOTALS', 'ShTmp', 'OthK', 'OthU')
+        if os.geteuid() == 0:
+            keys = ('Used', 'TOTALS', 'ShTmp', 'OthK', 'OthU')
+        else:
+            keys = ('Used', 'TOTALS', 'ShTmp', 'Oth')
         values = {key: value_of(key) for key in keys}
         width = max(len(text) for text in values.values())
         self.sys_growth_width, self._sysgrow_small = self._debounced_width(
@@ -1927,6 +1950,32 @@ class PmemStat:
         assert not keys, f'ALERT: cannot get vitals ({keys}) from {meminfofile}'
         return meminfoKB
 
+    @staticmethod
+    def oth_text(meminfoKB, appKB):
+        """The leader line's unaccounted-memory field(s).
+
+        ``Oth`` is whatever ``Tot - Avail - Tmp - ptotal`` leaves out: kernel,
+        reserve, drivers, imprecision, and -- when not root -- every process
+        whose ``smaps`` cannot be read.  Because ``ptotal`` is only complete
+        when every process is accounted for, the split into kernel memory
+        (``OthK = SUnreclaim + KernelStack + PageTables``) and the remainder
+        (``OthU``) is only shown when running as root; otherwise the residual
+        also absorbs other users' processes, so a single ``Oth`` is shown
+        rather than mislabelling that memory as userland ``OthU``.
+        """
+        othk = (meminfoKB['SUnreclaim'] + meminfoKB['KernelStack']
+                + meminfoKB['PageTables'])
+        if appKB:
+            other = (meminfoKB['MemTotal'] - appKB
+                     - meminfoKB['MemAvailable'] - meminfoKB['Shmem'])
+            if os.geteuid() == 0:
+                return (f' OthK={human(othk*1024)}'
+                        f' OthU={human((other-othk)*1024)}')
+            return f' Oth={human(other*1024)}'
+        if othk:
+            return f' OthK={human(othk*1024)}'
+        return ''
+
     def get_vmstat(self):
         """Get most vital stats from /proc/vmstat."""
         def make_ns(now):
@@ -1992,15 +2041,7 @@ class PmemStat:
             leader += f' Tot={human(meminfoKB["MemTotal"]*1024)}'
             leader += f' Used={human(used*1024)}'
             leader += f' Avail={human(meminfoKB["MemAvailable"]*1024)}'
-            othk = (meminfoKB["SUnreclaim"] + meminfoKB["KernelStack"]
-                    + meminfoKB["PageTables"])
-            if appKB:
-                other = (meminfoKB["MemTotal"] - appKB
-                         - meminfoKB["MemAvailable"] - meminfoKB["Shmem"])
-                leader += f' OthK={human(othk*1024)}'
-                leader += f' OthU={human((other-othk)*1024)}'
-            elif othk:
-                leader += f' OthK={human(othk*1024)}'
+            leader += self.oth_text(meminfoKB, appKB)
             leader += f' Sh+Tmp={human(meminfoKB["Shmem"]*1024)}'
             if len(wanted_prcs) < total_user_pids:
                 leader += f' PIDs={len(wanted_prcs)}/{total_user_pids}'
@@ -2103,16 +2144,25 @@ class PmemStat:
                     percent = prc.refresh_cpu()
                 if prc.kernel:
                     kernel_cpu += percent
-                    total_kernel_pids += 1
                     self.kernel_prcs.append(prc)
-                else:
-                    total_user_pids += 1
 
         for prc in prcs:
             prc.prc_pid()
             pid = prc.pid
             ## if str(pid) in opts.pids:
                 ## print(f'DBDB pid={pid} dir={vars(prc)}')
+
+            # Count only *after* classification: prc_pid() -> get_cmdline() is
+            # what sets prc.kernel for kernel threads (empty cmdline).  Counting
+            # here, rather than in the CPU block above, keeps the denominator
+            # correct on the very first loop -- fresh ProcMem objects default to
+            # kernel=False "until proven otherwise" -- and makes it independent
+            # of whether CPU reporting is on (it is forced off by -W, which used
+            # to leave the count at 0).  See the PIDs=shown/total leader field.
+            if prc.kernel:
+                total_kernel_pids += 1
+            else:
+                total_user_pids += 1
 
             if prc.wanted:
                 wanted_prcs[pid] = prc
@@ -2274,8 +2324,11 @@ class PmemStat:
 
         The legend is left-aligned so '[?]help' sits above the first digit of
         the leader's 'Tot=' value; the search field is appended after it and is
-        drawn non-dimmed to signal that it is live. No-op outside window mode,
-        where there are no interactive keys.
+        drawn non-dimmed to signal that it is live. When not running as root the
+        leftmost pad is filled with a dimmed '--user' marker (the flag that
+        selects the degraded, own-processes-only view) so it is always obvious
+        the report is partial. No-op outside window mode, where there are no
+        interactive keys.
         """
         if not self.window:
             return
@@ -2287,7 +2340,13 @@ class PmemStat:
         legend = self.KEY_LEGEND
         if os.geteuid() == 0:
             legend += self.KEY_LEGEND_ZAP
-        self.emit(f'{" " * pad}{legend} ', to_head=True,
+            lead = ' ' * pad
+        else:
+            # Degraded (non-root) run: stamp the header's leftmost pad with the
+            # '--user' flag. It is padded to the pad width so it fills the blank
+            # leading space without shifting the legend itself.
+            lead = self.KEY_LEGEND_USER.ljust(pad)
+        self.emit(f'{lead}{legend} ', to_head=True,
                   attr=curses.A_DIM, resume=False)
         if self.search_bar.is_active:
             before = self.search_bar.text[:self.search_bar.cursor_pos]
@@ -2759,8 +2818,9 @@ def main():
             help='max shown command length [dflt=36 if not -w]')
     parser.add_argument('-t', '--top-pct', type=int, default=100,
             help='report group contributing to top pct of ptotal [dflt=100]')
-    parser.add_argument('-U', '--run-as-user', action='store_true',
-            help='run as user (NOT as root)')
+    parser.add_argument('-U', '--user', action='store_true',
+            help='run as user (NOT as root); marks the header with a dimmed '
+                 '"--user" so the degraded view is obvious')
     parser.add_argument('--sudo', action='store_true',
             help='re-run self as root via sudo '
                  '(or set PMEMSTAT_ARGS=--sudo)')
@@ -2807,7 +2867,7 @@ def main():
     if opts.reset_history_now:
         return reset_history_now(opts)
 
-    if not opts.run_as_user and os.geteuid() != 0:
+    if not opts.user and os.geteuid() != 0:
         if opts.sudo:
             # Opted in explicitly: elevation failure is fatal (a silent
             # downgrade scrolls off-screen and hides that the data is partial).

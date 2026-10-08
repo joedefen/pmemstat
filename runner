@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-# runner.py
+# runner
 # Located in the top-level <svr pmemstat> directory
+#
+# Developer convenience wrapper for exercising the *working source tree*
+# (rather than an installed copy of pmemstat).
+#
+# By default this script re-execs itself as root via sudo, so that every
+# process is visible.  Pass -U/--user to stay as the invoking user instead.
 
 import os
 import pwd
 import sys
 
-# Add the project directory to PYTHONPATH for editable install support
+# Add the project directory to sys.path for editable install support.  This
+# must stay ahead of any installed copy so that "from pmemstat import main"
+# always loads the source under test, never a pip-installed release.
 project_dir = os.path.dirname(os.path.abspath(__file__))
 if project_dir not in sys.path:
     sys.path.insert(0, project_dir)
@@ -16,17 +24,23 @@ def add_invoking_users_site_packages():
     """Make a ``pip install --user`` dependency visible under ``sudo ./runner``.
 
     Root's interpreter does not search the invoking user's per-user
-    site-packages, so running this checkout with plain ``sudo`` fails to
-    import the pinned ``console-window`` dependency that was installed with
-    ``--user`` (see the ``externally-managed-environment`` PEP 668 error when
-    trying to install it system-wide instead).
+    site-packages, so running this checkout as root fails to import the pinned
+    ``console-window`` dependency that was installed with ``--user`` (see the
+    ``externally-managed-environment`` PEP 668 error when trying to install it
+    system-wide instead).
 
-    This is only reached when the developer *explicitly* runs
-    ``sudo ./runner``; it is NOT used by the installed ``pmemstat`` entry
-    point, whose ``--sudo`` path deliberately never injects a
-    user-writable import path into root.  Bridging the original user's
-    site-packages here is therefore a deliberate, explicit developer
-    convenience rather than an automatic escalation.
+    This is only reached when this script is running as root -- either the
+    developer ran ``sudo ./runner`` directly, or the default self-elevation in
+    :func:`maybe_elevate` re-exec'd it via sudo.  It is NOT used by the
+    installed ``pmemstat`` entry point, whose ``--sudo`` path deliberately
+    never injects a user-writable import path into root.  Bridging the
+    original user's site-packages here is therefore a deliberate, explicit
+    developer convenience rather than an automatic escalation.
+
+    The directories are *appended* (not prepended) so that the project's own
+    source tree keeps precedence: prepending them lets an installed
+    ``pmemstat`` package shadow the working copy, silently running an old
+    release instead of the changes under test.
     """
     if os.geteuid() != 0:
         return
@@ -43,10 +57,57 @@ def add_invoking_users_site_packages():
             os.path.join(user_home, '.local', 'lib', 'python3', 'site-packages'),
     ):
         if os.path.isdir(candidate) and candidate not in sys.path:
-            sys.path.insert(0, candidate)
+            sys.path.append(candidate)
+
+
+def user_mode_requested(args):
+    """True if ``-U``/``--user`` was given (user mode: do NOT elevate).
+
+    Also recognizes ``-U`` inside a bundled short-option cluster such as
+    ``-UD``; ``U`` is the only short option that selects user mode.
+    """
+    return any(
+        arg == '--user'
+        or (arg.startswith('-') and not arg.startswith('--') and 'U' in arg)
+        for arg in args
+    )
+
+
+def maybe_elevate():
+    """Re-exec this script as root via sudo unless user mode was requested.
+
+    Running the working tree as root shows every process.  Elevating through
+    this wrapper (instead of handing the *installed* ``pmemstat`` to sudo, or
+    letting ``pmemstat --sudo`` re-exec an isolated interpreter) preserves the
+    project directory on ``sys.path`` and bridges the invoking user's
+    ``--user`` site-packages (see :func:`add_invoking_users_site_packages`), so
+    both the source under test and its pinned dependency are the ones that run.
+
+    On success the process is replaced and this function never returns.  If
+    ``sudo`` cannot be executed at all, it warns and falls back to a user-only
+    run rather than aborting.
+    """
+    if os.geteuid() == 0:
+        return
+    args = sys.argv[1:]
+    if user_mode_requested(args):
+        return
+    cmd = ['sudo']
+    # sudo resets the environment, so re-assert PMEMSTAT_ARGS (if any) on the
+    # command line; otherwise a persistent option set there would be lost.
+    pmemstat_args = os.environ.get('PMEMSTAT_ARGS')
+    if pmemstat_args:
+        cmd.append('PMEMSTAT_ARGS=' + pmemstat_args)
+    cmd += [sys.executable, os.path.abspath(__file__)] + args
+    try:
+        os.execvp('sudo', cmd)
+    except OSError as exc:
+        print(f'pmemstat: could not elevate to root via sudo: {exc}; '
+              'continuing as user (pass -U to silence this)', file=sys.stderr)
 
 
 add_invoking_users_site_packages()
+maybe_elevate()
 
 # Import and run the main module directly
 if __name__ == '__main__':

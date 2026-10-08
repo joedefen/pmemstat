@@ -478,7 +478,7 @@ class TestSaveHistoryNow(unittest.TestCase):
 
     def test_elevate_or_exit_is_fatal_on_failure(self):
         err = io.StringIO()
-        opts = SimpleNamespace(sudo=True, run_as_user=False)
+        opts = SimpleNamespace(sudo=True, user=False)
         with mock.patch.object(main_module, 'rerun_module_as_root',
                                return_value='not-importable'), \
              mock.patch('sys.stderr', err):
@@ -488,7 +488,7 @@ class TestSaveHistoryNow(unittest.TestCase):
         self.assertIn('FATAL', err.getvalue())
 
     def test_elevate_or_exit_noop_when_already_root(self):
-        opts = SimpleNamespace(sudo=True, run_as_user=False)
+        opts = SimpleNamespace(sudo=True, user=False)
         with mock.patch.object(main_module, 'rerun_module_as_root',
                                return_value=None) as rerun:
             main_module._elevate_or_exit(opts, [])  # must not raise/exit
@@ -709,6 +709,7 @@ class TestUpdateGrowthSeeding(unittest.TestCase):
     def test_baselines_consulted_exactly_once(self):
         opts = SimpleNamespace(units='MB', debug=0, groupby='exe')
         pm = PmemStat(opts)
+        pm.history_use = True   # non-root forces this off; test the seeding path
         pm.groups = {}
         baselines = {'exe': {'a': {'base': 100}}}
         with mock.patch.object(main_module.History, 'baselines',
@@ -721,7 +722,7 @@ class TestUpdateGrowthSeeding(unittest.TestCase):
 
 
 class TestHistoryFlags(unittest.TestCase):
-    """The two CLI flags map onto ``history_use`` / ``history_save``."""
+    """Flag mapping under root; non-root always ignores the ledger."""
 
     @staticmethod
     def _pm(**over):
@@ -729,23 +730,34 @@ class TestHistoryFlags(unittest.TestCase):
         fields.update(over)
         return PmemStat(SimpleNamespace(**fields))
 
+    def _root_pm(self, **over):
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0):
+            return self._pm(**over)
+
     def test_defaults_enable_both(self):
-        pm = self._pm()
+        pm = self._root_pm()
         self.assertTrue(pm.history_use)
         self.assertTrue(pm.history_save)
 
     def test_no_growth_history_disables_use_only(self):
-        pm = self._pm(no_growth_history=True)
+        pm = self._root_pm(no_growth_history=True)
         self.assertFalse(pm.history_use)
         self.assertTrue(pm.history_save)
 
     def test_dont_save_growth_history_disables_save_only(self):
-        pm = self._pm(dont_save_growth_history=True)
+        pm = self._root_pm(dont_save_growth_history=True)
         self.assertTrue(pm.history_use)
         self.assertFalse(pm.history_save)
 
     def test_env_disables_both(self):
         with mock.patch.dict(os.environ, {HISTORY_ENV_DISABLE: '1'}):
+            pm = self._root_pm()
+        self.assertFalse(pm.history_use)
+        self.assertFalse(pm.history_save)
+
+    def test_non_root_forces_both_off(self):
+        """-U cannot produce system-wide samples, so it never uses the ledger."""
+        with mock.patch.object(main_module.os, 'geteuid', return_value=1000):
             pm = self._pm()
         self.assertFalse(pm.history_use)
         self.assertFalse(pm.history_save)
@@ -775,6 +787,7 @@ class TestZapHistory(unittest.TestCase):
     def test_root_resets_memory_and_ledger(self):
         """Root: every tracker is reset and reset_ledger gets the samples."""
         pm = self._pm()
+        pm.history_save = True   # non-root forces this off; test the write path
         pm.growth_samples = {'exe': {'a': 1}}
         pm.sys_samples = {'Used': 2}
         pm.history_boot = 'b'
@@ -807,6 +820,7 @@ class TestZapHistory(unittest.TestCase):
     def test_root_ledger_failure_returns_false(self):
         """A refused ledger write reports failure (memory is still reset)."""
         pm = self._pm()
+        pm.history_save = True   # non-root forces this off; test the write path
         pm.growth_samples = {'exe': {'a': 1}}
         with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
              mock.patch.object(main_module.History, 'reset_ledger',
@@ -818,6 +832,7 @@ class TestZapHistory(unittest.TestCase):
         computed ``now - None`` and raised ``TypeError`` for keys that were no
         longer being fed (the reported ``float - NoneType`` crash)."""
         pm = self._pm()
+        pm.history_save = True   # non-root forces this off; test the write path
         pm.growth_samples = {'exe': {'a': 1}}
         pm.sys_samples = {'Used': 2}
         pm.history_boot = 'b'
@@ -871,6 +886,35 @@ class TestKeyLegend(unittest.TestCase):
         self.assertNotIn('[z]ap', self._legend(1))
 
 
+class TestOthText(unittest.TestCase):
+    """The residual ``Oth`` is split only when running as root."""
+
+    MIB = 1024
+    MEMINFO = {
+        'MemTotal': 4096 * MIB,
+        'MemAvailable': 3000 * MIB,
+        'Shmem': 96 * MIB,
+        'SUnreclaim': 80 * MIB,
+        'KernelStack': 10 * MIB,
+        'PageTables': 10 * MIB,
+    }
+    # othk = 100M; other = 4096 - 500 - 3000 - 96 = 500M; OthU = 400M
+    APP_KB = 500 * MIB
+
+    def _text(self, euid, app_kb):
+        with mock.patch.object(main_module.os, 'geteuid', return_value=euid):
+            return PmemStat.oth_text(self.MEMINFO, app_kb)
+
+    def test_root_splits_othk_and_othu(self):
+        self.assertEqual(self._text(0, self.APP_KB), ' OthK=100M OthU=400M')
+
+    def test_non_root_shows_single_oth(self):
+        self.assertEqual(self._text(1000, self.APP_KB), ' Oth=500M')
+
+    def test_no_app_scan_shows_othk_only(self):
+        self.assertEqual(self._text(0, 0), ' OthK=100M')
+
+
 class TestDebouncedWidth(unittest.TestCase):
     """Growth-column width grows at once and shrinks with hysteresis."""
 
@@ -921,6 +965,31 @@ class TestRateFloor(unittest.TestCase):
         """The system line shows no /d until the rate floor is reached."""
         self.pm.sys_growth = {'Used': (1000, 5.0)}
         self.assertNotIn('/d', self.pm.format_sys_growth())
+
+
+class TestSysGrowthSplit(unittest.TestCase):
+    """The system growth line splits the residual only when running as root."""
+
+    def _line(self, euid):
+        pm = PmemStat(SimpleNamespace(units='MB', debug=0,
+                                      growth_style='growth'))
+        pm.sys_growth = {'Used': (1000, 60.0), 'TOTALS': (2000, 60.0),
+                         'ShTmp': (0, 60.0), 'Oth': (3000, 60.0),
+                         'OthK': (500, 60.0), 'OthU': (2500, 60.0)}
+        with mock.patch.object(main_module.os, 'geteuid', return_value=euid):
+            return pm.format_sys_growth()
+
+    def test_non_root_shows_single_oth(self):
+        line = self._line(1000)
+        self.assertIn('ΔOth ', line)
+        self.assertNotIn('OthK', line)
+        self.assertNotIn('OthU', line)
+
+    def test_root_splits_residual(self):
+        line = self._line(0)
+        self.assertIn('ΔOthK', line)
+        self.assertIn('ΔOthU', line)
+        self.assertNotIn('ΔOth ', line)
 
 
 class TestCgroupLabel(unittest.TestCase):
