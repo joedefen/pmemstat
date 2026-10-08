@@ -1,18 +1,11 @@
 > **Quick Start**: from the CLI (requires **Python 3.10 or later**)
-> * **Preferred: install system-wide with `pipx`** — works as root or as your user, for every account:
->   * `sudo pipx install --global pmemstat`
->   * the launcher lands in `/usr/local/bin` (which `sudo` searches), so plain `sudo pmemstat` just works
->   * to upgrade: `sudo pipx upgrade --global pmemstat || sudo pipx install --global pmemstat`
-> * **Fallback: per-user `pipx`** if you cannot install system-wide:
->   * `pipx upgrade pmemstat || pipx install pmemstat`
->   * the launcher lands in `~/.local/bin`, which `sudo` does **not** search; run it as your user: `pmemstat`
->   * for system-wide coverage, either install system-wide (above) or let it elevate itself: set `export PMEMSTAT_ARGS=--sudo` once, then just run `pmemstat`
-> * **To run** (running as root shows **all** processes; as your user, only your own):
->   * `sudo pmemstat`  (system-wide install)
->   * `pmemstat`  (per-user install; your processes only, unless `PMEMSTAT_ARGS=--sudo`)
->   * type "?" within `pmemstat` to show the help screen.
+> * **Install (preferred, per-user):** `pipx install pmemstat`
+> * **Run:** `pmemstat` — shows only *your* processes
+> * **Full view (all processes):** `pmemstat --sudo` re-runs itself as root. To avoid typing the argument every time, add `export PMEMSTAT_ARGS=--sudo` to your shell init (e.g. `~/.bashrc` or `~/.zshrc`), then just run `pmemstat`.
+> * **Upgrade:** `pipx upgrade pmemstat || pipx install pmemstat`
+> * Type "?" within `pmemstat` to show the help screen.
 
-> **Note (v4.0.0 — breaking changes):** the install method changed (prefer a system-wide `pipx install --global`; a per-user install is not elevated by `sudo`), and `pmemstat` no longer re-runs itself as root by default. For the 3.x behavior (full, all-process view when launched as your user), set `PMEMSTAT_ARGS=--sudo` in your environment — or just run `sudo pmemstat`.
+> **Note (v4.0.0 — breaking change):** `pmemstat` no longer re-runs itself as root automatically; in 3.x that was the default. Use `pmemstat --sudo` (or `PMEMSTAT_ARGS=--sudo`) for the full, all-process view.
 
 
 # pmemstat - Proportional Memory Status
@@ -54,18 +47,15 @@ Three of `pmemstat`'s capabilities are **new or substantially overhauled** in re
 In short: reach for `top`/`htop` when you want a fast, broad system overview, and reach for `pmemstat` when you need to know **how much memory a program (or group of programs) is truly responsible for**, to break that memory down by type or by cgroup, or to watch for creeping growth that suggests a leak. For **per-mapped-file attribution** (which shared library or mmap'd file costs the most RAM), use `smem -m` or `pmap`; `pmemstat` deliberately stays focused on per-process and per-cgroup responsibility rather than rolling PSS up by mapped file.
 
 ## Installation Options
-Note that:
 * `pmemstat` requires **Python 3.10 or later**.
-* `pmemstat` needs root privileges to read the memory statistics (`smaps`/`smaps_rollup`) for **all** processes; without them it reports only your own processes.
-* By default `pmemstat` runs as the invoking user and shows a hint; it does **not** silently escalate to root.
-* Where it is installed matters: a system-wide install (e.g. `sudo pipx install --global pmemstat`) is visible to both your user and root, so `sudo pmemstat` works; a per-user install lives in `~/.local/bin`, which root does not search, so you either run it as your user or let it elevate itself.
-* To have it re-run itself under `sudo` automatically, opt in once with `export PMEMSTAT_ARGS=--sudo` in your shell profile, or pass `--sudo` per invocation (for a system-wide install you can also simply run `sudo pmemstat`).
+* `pmemstat` needs root privileges to read the memory statistics (`smaps`/`smaps_rollup`) for **all** processes; without them it reports only your own. Get the full view with `pmemstat --sudo`, or set `PMEMSTAT_ARGS=--sudo` once in your shell init to avoid typing it.
+* `pmemstat` runs as the invoking user by default and never silently escalates to root.
 * For a persistent set of default flags, export `PMEMSTAT_ARGS` with a shell-quoted argument string, e.g. `export PMEMSTAT_ARGS='--sudo --psi --loop 3 -s name'`. It is tokenized like a command line and prepended to the real arguments, so anything typed on the command line still takes precedence.
 * When `--sudo` is requested but elevation cannot happen (no terminal for a `sudo` prompt and sudo not pre-authorized, or the install is not importable by the isolated interpreter), `pmemstat` fails with a clear message and a non-zero exit instead of silently downgrading to a user-only view. It never hangs waiting for a password.
 * To force user-only operation and disable auto-elevation, use the `--run-as-user` or `-U` option.
 * `pmemstat` depends on `console-window` (the curses UI), pinned to an **exact version** on purpose. Installing `pmemstat` pulls the pinned version automatically; do not "upgrade" `console-window` independently.
 
-See the Quick Start at the top for preferred install instructions using `pipx`. If not acceptable, see the "Alternative Installation Options" section below.
+See the **Quick Start** above for the basic install. For system-wide/root or non-`pipx` installs, see **Alternative Installation Options** below.
 
 
 ## Usage
@@ -420,13 +410,19 @@ With the more aggressive default you no longer need `-uKB`/`-k{small-number}`; t
 Running a number of sleeps of various durations in the background in a loop, plus one foreground sleep, can make for a robustness test with lots of processes coming and going.  There are many "races" (i.e., a process may appear in `/proc`, but its `smaps` is gone), and this test helps ensure the races are handled properly.
 
 ## Alternative Installation Options
-If the `pipx` install is not acceptable, choose the best way to install:
-* **From PyPi as non-root**. You need `~/.local/bin` on your `$PATH`.
+The Quick Start's per-user `pipx` install is preferred. Variants:
+* **System-wide with `pipx` (root)** — makes `pmemstat` visible to every account and lets plain `sudo pmemstat` work, because the launcher lands in `/usr/local/bin` (which `sudo` searches):
+```
+        sudo pipx install --global pmemstat
+        # to upgrade:   sudo pipx upgrade --global pmemstat || sudo pipx install --global pmemstat
+        # to uninstall: sudo pipx uninstall --global pmemstat
+```
+* **From PyPi as non-root (`pip`)** — you need `~/.local/bin` on your `$PATH`:
 ```
         python -m pip install --user pmemstat
         # to uninstall: python -m pip uninstall pmemstat
 ```
-* Or **from PyPi as root**. This makes `pmemstat` available to all users with `/usr/local/bin` on `$PATH`. Note: `PIP_BREAK_SYSTEM_PACKAGES=1` may be required on some distros.
+* **From PyPi as root (`pip`)** — makes `pmemstat` available to all users with `/usr/local/bin` on `$PATH`. Note: `PIP_BREAK_SYSTEM_PACKAGES=1` may be required on some distros:
 ```
         sudo PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install pmemstat
         # to uninstall: sudo python -m pip uninstall pmemstat
