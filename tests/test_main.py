@@ -7,6 +7,7 @@ deterministic functions that do the memory math and the smaps/rollup parsing.
 Importing the ``tests`` package (which Python does before importing this
 module) installs a ``console_window`` stub when the real package is missing.
 """
+import curses
 import io
 import os
 import tempfile
@@ -954,21 +955,27 @@ class TestZapConfirmation(unittest.TestCase):
 
 
 class TestKeyLegend(unittest.TestCase):
-    """The legend advertises [z]ap only for root and no longer shows [t]op."""
+    """The legend advertises [z]ap only for root while growth is shown."""
 
-    def _pm(self):
-        return PmemStat(SimpleNamespace(units='MB', debug=0, search=''))
+    @staticmethod
+    def _pm(**over):
+        fields = dict(units='MB', debug=0, search='', growth_style='both')
+        fields.update(over)
+        return PmemStat(SimpleNamespace(**fields))
 
-    def _legend(self, euid):
-        """Return the emitted legend line for the given effective uid."""
-        pm = self._pm()
-        pm.window = SimpleNamespace()
-        lines = []
-        with mock.patch.object(main_module.os, 'geteuid', return_value=euid), \
-             mock.patch.object(pm, 'emit',
-                               side_effect=lambda line, **kw: lines.append(line)):
+    def _emit(self, euid, **over):
+        """Call emit_key_legend() as ``euid``; return the fake window."""
+        pm = self._pm(**over)
+        pm.window = mock.Mock()
+        with mock.patch.object(main_module.os, 'geteuid', return_value=euid):
             pm.emit_key_legend()
-        return lines[0]
+        return pm.window
+
+    def _legend(self, euid, **over):
+        """Return the fancy-header line emitted for the given effective uid."""
+        window = self._emit(euid, **over)
+        window.add_fancy_header.assert_called_once()
+        return window.add_fancy_header.call_args.args[0]
 
     def test_top_is_not_advertised(self):
         self.assertNotIn('[t]op', PmemStat.KEY_LEGEND)
@@ -980,7 +987,32 @@ class TestKeyLegend(unittest.TestCase):
         self.assertIn('[z]ap', self._legend(0))
 
     def test_non_root_legend_has_no_zap(self):
-        self.assertNotIn('[z]ap', self._legend(1))
+        self.assertNotIn('[z]ap', self._legend(1000))
+
+    def test_growth_off_hides_zap_even_for_root(self):
+        """With growth 'off' there is nothing to reset visibly, so no [z]ap."""
+        self.assertNotIn('[z]ap', self._legend(0, growth_style='off'))
+
+    def test_non_root_keeps_user_marker_without_zap(self):
+        line = self._legend(1000)
+        self.assertIn('--user', line)
+        self.assertNotIn('[z]ap', line)
+
+    def test_uses_underline_fancy_header(self):
+        window = self._emit(0)
+        _, kwargs = window.add_fancy_header.call_args
+        self.assertEqual(kwargs['mode'], 'Underline')
+
+    def test_legend_line_is_dimmed(self):
+        """Passive help text is dimmed without losing the fancy key styling."""
+        window = self._emit(0)
+        _, kwargs = window.add_fancy_header.call_args
+        self.assertEqual(kwargs['line_attr'], curses.A_DIM)
+
+    def test_search_field_is_on_the_legend_line(self):
+        line = self._legend(0, search='needle')
+        self.assertTrue(line.endswith('/needle'), line)
+        self.assertIn('[?]help', line)
 
 
 class TestOthText(unittest.TestCase):
@@ -1062,6 +1094,39 @@ class TestRateFloor(unittest.TestCase):
         """The system line shows no /d until the rate floor is reached."""
         self.pm.sys_growth = {'Used': (1000, 5.0)}
         self.assertNotIn('/d', self.pm.format_sys_growth())
+
+
+class TestGrowthHeader(unittest.TestCase):
+    """The lead column reserves room for its 'growth' header label."""
+
+    def _pm(self, style):
+        return PmemStat(SimpleNamespace(units='MB', debug=0,
+                                        growth_style=style))
+
+    def test_off_reserves_a_single_column(self):
+        """With growth off the header keeps the original blank lead."""
+        pm = self._pm('off')
+        pm.lead_width = 1
+        self.assertEqual(pm.growth_lead_min_width(), 1)
+        self.assertEqual(pm.growth_lead_header(), '  ')
+
+    def test_label_is_the_minimum_width_when_enabled(self):
+        """Every growth mode keeps the field wide enough for the label."""
+        for style in ('both', 'growth', 'rate'):
+            pm = self._pm(style)
+            self.assertEqual(pm.growth_lead_min_width(),
+                             len(PmemStat.GROWTH_HEADER))
+
+    def test_label_is_right_justified_in_the_column(self):
+        """The label ends at the column's right edge, shifting key/info."""
+        pm = self._pm('both')
+        pm.lead_width = len(PmemStat.GROWTH_HEADER)
+        self.assertEqual(pm.growth_lead_header(), ' growth')
+        pm.lead_width += 2
+        self.assertEqual(pm.growth_lead_header(), '   growth')
+        # One leading pad plus the field itself, so key/info starts after the
+        # same span the rows use for their annotation.
+        self.assertEqual(len(pm.growth_lead_header()), pm.lead_width + 1)
 
 
 class TestSysGrowthSplit(unittest.TestCase):

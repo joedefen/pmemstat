@@ -30,7 +30,7 @@ dependencies = [
     # PMemStat's curses UI depends on this package's specific API and behavior.
     # The exact pin both protects against unexpected upstream changes and grants
     # the author freedom to make backwards-incompatible revisions. Do not relax.
-    'console-window == 2.0.0.8',
+    'console-window == 2.0.0.9',
 ]
 
 [project.urls]

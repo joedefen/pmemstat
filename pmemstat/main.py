@@ -64,7 +64,7 @@ from pmemstat.Pressure import format_pressure_lines, read_system_pressure
 # Provide a clear, actionable message instead of a bare ImportError when the
 # pinned package is missing or when a different version has been substituted.
 # Keep this in sync with the pin in pyproject.toml's ``dependencies``.
-_CONSOLE_WINDOW_PIN = '2.0.0.8'
+_CONSOLE_WINDOW_PIN = '2.0.0.9'
 try:
     import console_window
     from console_window import (ConsoleWindow, ConsoleWindowOpts,
@@ -1097,11 +1097,13 @@ class PmemStat:
     # '?' is deliberately first: if the terminal is too narrow to render the
     # whole line, only the least-critical trailing entries are truncated while
     # the gateway to the complete list (and the navigation keys) stays visible.
-    KEY_LEGEND = ('[?]help [g]roup [u]nits [s]ort [c]pu [K]ill [p]SI'
+    KEY_LEGEND = ('[?]:help [g]roup [u]nits [s]ort [c]pu [K]ill [p]SI'
                   ' [G]rowth')
-    # Appended to the legend only when running as root: 'z' zaps (resets) the
-    # cross-run growth history, which is only meaningful with root's complete
-    # process view (the ledger's coverage depends on it). See zap_history().
+    # Appended to the legend only when running as root *and* the growth
+    # annotation is showing: 'z' zaps (resets) the cross-run growth history,
+    # which is only meaningful with root's complete process view (the ledger's
+    # coverage depends on it) and only visible when growth is displayed.  See
+    # zap_history() and zap_key_offered().
     KEY_LEGEND_ZAP = ' [z]ap'
     # Shown in place of the legend line's leading pad when running degraded
     # (not root): a non-root run omits other users' processes, so the first
@@ -1111,6 +1113,11 @@ class PmemStat:
     # PSS categories folded into the single combined "other" column when -o is
     # not given; the first entry is the rendered slot (the sum is shown there).
     OTHER_KEYS = ('shSYSV', 'shOth', 'stack', 'text')
+    # Header label for the inline growth column (the field in front of the
+    # {num}x count). Its length is the column's minimum width whenever growth
+    # is enabled, so the label always fits and the header/rows stay aligned
+    # even while no row is currently annotating.
+    GROWTH_HEADER = 'growth'
     # Grow a width immediately; shrink it only after this many consecutive
     # smaller refreshes (hysteresis against frame-to-frame jitter).
     WIDTH_SHRINK_DELAY = 4
@@ -1127,7 +1134,7 @@ class PmemStat:
     # so no answer -- or a stray key -- must never do it.  ESC also declines.
     ZAP_CONFIRM_SECS = 10.0
     # The question shown while the 'z' reset awaits an answer.
-    ZAP_CONFIRM_TEXT = ('⚠️  Really want fo reset the growth baseline to now?  '
+    ZAP_CONFIRM_TEXT = ('⚠️  Really want to reset the growth baseline to now?  '
                         'Enter "y" or ESC')
 
     def __init__(self, opts):
@@ -1795,6 +1802,32 @@ class PmemStat:
             return f'{human_kb(per_day)}/d'
         return f'{human_kb(group.growth_val)} {ago_str(group.growth_interval)}'
 
+    def growth_lead_min_width(self):
+        """Minimum width of the lead (growth) column.
+
+        While the growth annotation is enabled the column must be at least as
+        wide as its header label, so ``growth`` always fits above the field and
+        the header tracks the rows' reserved space even when no row annotates.
+        With growth ``off`` the column collapses to the single character the
+        'A' (new group) marker needs.
+        """
+        if getattr(self.opts, 'growth_style', 'off') == 'off':
+            return 1
+        return len(self.GROWTH_HEADER)
+
+    def growth_lead_header(self):
+        """Header fragment for the lead (growth) column, including its pad.
+
+        One leading space then the label right-justified in the column, which
+        lines the label's last character up with the column's right edge, like
+        every other column header.  With growth ``off`` the fragment is the
+        same width of blank space (one space plus the column plus the separator)
+        so ``key/info`` stays where the rows put it.
+        """
+        if getattr(self.opts, 'growth_style', 'off') == 'off':
+            return ' ' * (self.lead_width + 1)
+        return f' {self.GROWTH_HEADER:>{self.lead_width}}'
+
     def select_growth_rows(self, alive_groups):
         """Group keys allowed to annotate: absolute ``-k`` gate plus top-N."""
         mode = self.opts.growth_style
@@ -2330,7 +2363,10 @@ class PmemStat:
         self.history_update()
         alive_for_growth = {k: g for k, g in self.groups.items() if g.alive}
         allowed = self.select_growth_rows(alive_for_growth)
-        need = 1
+        # Reserve room for the 'growth' header whenever the annotation is on,
+        # even if every row is currently blank (no baseline yet / nothing over
+        # the gate), so the header can never overlap 'key/info'.
+        need = self.growth_lead_min_width()
         for key, group in alive_for_growth.items():
             group.growth_txt = (self.growth_text(group)
                                 if key in allowed else '')
@@ -2349,7 +2385,11 @@ class PmemStat:
             label = ('other' if (self.opts.others and item == self.OTHER_KEYS[0])
                      else item)
             header += f'{label:>{self.fwidth}}'
-        self.emit(f'{header}   key/info'
+        # The growth column sits between the numeric columns and 'key/info';
+        # its bold, right-justified label keeps the header aligned with the
+        # rows, which reserve the same field for the growth annotation (or a
+        # blank pad when growth is off).
+        self.emit(f'{header}{self.growth_lead_header()} key/info'
                 + f' ({self.opts.groupby} by {self.get_sortby()})',
                 to_head=True, attr=curses.A_BOLD)
         self.pr_summary('T', grand_summary, to_head=True)
@@ -2433,42 +2473,64 @@ class PmemStat:
             self.emit('')
 
     def emit_key_legend(self):
-        """Emit the key legend (first header line) plus the live search field.
+        """Emit the key legend (first header line) with the live search field.
 
         The legend is left-aligned so '[?]help' sits above the first digit of
         the leader's 'Tot=' value; the search field is appended after it and is
         drawn non-dimmed to signal that it is live. When not running as root the
-        leftmost pad is filled with a dimmed '--user' marker (the flag that
-        selects the degraded, own-processes-only view) so it is always obvious
-        the report is partial. No-op outside window mode, where there are no
-        interactive keys.
+        leftmost pad is filled with a '--user' marker (the flag that selects the
+        degraded, own-processes-only view) so it is always obvious the report is
+        partial. No-op outside window mode, where there are no interactive keys.
+
+        The line goes through ``add_fancy_header(mode='Underline')``: the keys
+        are underlined and their '[x]' brackets are dropped, which makes the
+        legend noticeably more compact than the old literal-bracket rendering,
+        and the trailing '/pattern' is styled as live search text.  (The mode
+        name is matched case-sensitively by console-window: 'Underline' -- a
+        lowercase spelling silently falls back to reverse-video keys.)  The
+        whole line is additionally dimmed via ``line_attr``: this is passive
+        help, so it should not compete with the value lines for attention.
         """
         if not self.window:
             return
         # 'HH:MM:SS Tot=' is the leader prefix; the legend sits under the first
-        # digit of the Tot= value, shifted 5 columns left so the '[z]ap' entry
-        # (added only when root) does not push the trailing live search field
-        # any further right.
+        # digit of the Tot= value, shifted 5 columns left so the optional
+        # '[z]ap' entry does not push the trailing live search field any
+        # further right.
         pad = max(0, len('00:00:00 Tot=') - 5)
         legend = self.KEY_LEGEND
-        if os.geteuid() == 0:
+        if self.zap_key_offered():
             legend += self.KEY_LEGEND_ZAP
+        if os.geteuid() == 0:
             lead = ' ' * pad
         else:
             # Degraded (non-root) run: stamp the header's leftmost pad with the
             # '--user' flag. It is padded to the pad width so it fills the blank
             # leading space without shifting the legend itself.
             lead = self.KEY_LEGEND_USER.ljust(pad)
-        self.emit(f'{lead}{legend} ', to_head=True,
-                  attr=curses.A_DIM, resume=False)
         if self.search_bar.is_active:
             before = self.search_bar.text[:self.search_bar.cursor_pos]
             after = self.search_bar.text[self.search_bar.cursor_pos:]
-            self.emit(f'/{before}|{after}', to_head=True,
-                      attr=curses.A_REVERSE, resume=True)
+            search, search_attr = f'/{before}|{after}', curses.A_REVERSE
         else:
-            self.emit(f'/{self.opts.search or ""}', to_head=True,
-                      attr=curses.A_BOLD, resume=True)
+            search, search_attr = f'/{self.opts.search or ""}', curses.A_BOLD
+        self.window.add_fancy_header(f'{lead}{legend} {search}',
+                                     mode='Underline',
+                                     search_pattern_attr=search_attr,
+                                     line_attr=curses.A_DIM)
+        self.window.calc()
+
+    def zap_key_offered(self):
+        """Whether '[z]ap' belongs in the key legend.
+
+        Root only (the cross-run ledger's coverage depends on root's complete
+        process view) and only while the growth annotation is showing: with
+        growth 'off' there are no growth numbers on screen, so offering a reset
+        of the growth baseline would advertise an action with no visible
+        effect.
+        """
+        return (os.geteuid() == 0
+                and getattr(self.opts, 'growth_style', 'off') != 'off')
 
     def emit(self, line, to_head=False, attr=None, resume=False):
         """ Emit a line of the report"""

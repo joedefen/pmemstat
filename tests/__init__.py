@@ -27,5 +27,5 @@ except ImportError:  # pragma: no cover - depends on the environment
     _stub.ConsoleWindowOpts = _StubConsoleWindowOpts
     # Must match the exact console-window pin in pyproject.toml (main.py
     # refuses to start when the reported version differs from that pin).
-    _stub.__version__ = '2.0.0.8'
+    _stub.__version__ = '2.0.0.9'
     sys.modules['console_window'] = _stub

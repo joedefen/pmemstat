@@ -265,6 +265,7 @@ In the default refreshed window loop, we see
         * **A** - a newly added grouping
         * **O** - combined overflow groupings below the `--top-pct` threshold (on the first loop, or always in window mode)
         * **{growth} {interval}** - inline growth annotation for the top-N growers (e.g. `3.5G 2h3m`), shown only when the growth mode is not `off` (`G` in window mode)
+    * **growth** - header for the inline growth-annotation column, shown only when the growth mode is not `off`. The column is at least as wide as the label, so the header sits above the annotation and `key/info` shifts right accordingly.
     * **key/info** - a quantifier plus the grouping key. The quantifier is **{num}x**, the number of processes in the grouping (e.g. `24x browser`); in the `pid` grouping each row shows `1x` followed by the pid and command line.
         
 ## Memory growth (leak) detection
@@ -331,9 +332,10 @@ the new baseline, exactly as if the tool had first run just after this boot, so
 every later growth annotation and delta is measured from that moment onward. It
 likewise implies `--sudo`, ignores the other options and `PMEMSTAT_ARGS`, and
 returns `0` on success / `1` on failure (nothing on success). Inside the window,
-pressing `z` (shown as `[z]ap` in the key legend, and only offered when running
-as root) performs the same reset at run time: the in-memory growth anchors are
-cleared and the ledger is rewritten from the current values.
+pressing `z` (shown as `[z]ap` in the key legend, offered only when running as
+root *and* while the growth annotation is on) performs the same reset at run
+time: the in-memory growth anchors are cleared and the ledger is rewritten from
+the current values.
 
 Because that discards every growth number collected so far, `z` does not reset
 anything by itself. It arms a confirmation line under the key legend:
@@ -345,17 +347,25 @@ stray keystroke cannot trigger it. With no answer the prompt closes itself after
 10 seconds and counts as *no*, so a walk-away never wipes the baseline.
 
 ## Key Legend (Window Mode)
-The top line of the header is an always-visible key legend (dimmed, left-aligned
-under the leader's `Tot=` value, shifted 5 columns left so the optional `[z]ap`
-entry below still leaves room for the live search field) with the live search
-field appended in bold, so the available keys are in evidence without opening
-the help screen:
+The top line of the header is an always-visible key legend (left-aligned under
+the leader's `Tot=` value, shifted 5 columns left so the optional `zap` entry
+does not push the live search field any further right) with the live search
+field appended on the same line, so the available keys are in evidence without
+opening the help screen. It is drawn through console-window's fancy header
+(`add_fancy_header(..., mode='Underline')`): each key letter is underlined and
+bold, and the `[x]` brackets of the source string (`KEY_LEGEND`) are parsed as
+markup and dropped, which keeps the line compact. The whole line is dimmed
+(`line_attr=curses.A_DIM`) because it is passive help, and the trailing
+`/pattern` is styled as live search text (bold, or reverse video while the
+search bar is active). Rendered, it reads:
 
-    [?]help [g]roup [u]nits [s]ort [c]pu [K]ill [p]SI [G]rowth /{regex}
+    ?:help group units sort cpu Kill pSI Growth /{regex}
 
-When running as root, `[z]ap` is appended for the run-time history reset:
+(each first letter underlined). `zap` is appended only for a root run **and**
+while the growth annotation is showing (`-G` is not `off`), because resetting
+the growth baseline has no visible effect otherwise:
 
-    [?]help [g]roup [u]nits [s]ort [c]pu [K]ill [p]SI [G]rowth [z]ap /{regex}
+    ?:help group units sort cpu Kill pSI Growth zap /{regex}
 
 `?` remains the gateway to the complete list of keys plus the navigation keys.
 Because `?` is listed first, a narrow terminal truncates only the least-critical
