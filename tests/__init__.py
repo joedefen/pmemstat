@@ -17,5 +17,15 @@ except ImportError:  # pragma: no cover - depends on the environment
     for _name in ('ConsoleWindow', 'OptionSpinner',
                   'IncrementalSearchBar', 'InlineConfirmation'):
         setattr(_stub, _name, type(_name, (), {}))
-    _stub.__version__ = '1.4.3'
+
+    class _StubConsoleWindowOpts:
+        """Minimal stand-in that records the options an app passes."""
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    _stub.ConsoleWindowOpts = _StubConsoleWindowOpts
+    # Must match the exact console-window pin in pyproject.toml (main.py
+    # refuses to start when the reported version differs from that pin).
+    _stub.__version__ = '2.0.0.8'
     sys.modules['console_window'] = _stub

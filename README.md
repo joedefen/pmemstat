@@ -335,6 +335,15 @@ pressing `z` (shown as `[z]ap` in the key legend, and only offered when running
 as root) performs the same reset at run time: the in-memory growth anchors are
 cleared and the ledger is rewritten from the current values.
 
+Because that discards every growth number collected so far, `z` does not reset
+anything by itself. It arms a confirmation line under the key legend:
+
+    ⚠️  Really want to reset the growth baseline to now?  Enter "y" or ESC  [10s]
+
+`y` (or `Y`) performs the reset; `ESC` declines; any other key is ignored so a
+stray keystroke cannot trigger it. With no answer the prompt closes itself after
+10 seconds and counts as *no*, so a walk-away never wipes the baseline.
+
 ## Key Legend (Window Mode)
 The top line of the header is an always-visible key legend (dimmed, left-aligned
 under the leader's `Tot=` value, shifted 5 columns left so the optional `[z]ap`
@@ -363,7 +372,6 @@ j, DOWN:  down one row           $, END:  last row
   Ctrl-u:  half-page up     Ctrl-b, PPAGE:  page up
   Ctrl-d:  half-page down     Ctrl-f, NPAGE:  page down
 ──────────────────────────────────────────────────────────────────────────────
-Key: z - zap the growth history (current values become the new baseline)
 Type keys to alter choice:
 ? - help screen····················  normal help
 K - kill mode······················  off ON
@@ -377,6 +385,7 @@ t - top-N growers··················  all 10
 u - memory units···················  MB KB human
 c - show cpu·······················  off ON
 p - show PSI (header + memPSI%)····  off ON
+z - zap the growth history (current values become the new baseline) - asks for "y"/ESC
 ```
 
 > **Note:** in the live window the *current* choice of each option is shown in reverse video (e.g. `help`, `off`); which value is highlighted depends on your live state, so it may differ from the text above.

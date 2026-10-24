@@ -63,18 +63,20 @@ from pmemstat.Pressure import format_pressure_lines, read_system_pressure
 # console-window is intentionally pinned to an exact version (see pyproject.toml).
 # Provide a clear, actionable message instead of a bare ImportError when the
 # pinned package is missing or when a different version has been substituted.
-_CONSOLE_WINDOW_PIN = '1.4.3'
+# Keep this in sync with the pin in pyproject.toml's ``dependencies``.
+_CONSOLE_WINDOW_PIN = '2.0.0.8'
 try:
     import console_window
-    from console_window import (ConsoleWindow, OptionSpinner,
-                                IncrementalSearchBar, InlineConfirmation)
+    from console_window import (ConsoleWindow, ConsoleWindowOpts,
+                                OptionSpinner, IncrementalSearchBar,
+                                InlineConfirmation)
 except ImportError as _cw_exc:  # pragma: no cover (only on a broken install)
     raise SystemExit(
         'pmemstat requires the console-window package pinned to '
         f'version {_CONSOLE_WINDOW_PIN} (an intentional exact pin by the author).\n'
         f'Could not import console_window: {_cw_exc}\n'
-        'Install/repair it with:\n'
-        f"    python3 -m pip install --user 'console-window=={_CONSOLE_WINDOW_PIN}'"
+        'Install/repair it inside the project virtualenv with:\n'
+        f"    .venv/bin/python -m pip install 'console-window=={_CONSOLE_WINDOW_PIN}'"
     ) from _cw_exc
 
 _cw_found = getattr(console_window, '__version__', None)
@@ -83,7 +85,7 @@ if _cw_found is not None and _cw_found != _CONSOLE_WINDOW_PIN:  # pragma: no cov
         'pmemstat requires console-window=='
         f'{_CONSOLE_WINDOW_PIN} but found {_cw_found}.\n'
         'The exact pin is intentional. Reinstall the pinned version with:\n'
-        f"    python3 -m pip install --user 'console-window=={_CONSOLE_WINDOW_PIN}'"
+        f"    .venv/bin/python -m pip install 'console-window=={_CONSOLE_WINDOW_PIN}'"
     )
 
 # Trace Levels:
@@ -1119,6 +1121,14 @@ class PmemStat:
     # churn in the 'pid' view; a key absent for an hour has no leak history
     # worth resuming.
     GROWTH_PRUNE_SECS = 3600
+    # Pressing 'z' never resets anything by itself: it opens a confirmation
+    # prompt that must be answered within this many seconds.  Resetting the
+    # growth baseline throws away every number the 'G'rowth view has built up,
+    # so no answer -- or a stray key -- must never do it.  ESC also declines.
+    ZAP_CONFIRM_SECS = 10.0
+    # The question shown while the 'z' reset awaits an answer.
+    ZAP_CONFIRM_TEXT = ('⚠️  Really want fo reset the growth baseline to now?  '
+                        'Enter "y" or ESC')
 
     def __init__(self, opts):
         self.opts = opts
@@ -1194,6 +1204,10 @@ class PmemStat:
         )
         # Initialize inline confirmation for kill operations
         self.confirmation = InlineConfirmation()
+        # Deadline (monotonic) of the armed 'z' reset prompt, else None.  See
+        # zap_confirm_start(): 'z' only asks, 'y' resets, ESC / no answer does
+        # not.
+        self.zap_confirm_deadline = None
 
     def has_zram(self):
         """Have zRAM actual? """
@@ -1672,6 +1686,99 @@ class PmemStat:
         except OSError:
             return False
 
+    def zap_confirm_active(self):
+        """True while the ``z`` reset prompt is waiting for an answer."""
+        return self.zap_confirm_deadline is not None
+
+    def zap_confirm_remaining(self):
+        """Seconds left to answer the ``z`` reset prompt (0.0 when inactive)."""
+        if self.zap_confirm_deadline is None:
+            return 0.0
+        return max(0.0, self.zap_confirm_deadline - time.monotonic())
+
+    def zap_confirm_start(self):
+        """Arm the ``z`` confirmation; nothing is reset until it is answered.
+
+        Resetting the baseline is destructive (every ``G``rowth number restarts
+        from now), so the key only opens a prompt.  It closes by itself after
+        :data:`ZAP_CONFIRM_SECS` with no answer, which counts as ``no``.
+        """
+        self.zap_confirm_deadline = time.monotonic() + self.ZAP_CONFIRM_SECS
+
+    def zap_confirm_cancel(self):
+        """Withdraw the ``z`` prompt without resetting anything."""
+        self.zap_confirm_deadline = None
+
+    def zap_confirm_text(self):
+        """The prompt line shown while the ``z`` reset awaits an answer."""
+        remaining = int(round(self.zap_confirm_remaining()))
+        return f'{self.ZAP_CONFIRM_TEXT}  [{remaining}s]'
+
+    def zap_confirm_handle_key(self, key):
+        """Answer the ``z`` prompt: ``y`` confirms, ESC declines.
+
+        Returns ``'confirmed'``, ``'cancelled'`` or ``'timeout'`` when the
+        prompt closes, and ``'continue'`` while it stays open.  Any other key is
+        deliberately ignored (the prompt keeps counting down), so a stray
+        keystroke can neither confirm nor cancel the reset.
+        """
+        if not self.zap_confirm_active():
+            return 'continue'
+        if self.zap_confirm_remaining() <= 0:
+            self.zap_confirm_cancel()
+            return 'timeout'
+        if key in (ord('y'), ord('Y')):
+            self.zap_confirm_cancel()
+            return 'confirmed'
+        if key == 27:  # ESC
+            self.zap_confirm_cancel()
+            return 'cancelled'
+        return 'continue'
+
+    def handle_zap_confirm_key(self, key):
+        """Feed ``key`` to the ``z`` prompt, resetting only on a ``y`` answer.
+
+        Returns True when the prompt is (or was) active, i.e. the key belonged
+        to it and must not reach the normal key handlers.
+        """
+        if not self.zap_confirm_active():
+            return False
+        result = self.zap_confirm_handle_key(key)
+        if result == 'continue':
+            return True
+        if result == 'confirmed':
+            msg = ('Growth history zapped' if self.zap_history()
+                   else 'Growth baseline reset (ledger not rewritten)')
+        elif result == 'timeout':
+            msg = 'Growth baseline unchanged (timed out)'
+        else:
+            msg = 'Growth baseline unchanged'
+        if self.window:
+            self.window.flash(msg, duration=1.2)
+        return True
+
+    def prompt_secs(self, default):
+        """Prompt timeout, shortened so an armed ``z`` prompt cannot outlive it."""
+        if not self.zap_confirm_active():
+            return default
+        return min(default, max(0.01, self.zap_confirm_remaining()))
+
+    def zap_confirm_expire(self):
+        """Close an unanswered ``z`` prompt (its deadline passed while idle).
+
+        Returns True when a prompt was withdrawn.  Called from the prompt
+        timeout path, i.e. when no key arrived to answer it.
+        """
+        if not self.zap_confirm_active():
+            return False
+        if self.zap_confirm_remaining() > 0:
+            return False
+        self.zap_confirm_cancel()
+        if self.window:
+            self.window.flash('Growth baseline unchanged (timed out)',
+                              duration=1.2)
+        return True
+
     def growth_text(self, group):
         """Format a group's growth annotation for the current mode."""
         if group.growth_val is None:
@@ -2028,6 +2135,12 @@ class PmemStat:
             # Pin the key legend as the very first header row on every redraw
             # so the available keys are always in evidence.
             self.emit_key_legend()
+            # An armed 'z' confirmation sits directly under the legend, so the
+            # question is impossible to miss; its countdown ticks down with each
+            # refresh of the report.
+            if self.zap_confirm_active():
+                self.emit(self.zap_confirm_text(), to_head=True,
+                          attr=curses.A_BOLD|curses.A_UNDERLINE)
             resume = False
             # print timestamp of report
             leader = '' if windowed else '--- '
@@ -2373,13 +2486,17 @@ class PmemStat:
         self.emit("-- HELP SCREEN ['?' or ENTER closes Help; Ctrl-C exits ] --",
                    to_head=True, attr=curses.A_BOLD)
         self.spin.show_help_nav_keys(self.window)
-        if os.geteuid() == 0:
-            self.emit('Key: z - zap the growth history (current values become '
-                      'the new baseline)', attr=curses.A_BOLD)
-        else:
+        if self.zap_confirm_active():
+            # An armed 'z' also asks for its answer on the help screen, so the
+            # prompt is never invisible while it counts down.
+            self.emit(self.zap_confirm_text(), attr=curses.A_REVERSE)
+        if os.geteuid() != 0:
             self.emit('Hint: run "sudo pmemstat" to show all PIDs',
                        attr=curses.A_BOLD)
         self.spin.show_help_body(self.window)
+        if os.geteuid() == 0:
+            self.emit('z - zap the growth history (current values become '
+                      'baseline) - asks for "y"/ESC')
 
     def window_loop(self):
         """ TBD """
@@ -2393,9 +2510,13 @@ class PmemStat:
                 return regroup
             if key in (ord('z'), ):
                 # Runtime equivalent of --reset-history-now (root only; the key
-                # is only routed here when root -- see keys_we_handle).
-                if self.zap_history():
-                    self.window.flash('Growth history zapped', duration=1.2)
+                # is only routed here when root -- see keys_we_handle).  It is
+                # destructive, so this only *arms* the confirmation prompt
+                # (zap_confirm_*); the reset happens when 'y' answers it.
+                # Kill mode owns ENTER/line selection and its own prompt, so it
+                # is left alone to avoid two overlapping confirmations.
+                if not self.opts.kill_mode:
+                    self.zap_confirm_start()
                 return regroup
             if key in self.spin.keys:
                 self.spin.do_key(key, self.window)
@@ -2462,7 +2583,21 @@ class PmemStat:
             # 'z' zaps the growth history; offered only to root, since the
             # cross-run ledger's coverage depends on root's process view.
             keys_we_handle.append(ord('z'))
-        self.window = ConsoleWindow(head_line=True, keys=keys_we_handle)
+        # return_if_pos_change=False is essential for smooth navigation.  With the
+        # default (True), console_window's prompt() returns None *without*
+        # rendering as soon as a j/k/arrow key moves the viewport, and this app's
+        # "prompt() returned None" path is the timed-refresh path: it falls
+        # through to self.loop(), which rescans every PID (/proc,
+        # smaps_rollup, /proc/<pid>/cgroup, smaps for changed groups, cgroup
+        # files, growth trackers).  Each keystroke would therefore cost a full
+        # data collection, so a burst of j/k buffered in the tty keeps scrolling
+        # for seconds after the user stops.  With False, prompt() repaints the
+        # already-built rows itself (one screenful, cheap) and only returns on a
+        # handled key or on the loop_secs timeout, so None really does mean
+        # "time to refresh the data".
+        window_opts = ConsoleWindowOpts(head_line=True, keys=keys_we_handle,
+                                        return_if_pos_change=False)
+        self.window = ConsoleWindow(opts=window_opts)
         is_first = True
         was_groupby, regroup = self.opts.groupby, True
         was_others = self.opts.others
@@ -2471,9 +2606,12 @@ class PmemStat:
                 self.window.set_pick_mode(False)
                 self.help_screen()
                 self.window.render()
-                key = self.window.prompt(self.opts.loop_secs)
+                key = self.window.prompt(self.prompt_secs(self.opts.loop_secs))
                 if key is not None:
-                    do_key(key)
+                    if not self.handle_zap_confirm_key(key):
+                        do_key(key)
+                else:
+                    self.zap_confirm_expire()
                 self.window.clear()
             elif self.mode == 'normal':
                 regroup = bool(was_groupby != self.opts.groupby)
@@ -2484,11 +2622,22 @@ class PmemStat:
                 regroup = False
                 self.window.set_pick_mode(self.opts.kill_mode)
                 self.window.render()
-                key = self.window.prompt(self.opts.loop_secs)
+                key = self.window.prompt(self.prompt_secs(self.opts.loop_secs))
                 if key is None:
-                    # prompt() timed out (refresh interval): redraw only; never
-                    # pass None into the key handlers (search bar compares it).
+                    # prompt() timed out (refresh interval): fall through to a
+                    # fresh scan/redraw.  Navigation keys (j/k, arrows, page
+                    # keys) never produce None here: with
+                    # return_if_pos_change=False, prompt() repaints those
+                    # itself and keeps reading keys, so a keystroke burst is
+                    # drained at paint speed instead of triggering one full
+                    # /proc rescan per key (see the window construction above).
+                    # Never pass None into the key handlers (search bar
+                    # compares it).
                     self.window.clear()
+                    # An unanswered 'z' prompt is answered by its deadline: no
+                    # answer means 'no'.  (prompt_secs() shortens the idle
+                    # timeout so the decision is never late by one loop_secs.)
+                    self.zap_confirm_expire()
                     is_first = False
                     continue
                 # Let confirmation handle keys when active (highest priority)
@@ -2513,6 +2662,12 @@ class PmemStat:
                         self.confirmation.cancel()
                         self.window.passthrough_mode = False
                         enter_kill_loop = False  # Skip kill loop to trigger redisplay
+                # The armed 'z' reset prompt owns the next key: only 'y' acts
+                # (ESC declines, anything else is ignored) so no other key can
+                # slip past a pending destructive action.
+                elif self.zap_confirm_active():
+                    self.handle_zap_confirm_key(key)
+                    enter_kill_loop = False  # redisplay without the prompt
                 # Let search bar handle keys when active
                 elif self.search_bar.is_active and self.search_bar.handle_key(key):
                     pass  # Key was handled by search bar

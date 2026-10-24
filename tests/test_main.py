@@ -856,6 +856,103 @@ class TestZapHistory(unittest.TestCase):
         self.assertEqual(pm.growth_trackers, {})
 
 
+class TestZapConfirmation(unittest.TestCase):
+    """The 'z' key only asks; the reset needs an answer within the deadline."""
+
+    @staticmethod
+    def _pm():
+        return PmemStat(SimpleNamespace(units='MB', debug=0, search='',
+                                        kill_mode=False))
+
+    def test_starts_idle(self):
+        pm = self._pm()
+        self.assertFalse(pm.zap_confirm_active())
+        self.assertEqual(pm.zap_confirm_remaining(), 0.0)
+
+    def test_start_arms_without_resetting(self):
+        """Arming the prompt must not touch the trackers or the ledger."""
+        pm = self._pm()
+        tracker = GrowthTracker()
+        tracker.update(0.0, 100)
+        pm.growth_trackers = {('exe', 'a'): tracker}
+        with mock.patch.object(main_module.History, 'reset_ledger') as reset:
+            pm.zap_confirm_start()
+        reset.assert_not_called()
+        self.assertTrue(pm.zap_confirm_active())
+        self.assertIsNotNone(tracker.t0)
+        self.assertGreater(pm.zap_confirm_remaining(), 0.0)
+        self.assertLessEqual(pm.zap_confirm_remaining(),
+                             PmemStat.ZAP_CONFIRM_SECS)
+
+    def test_prompt_text_mentions_question_and_keys(self):
+        pm = self._pm()
+        pm.zap_confirm_start()
+        text = pm.zap_confirm_text()
+        self.assertIn('reset the growth baseline', text)
+        self.assertIn('"y"', text)
+        self.assertIn('ESC', text)
+
+    def test_y_confirms_and_resets(self):
+        pm = self._pm()
+        pm.history_save = True
+        pm.growth_samples = {'exe': {'a': 1}}
+        pm.zap_confirm_start()
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+             mock.patch.object(main_module.History, 'reset_ledger',
+                               return_value=True) as reset:
+            self.assertTrue(pm.handle_zap_confirm_key(ord('y')))
+        reset.assert_called_once()
+        self.assertFalse(pm.zap_confirm_active())
+
+    def test_esc_cancels_without_resetting(self):
+        pm = self._pm()
+        pm.zap_confirm_start()
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+             mock.patch.object(main_module.History, 'reset_ledger') as reset:
+            self.assertTrue(pm.handle_zap_confirm_key(27))
+        reset.assert_not_called()
+        self.assertFalse(pm.zap_confirm_active())
+
+    def test_other_keys_are_ignored(self):
+        """A stray key neither confirms nor cancels; the prompt stays up."""
+        pm = self._pm()
+        pm.zap_confirm_start()
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+             mock.patch.object(main_module.History, 'reset_ledger') as reset:
+            self.assertTrue(pm.handle_zap_confirm_key(ord('K')))
+        reset.assert_not_called()
+        self.assertTrue(pm.zap_confirm_active())
+
+    def test_no_answer_times_out_to_no(self):
+        pm = self._pm()
+        pm.zap_confirm_start()
+        with mock.patch.object(main_module.time, 'monotonic',
+                               return_value=pm.zap_confirm_deadline + 0.1), \
+             mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+             mock.patch.object(main_module.History, 'reset_ledger') as reset:
+            self.assertTrue(pm.zap_confirm_expire())
+        reset.assert_not_called()
+        self.assertFalse(pm.zap_confirm_active())
+
+    def test_expire_is_a_noop_before_the_deadline(self):
+        pm = self._pm()
+        pm.zap_confirm_start()
+        with mock.patch.object(main_module.History, 'reset_ledger') as reset:
+            self.assertFalse(pm.zap_confirm_expire())
+        reset.assert_not_called()
+        self.assertTrue(pm.zap_confirm_active())
+
+    def test_prompt_secs_never_outlives_the_deadline(self):
+        pm = self._pm()
+        self.assertEqual(pm.prompt_secs(3.0), 3.0)  # idle: unchanged
+        pm.zap_confirm_start()
+        self.assertLessEqual(pm.prompt_secs(30.0), PmemStat.ZAP_CONFIRM_SECS)
+
+    def test_key_not_owned_when_prompt_is_idle(self):
+        pm = self._pm()
+        self.assertFalse(pm.handle_zap_confirm_key(ord('y')))
+
+
 class TestKeyLegend(unittest.TestCase):
     """The legend advertises [z]ap only for root and no longer shows [t]op."""
 

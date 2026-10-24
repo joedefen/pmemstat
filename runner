@@ -5,11 +5,14 @@
 # Developer convenience wrapper for exercising the *working source tree*
 # (rather than an installed copy of pmemstat).
 #
-# By default this script re-execs itself as root via sudo, so that every
+# The pinned dependencies live in the project virtualenv (./.venv, PEP 668
+# friendly, nothing installed per-user or system-wide).  This script re-execs
+# itself with that interpreter when it was started with another one.
+#
+# By default this script also re-execs itself as root via sudo, so that every
 # process is visible.  Pass -U/--user to stay as the invoking user instead.
 
 import os
-import pwd
 import sys
 
 # Add the project directory to sys.path for editable install support.  This
@@ -19,45 +22,50 @@ project_dir = os.path.dirname(os.path.abspath(__file__))
 if project_dir not in sys.path:
     sys.path.insert(0, project_dir)
 
+venv_dir = os.path.join(project_dir, '.venv')
+venv_python = os.path.join(venv_dir, 'bin', 'python')
 
-def add_invoking_users_site_packages():
-    """Make a ``pip install --user`` dependency visible under ``sudo ./runner``.
 
-    Root's interpreter does not search the invoking user's per-user
-    site-packages, so running this checkout as root fails to import the pinned
-    ``console-window`` dependency that was installed with ``--user`` (see the
-    ``externally-managed-environment`` PEP 668 error when trying to install it
-    system-wide instead).
+def running_in_project_venv():
+    """True if this process already runs on the project's ``.venv`` interpreter.
 
-    This is only reached when this script is running as root -- either the
-    developer ran ``sudo ./runner`` directly, or the default self-elevation in
-    :func:`maybe_elevate` re-exec'd it via sudo.  It is NOT used by the
-    installed ``pmemstat`` entry point, whose ``--sudo`` path deliberately
-    never injects a user-writable import path into root.  Bridging the
-    original user's site-packages here is therefore a deliberate, explicit
-    developer convenience rather than an automatic escalation.
-
-    The directories are *appended* (not prepended) so that the project's own
-    source tree keeps precedence: prepending them lets an installed
-    ``pmemstat`` package shadow the working copy, silently running an old
-    release instead of the changes under test.
+    The test is on ``sys.prefix`` (the venv root), never on the executable
+    path: ``.venv/bin/python`` is a symlink to the system interpreter, so
+    ``realpath(sys.executable)`` is identical both inside and outside the venv
+    and would wrongly report "already in the venv".
     """
-    if os.geteuid() != 0:
+    return os.path.realpath(sys.prefix) == os.path.realpath(venv_dir)
+
+
+def re_exec_in_project_venv():
+    """Re-exec this script with ``./.venv/bin/python`` when it exists.
+
+    ``#!/usr/bin/env python3`` may resolve to a system interpreter that does
+    not have the pinned ``console-window`` dependency.  Re-exec'ing into the
+    project venv keeps ``./runner`` working no matter which interpreter the
+    developer's shell picks, and it means the later sudo elevation hands root
+    the same ``.venv/bin/python`` -- so root imports the pinned dependency from
+    the venv (which root can read) instead of a per-user site-packages
+    directory that root does not search.
+
+    This is a developer convenience only: the installed ``pmemstat`` entry
+    point never does this, and its ``--sudo`` path deliberately refuses to
+    inject a user-writable import path into root.
+
+    On success the process image is replaced and this function never returns.
+    If the venv is missing or cannot be executed, the current interpreter is
+    used unchanged.
+    """
+    if running_in_project_venv():
         return
-    sudo_user = os.environ.get('SUDO_USER')
-    if not sudo_user or sudo_user == 'root':
+    if not os.access(venv_python, os.X_OK):
         return
     try:
-        user_home = pwd.getpwnam(sudo_user).pw_dir
-    except KeyError:
-        return
-    ver = f'python{sys.version_info.major}.{sys.version_info.minor}'
-    for candidate in (
-            os.path.join(user_home, '.local', 'lib', ver, 'site-packages'),
-            os.path.join(user_home, '.local', 'lib', 'python3', 'site-packages'),
-    ):
-        if os.path.isdir(candidate) and candidate not in sys.path:
-            sys.path.append(candidate)
+        os.execv(venv_python,
+                 [venv_python, os.path.abspath(__file__)] + sys.argv[1:])
+    except OSError as exc:
+        print(f'pmemstat: could not re-exec in {venv_python}: {exc}; '
+              'continuing with the current interpreter', file=sys.stderr)
 
 
 def user_mode_requested(args):
@@ -78,9 +86,8 @@ def maybe_elevate():
 
     Running the working tree as root shows every process.  Elevating through
     this wrapper (instead of handing the *installed* ``pmemstat`` to sudo, or
-    letting ``pmemstat --sudo`` re-exec an isolated interpreter) preserves the
-    project directory on ``sys.path`` and bridges the invoking user's
-    ``--user`` site-packages (see :func:`add_invoking_users_site_packages`), so
+    letting ``pmemstat --sudo`` re-exec an isolated interpreter) runs the
+    project's own ``.venv/bin/python`` (see :func:`re_exec_in_project_venv`), so
     both the source under test and its pinned dependency are the ones that run.
 
     On success the process is replaced and this function never returns.  If
@@ -106,7 +113,7 @@ def maybe_elevate():
               'continuing as user (pass -U to silence this)', file=sys.stderr)
 
 
-add_invoking_users_site_packages()
+re_exec_in_project_venv()
 maybe_elevate()
 
 # Import and run the main module directly

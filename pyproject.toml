@@ -30,12 +30,22 @@ dependencies = [
     # PMemStat's curses UI depends on this package's specific API and behavior.
     # The exact pin both protects against unexpected upstream changes and grants
     # the author freedom to make backwards-incompatible revisions. Do not relax.
-    'console-window == 1.4.3',
+    'console-window == 2.0.0.8',
 ]
 
 [project.urls]
 "Homepage" = "https://github.com/joedefen/pmemstat"
 "Bug Tracker" = "https://github.com/joedefen/pmemstat/issues"
+
+[project.optional-dependencies]
+# Local development tooling.  Create the project venv with:
+#     python3 -m venv .venv
+#     .venv/bin/python -m pip install -e '.[dev]'
+# (pylint is pinned here to match the CI lint gate.)
+dev = [
+    'pylint == 3.3.4',
+    'build',
+]
 
 [project.scripts]
 pmemstat = "pmemstat.main:run"
