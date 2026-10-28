@@ -64,29 +64,9 @@ from pmemstat.Pressure import format_pressure_lines, read_system_pressure
 # Provide a clear, actionable message instead of a bare ImportError when the
 # pinned package is missing or when a different version has been substituted.
 # Keep this in sync with the pin in pyproject.toml's ``dependencies``.
-_CONSOLE_WINDOW_PIN = '2.0.0.9'
-try:
-    import console_window
-    from console_window import (ConsoleWindow, ConsoleWindowOpts,
-                                OptionSpinner, IncrementalSearchBar,
-                                InlineConfirmation)
-except ImportError as _cw_exc:  # pragma: no cover (only on a broken install)
-    raise SystemExit(
-        'pmemstat requires the console-window package pinned to '
-        f'version {_CONSOLE_WINDOW_PIN} (an intentional exact pin by the author).\n'
-        f'Could not import console_window: {_cw_exc}\n'
-        'Install/repair it inside the project virtualenv with:\n'
-        f"    .venv/bin/python -m pip install 'console-window=={_CONSOLE_WINDOW_PIN}'"
-    ) from _cw_exc
-
-_cw_found = getattr(console_window, '__version__', None)
-if _cw_found is not None and _cw_found != _CONSOLE_WINDOW_PIN:  # pragma: no cover
-    raise SystemExit(
-        'pmemstat requires console-window=='
-        f'{_CONSOLE_WINDOW_PIN} but found {_cw_found}.\n'
-        'The exact pin is intentional. Reinstall the pinned version with:\n'
-        f"    .venv/bin/python -m pip install 'console-window=={_CONSOLE_WINDOW_PIN}'"
-    )
+from console_window import (ConsoleWindow, ConsoleWindowOpts,
+                            OptionSpinner, IncrementalSearchBar,
+                            InlineConfirmation)
 
 # Trace Levels:
 #  0 - forced, temporary debugging (comment it out)
