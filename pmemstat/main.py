@@ -2455,7 +2455,7 @@ class PmemStat:
     def emit_key_legend(self):
         """Emit the key legend (first header line) with the live search field.
 
-        The legend is left-aligned so '[?]help' sits above the first digit of
+        The legend is left-aligned so '[?]:help' sits above the first digit of
         the leader's 'Tot=' value; the search field is appended after it and is
         drawn non-dimmed to signal that it is live. When not running as root the
         leftmost pad is filled with a '--user' marker (the flag that selects the

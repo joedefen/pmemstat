@@ -1012,7 +1012,7 @@ class TestKeyLegend(unittest.TestCase):
     def test_search_field_is_on_the_legend_line(self):
         line = self._legend(0, search='needle')
         self.assertTrue(line.endswith('/needle'), line)
-        self.assertIn('[?]help', line)
+        self.assertIn('[?]:help', line)
 
 
 class TestOthText(unittest.TestCase):
