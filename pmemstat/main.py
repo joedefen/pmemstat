@@ -54,12 +54,6 @@ import curses
 from types import SimpleNamespace
 from io import StringIO
 from datetime import datetime, timedelta, timezone
-from pmemstat.KillThem import KillThem
-from pmemstat.CpuSmooth import CpuSmooth, SysStat
-from pmemstat import History
-from pmemstat.CGroup import (CGroup, cgroup_leaf, has_descendant,
-                             local_values, parse_cgroup_lines)
-from pmemstat.Pressure import format_pressure_lines, read_system_pressure
 # console-window is intentionally pinned to an exact version (see pyproject.toml).
 # Provide a clear, actionable message instead of a bare ImportError when the
 # pinned package is missing or when a different version has been substituted.
@@ -67,6 +61,12 @@ from pmemstat.Pressure import format_pressure_lines, read_system_pressure
 from console_window import (ConsoleWindow, ConsoleWindowOpts,
                             OptionSpinner, IncrementalSearchBar,
                             InlineConfirmation)
+from pmemstat.KillThem import KillThem
+from pmemstat.CpuSmooth import CpuSmooth, SysStat
+from pmemstat import History
+from pmemstat.CGroup import (CGroup, cgroup_leaf, has_descendant,
+                             local_values, parse_cgroup_lines)
+from pmemstat.Pressure import format_pressure_lines, read_system_pressure
 
 # Trace Levels:
 #  0 - forced, temporary debugging (comment it out)
