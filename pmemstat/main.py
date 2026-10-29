@@ -2974,8 +2974,11 @@ class PmemStat:
         spin.add_key('help', '? - help screen', genre='action')
         spin.add_key('screen_escape', 'ESC - back one screen', keys=27,
                      genre='action')
+        # 't' opens the picker from the report and from Help alike, so the key
+        # listed on the help body actually works there.  The picker is pushed
+        # onto the stack, so ESC returns to whichever screen opened it.
         spin.add_key('theme_screen', 't - theme picker', genre='action',
-                     scope=MAIN_ST)
+                     scope=[MAIN_ST, HELP_ST])
         spin.add_key('spin_theme', 't - cycle theme', genre='action',
                      scope=THEMES_ST)
         spin.add_key('kill_mode', 'K - kill mode', vals=[False, True],
@@ -3118,6 +3121,10 @@ class HelpScreen(PmemScreen):
     def help_ACTION(self):
         """'?' closes Help again (ESC does the same via screen_escape)."""
         self.app.stack.pop()
+
+    def theme_screen_ACTION(self):
+        """'t' opens the theme picker; ESC there returns to Help."""
+        self.app.stack.push(THEMES_ST, self.app.window.pick_pos)
 
     def show_keys_ACTION(self):
         """'K' toggles demo mode: the last key pressed is shown on screen.

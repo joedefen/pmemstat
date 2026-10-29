@@ -1740,7 +1740,7 @@ class TestScreens(unittest.TestCase):
         spin.add_key('help', '? - help screen', genre='action')
         spin.add_key('screen_escape', 'ESC - back', keys=27, genre='action')
         spin.add_key('theme_screen', 't - theme picker', genre='action',
-                     scope=main_module.MAIN_ST)
+                     scope=[main_module.MAIN_ST, main_module.HELP_ST])
         spin.add_key('spin_theme', 't - cycle theme', genre='action',
                      scope=main_module.THEMES_ST)
         spin.add_key('kill_mode', 'K - kill mode', vals=[False, True], obj=opts)
@@ -1777,6 +1777,17 @@ class TestScreens(unittest.TestCase):
 
     def test_escape_on_main_is_a_no_op(self):
         pm = self._app()
+        self._press(pm, 27)
+        self.assertEqual(pm.stack.curr.num, main_module.MAIN_ST)
+
+    def test_theme_from_help_returns_to_help(self):
+        """'t' on Help opens the picker; ESC returns to Help, not the report."""
+        pm = self._app()
+        self._press(pm, ord('?'))
+        self._press(pm, ord('t'))
+        self.assertEqual(pm.stack.curr.num, main_module.THEMES_ST)
+        self._press(pm, 27)
+        self.assertEqual(pm.stack.curr.num, main_module.HELP_ST)
         self._press(pm, 27)
         self.assertEqual(pm.stack.curr.num, main_module.MAIN_ST)
 

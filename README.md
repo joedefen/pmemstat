@@ -16,6 +16,8 @@
 
 # pmemstat - Proportional Memory Status
 
+![pmemstat animated demo](https://github.com/joedefen/pmemstat/blob/main/images/pmemstat.2026-10-29.14-43.gif?raw=true)
+
 `pmemstat` shows detailed **proportional** memory use of **Linux** processes by digesting `/proc/{PID}/smaps` and `/proc/{PID}/smaps_rollup`.
 
 Proportional memory splits the cost of shared memory among the processes sharing it (instead of counting it repeatedly, as `top` does) and excludes uninstantiated virtual memory.
