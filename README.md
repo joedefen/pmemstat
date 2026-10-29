@@ -161,7 +161,7 @@ cgroup v2 accounting is **hierarchical**: each cgroup's figures include its desc
 Reading `/proc/<pid>/cgroup` and `/sys/fs/cgroup` needs no root, so the grouping works unprivileged too (the PSS columns still reflect only the processes you can read).
 
 ## System pressure (PSI)
-With `-P` (or the `p` key in window mode) pmemstat adds a small header table reporting Linux **Pressure Stall Information**, read from `/proc/pressure/{memory,cpu,io}`: the fraction of time work stalled waiting for a resource, so higher means more of a bottleneck.
+With `-P` (or the `P` key in window mode) pmemstat adds a small header table reporting Linux **Pressure Stall Information**, read from `/proc/pressure/{memory,cpu,io}`: the fraction of time work stalled waiting for a resource, so higher means more of a bottleneck.
 
 ```
        SOME 10s     60s    300s     FULL 10s     60s    300s
@@ -243,6 +243,24 @@ A grouping's *own* name deliberately keeps the default styling rather than
 terminal's default background, which a light-background terminal cannot show,
 and `key/info` is the densest text on the screen.
 
+### Themes, `mono`, and persistence
+`t` opens the theme picker (ESC returns) and `t` there cycles the appearance:
+console-window's colour themes plus **`mono`**, which turns colour off entirely.
+`mono` is pmemstat's own appearance, not a console-window theme (the library's
+`dark-mono`/`light-mono` are still colour themes): with it the semantic roles
+above collapse to attributes -- changing numbers and titles bold, confirmations
+bold-and-reversed -- so the report keeps its emphasis hierarchy on a
+monochrome terminal.
+
+The choice is remembered per user in `ui.json` under
+`${XDG_CONFIG_HOME:-~/.config}/pmemstat/` (`PMEMSTAT_CONFIG_DIR` overrides the
+directory). A root run via `sudo` writes the **invoking** user's file (resolved
+through `SUDO_USER`, like the rest of the family), so `sudo pmemstat` does not
+bury your preference under `/root`. Startup precedence is `--theme` /
+`--no-color`, then the standard `NO_COLOR` convention, then the saved choice;
+`--theme mono` is the same as `--no-color`, and `--list-themes` prints the names
+and exits.
+
 ## Memory growth (leak) detection
 
 With `--growth-style` (or the `G` key in window mode) `pmemstat` annotates the
@@ -271,7 +289,7 @@ groups that are growing, making slow leaks visible without scrolling history:
   first 16 seconds never count), so startup bursts age out; growth is clamped at
   zero, so shrinking is not reported.
 * A row is annotated only if its growth (KB) is at least `-k` **and** it is
-  among the top-N growers (`--growth-top`, default `all`; `t` cycles `all`/`10`).
+  among the top-N growers (`--growth-top`, default `all`; `p` cycles `all`/`10`).
   `-s growth` sorts by the displayed metric.
 * With a cgroup grouping the metric is the grouping's total (`footprt` for
   `-g cgroup`, `kcharge` for `-g cgroupCharge`) rather than proportional PSS.
@@ -302,11 +320,17 @@ The top line of the header is an always-visible key legend with the live search
 field appended, so the available keys are in evidence without opening the help
 screen:
 
-    ?:help group units sort cpu Kill pSI Growth /{regex}
+    ?:help group units sort cpu Kill PSI Growth /{regex}
 
 `?` opens the complete list of keys plus the navigation keys (press it again, or
 `ESC`, to return). `zap` is appended for a root run while the growth annotation
 is showing, since resetting the baseline has no visible effect otherwise.
+
+Two keys are deliberately **not** on this one-line legend: `t` (the theme
+picker) is a once-in-a-while choice, and `K` on the Help screen (demo mode) is a
+presentation aid. Both are listed on the Help screen, and the line stays short
+enough that a narrow terminal truncates the least important trailing entries
+rather than the gateway to the full list.
 
 ## Help Screen (in Window Mode, Press '?')
 In window mode, `?` opens the help screen (and closes it again); **ESC** also
@@ -314,8 +338,10 @@ closes it, the same key the other tools in the family use to leave a screen.
 Navigation keys are at the top and, below the line, the option keys with their
 possible values (the current choice is highlighted). Typing an option key (e.g.
 `c`) advances to the next value, applied on the next loop; the option keys also
-work directly on the main screen without opening the help screen. **ENTER**
-closes nothing here — it stays reserved for kill mode's row selection.
+work directly on the main screen without opening the help screen. `t` opens the
+theme picker (where `t` cycles the appearance), and `K` on this screen toggles
+**demo mode**, which shows the last key pressed — handy for screencasts.
+**ENTER** closes nothing here — it stays reserved for kill mode's row selection.
 
 ## Inline Search (Window Mode)
 Press `/` to activate inline search mode; the live search field is the trailing
@@ -324,7 +350,8 @@ case-insensitively, matching any part of the process info. **Enter** commits the
 search; **ESC** cancels and clears it.
 
 ## Kill Mode (Window Mode)
-Press `K` to enter "Kill Mode" where you can select and kill processes:
+Press `K` (on the report; on the Help screen `K` is demo mode instead) to enter
+"Kill Mode" where you can select and kill processes:
 1. Use the navigation keys to highlight a row and press **Enter**
 2. An inline confirmation prompt names the process and its PID count; press **`y`** to kill the process(es) or **ESC** to cancel
 3. A brief flash message reports the result

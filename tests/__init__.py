@@ -10,13 +10,37 @@ genuine dependency.
 import sys
 import types
 
+#: True when the real ``console_window`` is importable, so tests can skip the
+#: ones that need its Screen/ScreenStack machinery (the stub cannot provide it).
+REAL_CONSOLE_WINDOW = True
+
 try:  # Prefer the real dependency when it is available.
     import console_window  # noqa: F401
 except ImportError:  # pragma: no cover - depends on the environment
+    REAL_CONSOLE_WINDOW = False
     _stub = types.ModuleType('console_window')
     for _name in ('ConsoleWindow', 'OptionSpinner',
                   'IncrementalSearchBar', 'InlineConfirmation'):
         setattr(_stub, _name, type(_name, (), {}))
+
+    class _StubScreen:
+        """Stand-in for Screen: enough for module import and subclassing."""
+
+        def __init__(self, app=None):
+            self.app = app
+            self.win = getattr(app, 'window', None)
+
+    class _StubScreenStack:
+        """Stand-in for ScreenStack (tests that use it skip themselves)."""
+
+        def __init__(self, win=None, obj=None, screens=(), screen_objects=None):
+            self.win = win
+            self.obj = obj
+            self.stack, self.curr = [], None
+            self.screen_objects = screen_objects or {}
+
+    _stub.Screen = _StubScreen
+    _stub.ScreenStack = _StubScreenStack
 
     # The semantic colour-pair ids must match console-window exactly: main.py
     # styles rows with Theme.<ROLE> and the colour tests assert the resulting

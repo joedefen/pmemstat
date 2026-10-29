@@ -18,7 +18,13 @@ from unittest import mock
 
 from console_window import Theme
 
+try:  # Imported as ``tests.test_main`` (the supported way) or directly?
+    from . import REAL_CONSOLE_WINDOW
+except ImportError:  # pragma: no cover - direct script execution
+    REAL_CONSOLE_WINDOW = False
+
 from pmemstat import main as main_module
+from pmemstat.UiPrefs import UiPrefs
 from pmemstat.main import (human, human_kb, ago_str, GrowthTracker,
                            compute_zram_effective, ProcMem, PmemStat,
                            args_from_env, ARGS_ENV, seed_from_baselines,
@@ -1016,6 +1022,16 @@ class TestKeyLegend(unittest.TestCase):
         self.assertTrue(line.endswith('/needle'), line)
         self.assertIn('[?]:help', line)
 
+    def test_theme_stays_off_the_one_line_legend(self):
+        """Theme is an occasional choice: the help screen lists it, the legend
+        does not (the legend must stay short enough not to truncate)."""
+        self.assertNotIn('[t]heme', PmemStat.KEY_LEGEND)
+        self.assertIn('[G]rowth', PmemStat.KEY_LEGEND)
+
+    def test_psi_uses_its_cli_letter(self):
+        self.assertIn('[P]SI', PmemStat.KEY_LEGEND)
+        self.assertNotIn('[p]SI', PmemStat.KEY_LEGEND)
+
 
 class TestOthText(unittest.TestCase):
     """The residual ``Oth`` is split only when running as root."""
@@ -1532,6 +1548,226 @@ class TestColourRoles(unittest.TestCase):
             pm.emit_segments([('ab', 1), ('cd', 2)])
         printer.assert_called_once()
         self.assertIn('abcd', printer.call_args.args[0])
+
+
+class TestMonoRoles(unittest.TestCase):
+    """The 'mono' appearance: roles collapse to attributes, never colour."""
+
+    def setUp(self):
+        self.addCleanup(main_module.set_colors_enabled, True)
+
+    def test_roles_become_attributes(self):
+        main_module.set_colors_enabled(False)
+        self.assertFalse(main_module.colors_enabled())
+        self.assertEqual(main_module.semantic_attr(Theme.HOTSWAP), curses.A_BOLD)
+        self.assertEqual(main_module.semantic_attr(Theme.EMPHASIS), curses.A_BOLD)
+        self.assertEqual(main_module.semantic_attr(Theme.INFO), curses.A_NORMAL)
+        self.assertEqual(main_module.semantic_attr(Theme.DANGER),
+                         curses.A_BOLD | curses.A_REVERSE)
+
+    def test_unknown_role_is_plain(self):
+        main_module.set_colors_enabled(False)
+        self.assertEqual(main_module.semantic_attr(999), curses.A_NORMAL)
+
+    def test_mono_row_runs_use_attributes(self):
+        """A growth run is bold (not orange) when colour is off."""
+        # PmemStat.__init__ seeds the process-wide switch from opts.colors, so
+        # this is also the check that the option plumbing reaches the roles.
+        pm = PmemStat(SimpleNamespace(units='MB', debug=0, cpu=False, psi=False,
+                                      others=True, groupby='exe', sortby='mem',
+                                      growth_style='both', colors=False))
+        summary = ProcMem.make_summary_dict(info='demo')
+        summary.update({'number': 3, 'pswap': 1024, 'ptotal': 4096})
+        pm.lead_width = len('3.5G 2h3m')
+        segments = pm.summary_segments('3.5G 2h3m', summary)
+        self.assertEqual([attr for text, attr in segments if '3.5G' in text],
+                         [curses.A_BOLD])
+
+
+class TestResolveUiPrefs(unittest.TestCase):
+    """Precedence: --theme/--no-color, then NO_COLOR, then the saved choice."""
+
+    @staticmethod
+    def _prefs(theme='', colors=True):
+        directory = tempfile.mkdtemp(prefix='pmemstat-prefs-')
+        prefs = UiPrefs(os.path.join(directory, 'ui.json'))
+        prefs.set('theme', theme)
+        prefs.set('colors', colors)
+        return prefs
+
+    @staticmethod
+    def _opts(theme=None, no_color=False):
+        return SimpleNamespace(theme=theme, no_color=no_color)
+
+    def test_saved_preferences_are_used(self):
+        theme, colors = main_module.resolve_ui_prefs(
+            self._opts(), self._prefs('nord', True), environ={})
+        self.assertEqual((theme, colors), ('nord', True))
+
+    def test_cli_theme_wins(self):
+        theme, colors = main_module.resolve_ui_prefs(
+            self._opts(theme='gruvbox'), self._prefs('nord', True), environ={})
+        self.assertEqual((theme, colors), ('gruvbox', True))
+
+    def test_no_color_env_disables_colour(self):
+        theme, colors = main_module.resolve_ui_prefs(
+            self._opts(), self._prefs('nord', True), environ={'NO_COLOR': '1'})
+        self.assertEqual((theme, colors), ('nord', False))
+
+    def test_cli_no_color_disables_colour(self):
+        _, colors = main_module.resolve_ui_prefs(
+            self._opts(no_color=True), self._prefs('', True), environ={})
+        self.assertFalse(colors)
+
+    def test_mono_means_no_colour_and_no_theme(self):
+        theme, colors = main_module.resolve_ui_prefs(
+            self._opts(theme='mono'), self._prefs('nord', True), environ={})
+        self.assertEqual((theme, colors), ('', False))
+
+    def test_saved_colour_off_survives(self):
+        _, colors = main_module.resolve_ui_prefs(
+            self._opts(), self._prefs('', False), environ={})
+        self.assertFalse(colors)
+
+
+@unittest.skipUnless(REAL_CONSOLE_WINDOW,
+                     'needs the real console-window package')
+class TestScreens(unittest.TestCase):
+    """Screen/Stack wiring: push/pop, ESC, and the theme picker."""
+
+    def _app(self, **over):
+        from console_window import (ConsoleWindow, ConsoleWindowOpts,
+                                    OptionSpinner, ScreenStack)
+        from console_window.backend import HeadlessBackend
+        directory = tempfile.mkdtemp(prefix='pmemstat-screens-')
+        prefs = UiPrefs(os.path.join(directory, 'ui.json'))
+        fields = dict(units='MB', debug=0, cpu=False, psi=False, others=True,
+                      groupby='exe', sortby='mem', growth_style='off',
+                      growth_top='all', window=True, search='', pids=[],
+                      top_pct=100, fit_to_window=False, cmdlen=100,
+                      min_delta_kb=1000, loop_secs=5, theme='', colors=True,
+                      prefs=prefs)
+        fields.update(over)
+        opts = SimpleNamespace(**fields)
+        pm = PmemStat(opts)
+        ProcMem.opts, ProcMem.pmemstat = opts, pm
+        pm.window = ConsoleWindow(opts=ConsoleWindowOpts(head_line=True),
+                                  backend=HeadlessBackend(rows=30, cols=100,
+                                                          colors=256),
+                                  singleton=False)
+        self.addCleanup(pm.window.stop_curses)
+        pm.screens = {main_module.MAIN_ST: main_module.MainScreen(pm),
+                      main_module.HELP_ST: main_module.HelpScreen(pm),
+                      main_module.THEMES_ST: main_module.ThemeScreen(pm)}
+        pm.stack = ScreenStack(pm.window, opts, main_module.SCREEN_NAMES,
+                               pm.screens)
+        # Registered as window_loop() does it, so the scope bookkeeping (HELP
+        # subtracts K from kill mode; p/P are distinct letters) is exercised.
+        spin = pm.spin = OptionSpinner(stack=pm.stack)
+        spin.add_key('help', '? - help screen', genre='action')
+        spin.add_key('screen_escape', 'ESC - back', keys=27, genre='action')
+        spin.add_key('theme_screen', 't - theme picker', genre='action',
+                     scope=main_module.MAIN_ST)
+        spin.add_key('spin_theme', 't - cycle theme', genre='action',
+                     scope=main_module.THEMES_ST)
+        spin.add_key('kill_mode', 'K - kill mode', vals=[False, True], obj=opts)
+        spin.add_key('show_keys', 'K - show keys (demo mode)', genre='action',
+                     scope=main_module.HELP_ST)
+        spin.add_key('growth_top', 'p - top-N growers', vals=['all', '10'],
+                     obj=opts)
+        spin.add_key('psi', 'P - show PSI (header + memPSI%)',
+                     vals=[False, True], obj=opts)
+        return pm
+
+    @staticmethod
+    def _press(pm, key):
+        """One key through the app, then through the stack's action router."""
+        pm.do_key(key)
+        pm.stack.perform_actions(pm.spin)
+
+    def test_help_pushes_and_pops(self):
+        pm = self._app()
+        self._press(pm, ord('?'))
+        self.assertEqual(pm.stack.curr.num, main_module.HELP_ST)
+        pm.screens[main_module.HELP_ST].draw_screen()
+        self.assertIn('HELP SCREEN', pm.window.head.texts[0])
+        self.assertIn('? - help screen',
+                      ' '.join(pm.window.body.texts))
+        self._press(pm, ord('?'))
+        self.assertEqual(pm.stack.curr.num, main_module.MAIN_ST)
+
+    def test_escape_pops_back(self):
+        pm = self._app()
+        self._press(pm, ord('?'))
+        self._press(pm, 27)
+        self.assertEqual(pm.stack.curr.num, main_module.MAIN_ST)
+
+    def test_escape_on_main_is_a_no_op(self):
+        pm = self._app()
+        self._press(pm, 27)
+        self.assertEqual(pm.stack.curr.num, main_module.MAIN_ST)
+
+    def test_theme_screen_lists_mono(self):
+        pm = self._app()
+        self._press(pm, ord('t'))
+        self.assertEqual(pm.stack.curr.num, main_module.THEMES_ST)
+        pm.screens[main_module.THEMES_ST].draw_screen()
+        text = ' '.join(pm.window.body.texts)
+        self.assertIn(main_module.MONO_THEME, text)
+        self.assertIn('remembered', text)
+
+    def test_theme_cycles_persist_the_choice(self):
+        pm = self._app()
+        self._press(pm, ord('t'))
+        self._press(pm, ord('t'))
+        chosen = pm.opts.theme
+        self.assertIn(chosen, Theme.list_all())
+        self.assertEqual(pm.prefs.get('theme'), chosen)
+        self.assertTrue(pm.prefs.get('colors'))
+
+    def test_mono_cycle_turns_colour_off_and_remembers_it(self):
+        pm = self._app()
+        self.addCleanup(main_module.set_colors_enabled, True)
+        self._press(pm, ord('t'))
+        for _ in range(len(pm.theme_choices())):
+            if pm.theme_label() == main_module.MONO_THEME:
+                break
+            self._press(pm, ord('t'))
+        self.assertEqual(pm.theme_label(), main_module.MONO_THEME)
+        self.assertFalse(main_module.colors_enabled())
+        self.assertEqual(pm.prefs.get('theme'), '')
+        self.assertFalse(pm.prefs.get('colors'))
+        self.assertEqual(main_module.semantic_attr(Theme.HOTSWAP), curses.A_BOLD)
+
+    def test_kill_and_demo_share_k_without_colliding(self):
+        """'K' kills on the report and toggles demo mode on Help only."""
+        pm = self._app()
+        self._press(pm, ord('K'))
+        self.assertTrue(pm.opts.kill_mode)
+        pm.opts.kill_mode = False
+        pm.window.set_pick_mode(False)
+        pm.window.status = mock.Mock()
+        self._press(pm, ord('?'))
+        self._press(pm, ord('K'))
+        self.assertFalse(pm.opts.kill_mode)          # not kill mode here
+        self.assertTrue(pm.window.opts.demo_mode)    # demo mode instead
+        pm.window.status.assert_called()
+        self.assertIn('demo mode', pm.window.status.call_args.args[0])
+
+    def test_main_screen_draws_once_per_refresh(self):
+        pm = self._app()
+        # Skip the transient pre-scan frame: it calls render(), which needs
+        # curses.ACS_HLINE -- installed only once a real screen exists.
+        pm.first_loop = False
+        pm.regroup_pending = False
+        main = pm.screens[main_module.MAIN_ST]
+        main.draw_screen()
+        self.assertTrue(any('--TOTALS' in line
+                            for line in pm.window.head.texts))
+        self.assertFalse(pm.needs_refresh)
+        before = list(pm.window.head.texts)
+        main.draw_screen()          # no refresh requested: model untouched
+        self.assertEqual(pm.window.head.texts, before)
 
 
 if __name__ == '__main__':

@@ -60,13 +60,14 @@ from datetime import datetime, timedelta, timezone
 # Keep this in sync with the pin in pyproject.toml's ``dependencies``.
 from console_window import (ConsoleWindow, ConsoleWindowOpts,
                             OptionSpinner, IncrementalSearchBar,
-                            InlineConfirmation, Theme)
+                            InlineConfirmation, Theme, Screen, ScreenStack)
 from pmemstat.KillThem import KillThem
 from pmemstat.CpuSmooth import CpuSmooth, SysStat
 from pmemstat import History
 from pmemstat.CGroup import (CGroup, cgroup_leaf, has_descendant,
                              local_values, parse_cgroup_lines)
 from pmemstat.Pressure import format_pressure_lines, read_system_pressure
+from pmemstat.UiPrefs import UiPrefs
 
 # Trace Levels:
 #  0 - forced, temporary debugging (comment it out)
@@ -104,6 +105,15 @@ GROWTH_VIEWS = ('exe', 'cmd', 'pid') + CGROUP_GROUPS
 
 # Set PMEMSTAT_NO_HISTORY to any value to disable cross-run history entirely.
 HISTORY_ENV_DISABLE = 'PMEMSTAT_NO_HISTORY'
+
+# pmemstat's own "no colour at all" pseudo-theme.  console-window has no such
+# theme (its 'dark-mono'/'light-mono' are still colour themes), so mono lives
+# here: every semantic role degrades to an attribute instead of a colour pair.
+MONO_THEME = 'mono'
+
+# Screen identities for the ScreenStack; MAIN is the report itself.
+MAIN_ST, HELP_ST, THEMES_ST = 0, 1, 2
+SCREEN_NAMES = ('MAIN', 'HELP', 'THEMES')
 
 
 def is_cgroup_groupby(groupby):
@@ -157,15 +167,51 @@ def cgroup_view_totals(data):
 #   SUCCESS  - the 'A' marker on a group that has just appeared
 #   DANGER   - an irreversible action about to happen (kill / growth reset)
 #   A_DIM    - labels, meta text, zero-valued cells and 'n/a' (skipped by eye)
+# Role -> attribute used when colour is off (the 'mono' theme).  The hierarchy
+# is preserved with emphasis instead of hue: changing numbers and titles are
+# bold, destructive prompts are bold+reversed, and informational values carry
+# nothing (their dim labels already distinguish them).
+MONO_ROLES = {
+    Theme.HOTSWAP: curses.A_BOLD,
+    Theme.EMPHASIS: curses.A_BOLD,
+    Theme.SUCCESS: curses.A_BOLD,
+    Theme.WARNING: curses.A_BOLD,
+    Theme.DANGER: curses.A_BOLD | curses.A_REVERSE,
+    Theme.ERROR: curses.A_BOLD | curses.A_REVERSE,
+    Theme.INFO: curses.A_NORMAL,
+    Theme.PROGRESS: curses.A_NORMAL,
+    Theme.OLD_SUCCESS: curses.A_NORMAL,
+}
+
+# Process-wide colour switch, mirroring console-window's glyph-mode policy: one
+# terminal, so one decision.  Seeded from the options at startup and flipped by
+# the 'mono' entry in the theme picker.
+_COLORS_ENABLED = True
+
+
+def set_colors_enabled(enabled):
+    """Turn semantic colour on or off for the whole process ('mono' turns it off)."""
+    global _COLORS_ENABLED  # pylint: disable=global-statement
+    _COLORS_ENABLED = bool(enabled)
+
+
+def colors_enabled():
+    """True while semantic roles resolve to colour pairs rather than attributes."""
+    return _COLORS_ENABLED
+
+
 def semantic_attr(pair_id):
     """Attribute for a console-window ``Theme`` pair, or 0 when no colour.
 
-    Both ``curses.has_colors()`` and ``curses.color_pair()`` raise
-    ``curses.error`` before ``initscr()``; the one-shot (``-W``) report and the
-    unit tests both run with no screen, and a failed colour lookup must never
-    abort a refresh.  A terminal without colour -- or a theme that did not
-    install the pair -- therefore degrades to plain text.
+    With colour off (the 'mono' theme) the role becomes an attribute from
+    :data:`MONO_ROLES` instead, so the report keeps its emphasis hierarchy on a
+    monochrome terminal.  Otherwise: both ``curses.has_colors()`` and
+    ``curses.color_pair()`` raise ``curses.error`` before ``initscr()``, and the
+    one-shot (``-W``) report and the unit tests both run with no screen, so a
+    failed lookup must never abort a refresh; it degrades to plain text.
     """
+    if not _COLORS_ENABLED:
+        return MONO_ROLES.get(pair_id, curses.A_NORMAL)
     try:
         if not curses.has_colors():
             return 0
@@ -742,8 +788,10 @@ class ProcMem:
         try:
             cmdline_file = f'/proc/{self.pid}/cmdline'
             try:
-                # pylint: disable=consider-using-with
-                line = open(cmdline_file, encoding='utf-8').read()[:-1]
+                # Closed explicitly: this runs once per PID per scan, so a leaked
+                # handle here would accumulate for the life of the process.
+                with open(cmdline_file, encoding='utf-8') as handle:
+                    line = handle.read()[:-1]
             except FileNotFoundError as exc:
                 if DebugLevel:
                     DB(1, f'skip pid={self.pid} no-rollup-lines exc={type(exc).__name__}')
@@ -1112,7 +1160,7 @@ class PmemStat:
     # '?' is deliberately first: if the terminal is too narrow to render the
     # whole line, only the least-critical trailing entries are truncated while
     # the gateway to the complete list (and the navigation keys) stays visible.
-    KEY_LEGEND = ('[?]:help [g]roup [u]nits [s]ort [c]pu [K]ill [p]SI'
+    KEY_LEGEND = ('[?]:help [g]roup [u]nits [s]ort [c]pu [K]ill [P]SI'
                   ' [G]rowth')
     # Appended to the legend only when running as root *and* the growth
     # annotation is showing: 'z' zaps (resets) the cross-run growth history,
@@ -1164,8 +1212,18 @@ class PmemStat:
         self.pressure = {}  # PSI snapshot (only read when opts.psi)
         self.spin = OptionSpinner()
         self.units, self.divisor, self.fwidth = 0, 0, 0
-        self.mode = 'normal' # (or 'help' or ?'psi')
         setattr(opts, 'kill_mode', False) # pseudo option
+        # Screen-model state.  The report's window model survives between
+        # frames, so `needs_refresh` is what asks for a fresh /proc sample (a
+        # timeout, a presentation key, or returning from another screen), and
+        # `regroup_pending` carries the mode/fit change into that sample.
+        self.screens = {}
+        self.stack = None
+        self.prefs = getattr(opts, 'prefs', None)
+        self.needs_refresh = True
+        self.first_loop = True
+        self.regroup_pending = True
+        set_colors_enabled(getattr(opts, 'colors', True))
         self.groups_by_line = {}
         # Persistent per-(view, key) growth trackers. They live on the singleton
         # rather than on the groups, so changing the grouping (which rebuilds
@@ -1230,6 +1288,15 @@ class PmemStat:
         # zap_confirm_start(): 'z' only asks, 'y' resets, ESC / no answer does
         # not.
         self.zap_confirm_deadline = None
+
+    @property
+    def win(self):
+        """Alias for :attr:`window`, the name console-window's Screen expects.
+
+        ``Screen.__init__`` stores ``app.win``; pmemstat has always called the
+        window ``window``, so the alias keeps one name without losing the other.
+        """
+        return self.window
 
     def has_zram(self):
         """Have zRAM actual? """
@@ -2709,232 +2776,371 @@ class PmemStat:
         else:
             print(('' if resume else '\n') + line, end='')
 
-    def help_screen(self):
-        """Populate help screen"""
-        self.emit("-- HELP SCREEN ['?' or ESC closes Help; Ctrl-C exits ] --",
-                   to_head=True, attr=curses.A_BOLD)
-        self.spin.show_help_nav_keys(self.window)
+    # One early return per modal owner (confirmation, zap, search, '/', 'z',
+    # ENTER, spinner) is clearer than a nested dispatch tower here.
+    # pylint: disable=too-many-return-statements
+    def do_key(self, key):
+        """Route one key: modal widgets first, then the spinner's router.
+
+        Modal widgets (kill confirmation, the zap prompt, the search bar) own
+        every key while live, so no action can fire underneath a pending
+        destructive question.  Any key the spinner consumes requests a refresh,
+        because every option changes what the report draws.
+        """
+        if key is None:
+            return
+        if self.confirmation.active:
+            self._handle_kill_key(key)
+            return
         if self.zap_confirm_active():
-            # An armed 'z' also asks for its answer on the help screen, so the
-            # prompt is never invisible while it counts down.
-            self.emit(self.zap_confirm_text(),
-                      attr=curses.A_BOLD | semantic_attr(Theme.DANGER))
-        if os.geteuid() != 0:
-            self.emit('Hint: run "sudo pmemstat" to show all PIDs',
-                       attr=curses.A_BOLD)
-        self.spin.show_help_body(self.window)
-        if os.geteuid() == 0:
-            self.emit('z - zap the growth history (current values become '
-                      'baseline) - asks for "y"/ESC')
+            self.handle_zap_confirm_key(key)
+            self.needs_refresh = True
+            return
+        if self.search_bar.is_active and self.search_bar.handle_key(key):
+            self.needs_refresh = True
+            return
+        if key == ord('/'):
+            # Inline search: the bar owns keys until ENTER accepts or ESC clears.
+            self.search_bar.start(self.opts.search)
+            self.window.passthrough_mode = True
+            return
+        if key == ord('z'):
+            # Runtime equivalent of --reset-history-now (root only; the key is
+            # only passed here when root -- see window_loop).  It is
+            # destructive, so this only *arms* the confirmation prompt; 'y'
+            # commits it and ESC / expiry does not.  Kill mode owns its own
+            # confirmation, so it is left alone to avoid two live prompts.
+            if not self.opts.kill_mode:
+                self.zap_confirm_start()
+            self.needs_refresh = True
+            return
+        if key in (curses.KEY_ENTER, 10):
+            # ENTER never closes a screen (ESC is the one way back); in kill mode
+            # it selects the picked row.
+            if self.opts.kill_mode and self.stack.is_curr(MAIN_ST):
+                self._start_kill_confirmation()
+            return
+        if key in self.spin.keys:
+            self.spin.do_key(key, self.window)
+            if key == ord('u'):
+                self._set_units()
+            elif key == ord('K') and self.stack.is_curr(MAIN_ST):
+                self.window.set_pick_mode(self.opts.kill_mode)
+            self.needs_refresh = True
+
+    def _start_kill_confirmation(self):
+        """Ask 'y' to kill every process in the picked row."""
+        win = self.window
+        group = self.groups_by_line.get(win.pick_pos, None)
+        if not group:
+            # Nothing picked: ENTER just leaves kill mode.
+            self.opts.kill_mode = False
+            win.set_pick_mode(False)
+            return
+        pids = [x.pid for x in group.prcset]
+        pid_count = len(pids)
+        pid_label = f'[{pid_count} {"PID" if pid_count == 1 else "PIDs"}]'
+        self.confirmation.start(action_type='kill',
+                                identity=f'{group.summary["info"]} {pid_label}',
+                                mode='y')
+        win.passthrough_mode = True
+        self.needs_refresh = True
+
+    def _handle_kill_key(self, key):
+        """Feed one key to the live kill confirmation and act on the answer."""
+        result = self.confirmation.handle_key(key)
+        if result == 'confirmed':
+            group = self.groups_by_line.get(self.window.pick_pos, None)
+            if group:
+                pids = [x.pid for x in group.prcset]
+                ok, message = KillThem(pids).do_kill()
+                self.window.flash(f'{"✓" if ok else "✗"} {message}', duration=1.0)
+            self.confirmation.cancel()
+            self.window.passthrough_mode = False
+            self.opts.kill_mode = False
+            self.window.set_pick_mode(False)
+        elif result == 'cancelled':
+            self.confirmation.cancel()
+            self.window.passthrough_mode = False
+        self.needs_refresh = True
+
+    def theme_label(self):
+        """The appearance the picker should show as current."""
+        if not colors_enabled():
+            return MONO_THEME
+        return getattr(self.opts, 'theme', '') or 'default'
+
+    def theme_choices(self):
+        """Every appearance the picker cycles, in order."""
+        return list(Theme.list_all()) + [MONO_THEME]
+
+    def apply_theme(self, name):
+        """Make *name* the live appearance ('mono' turns colour off) and persist it.
+
+        ``console-window`` installs colour pairs per terminal and the picker's
+        choice must outlive the run, so this is the one place that touches both
+        the pair table and the preference file.
+        """
+        mono = name == MONO_THEME
+        self.opts.colors = not mono
+        self.opts.theme = '' if mono else name
+        set_colors_enabled(not mono)
+        if self.window:
+            self.window.set_theme('default' if mono else name)
+        prefs = self.prefs
+        if prefs is not None:
+            prefs.set('colors', not mono)
+            prefs.set('theme', self.opts.theme)
+            prefs.save()
+        self.needs_refresh = True
+        if self.window:
+            self.window.status(f'theme: {self.theme_label()}')
+
+    def cycle_theme(self):
+        """Advance the picker by one appearance."""
+        choices = self.theme_choices()
+        current = self.theme_label()
+        idx = choices.index(current) if current in choices else -1
+        self.apply_theme(choices[(idx + 1) % len(choices)])
 
     def window_loop(self):
-        """ TBD """
-        def do_key(key):
-            regroup = False
-            # ENSURE keys are in 'keys_we_handle'
-            if key in (ord('/'), ):
-                # Start inline search mode
-                self.search_bar.start(self.opts.search)
-                self.window.passthrough_mode = True
-                return regroup
-            if key == 27:
-                # ESC backs out of the Help screen -- the same key the rest of
-                # the family uses to leave a screen.  In the main view it does
-                # nothing here, and kill mode owns ESC through its own prompt.
-                if self.mode == 'help':
-                    self.mode = 'normal'
-                    self.window.set_pick_mode(self.opts.kill_mode)
-                return regroup
-            if key in (ord('z'), ):
-                # Runtime equivalent of --reset-history-now (root only; the key
-                # is only routed here when root -- see keys_we_handle).  It is
-                # destructive, so this only *arms* the confirmation prompt
-                # (zap_confirm_*); the reset happens when 'y' answers it.
-                # Kill mode owns ENTER/line selection and its own prompt, so it
-                # is left alone to avoid two overlapping confirmations.
-                if not self.opts.kill_mode:
-                    self.zap_confirm_start()
-                return regroup
-            if key in self.spin.keys:
-                self.spin.do_key(key, self.window)
-                if key in (ord('u'), ):
-                    self._set_units()
-                elif key in (ord('?'), ):
-                    # '?' is an action, not a cycle: it opens or closes Help.
-                    self.mode = 'normal' if self.mode == 'help' else 'help'
-                    self.window.set_pick_mode(False if self.mode == 'help'
-                                              else self.opts.kill_mode)
-                elif key in (ord('K'), ):
-                    if self.mode == 'normal':
-                        self.window.set_pick_mode(self.opts.kill_mode)
+        """Run the report under console-window's Screen model.
 
-            elif key in (curses.KEY_ENTER, 10):
-                # ENTER no longer closes Help: ESC is the one way back, as in
-                # the other apps.  ENTER keeps its meaning in kill mode.
-                if self.opts.kill_mode:
-                    win = self.window
-                    group = self.groups_by_line.get(win.pick_pos, None)
-                    if group:
-                        pids = [x.pid for x in group.prcset]
-                        # Start inline confirmation (requires 'y' key to confirm)
-                        pid_count = len(pids)
-                        pid_label = f'[{pid_count} {"PID" if pid_count == 1 else "PIDs"}]'
-                        self.confirmation.start(
-                            action_type='kill',
-                            identity=f'{group.summary["info"]} {pid_label}',
-                            mode='y'
-                        )
-                        win.passthrough_mode = True
-                    else:
-                        # No group selected, exit kill mode
-                        self.opts.kill_mode = False
-                        self.window.set_pick_mode(self.opts.kill_mode)
-            return regroup
+        One window, one ScreenStack: MAIN draws the report, HELP the key list,
+        THEMES the picker.  Keys flow through the spinner (which owns the
+        per-screen scopes) and the stack calls the matching ``<action>_ACTION``
+        method, so there is no central key tower here.
 
-        self.spin = OptionSpinner()
-        # '?' is an action, not a spinner (it used to cycle a 'mode' option).
-        # do_key dispatches it explicitly, so the spinner's one-shot flag is
-        # parked on a throwaway object; registering it here only keeps the key
-        # in the help screen's list.
-        self.spin.add_key('help', '? - help screen', obj=SimpleNamespace())
-        self.spin.add_key('kill_mode', 'K - kill mode', vals=[False, True],
-                comments='Select line + ENTER to kill selected', obj=self.opts)
-        self.spin.add_key('fit_to_window', 'f - fit rows to window',
-                          vals=[False, True], obj=self.opts)
-        self.spin.add_key('groupby', 'g - group by',
-                          vals=['exe', 'cmd', 'pid', 'cgroup',
-                                'cgroupCharge'], obj=self.opts)
-        self.spin.add_key('others', 'o - less category detail',
-                          vals=[False, True], obj=self.opts)
-        self.spin.add_key('sortby', 's - sort by',
-                          vals=['mem', 'cpu', 'name', 'growth'], obj=self.opts)
+        The report's window model survives between frames -- console-window
+        repaints from it -- so only a *refresh* costs a /proc scan: idle timeout,
+        a key that changes what is drawn, or returning from another screen.
+        """
+        # The window is created without app keys because the spinner's key set
+        # is only known once it is registered; set_handled_keys() installs it.
+        #
+        # return_if_pos_change=False is essential for smooth navigation: with
+        # the default (True), prompt() returns None *without* rendering as soon
+        # as a j/k/arrow key moves the viewport, and "None" is this app's
+        # timed-refresh signal, so a burst of buffered j/k would queue a full
+        # /proc scan per key.  With False, prompt() repaints the existing model
+        # itself and returns only on a handled key or the loop_secs timeout, so
+        # None really does mean "time to refresh the data".
+        window_opts = ConsoleWindowOpts(head_line=True,
+                                        return_if_pos_change=False)
+        self.window = ConsoleWindow(opts=window_opts)
+        self.screens = {MAIN_ST: MainScreen(self),
+                        HELP_ST: HelpScreen(self),
+                        THEMES_ST: ThemeScreen(self)}
+        self.stack = ScreenStack(self.window, self.opts, SCREEN_NAMES,
+                                 self.screens)
+        # Apply the remembered appearance before the first paint, so the very
+        # first frame is already in the user's colours (or in mono).
+        self.window.set_theme('default' if not colors_enabled()
+                              else (getattr(self.opts, 'theme', '') or 'default'))
+
+        self.spin = OptionSpinner(stack=self.stack)
+        spin = self.spin
+        # '?' and 'T' are actions: the stack routes each to <name>_ACTION on the
+        # current screen.  ENTER is deliberately not a screen key (ESC is the
+        # one way back, as in the other tools); it stays kill mode's selector.
+        spin.add_key('help', '? - help screen', genre='action')
+        spin.add_key('screen_escape', 'ESC - back one screen', keys=27,
+                     genre='action')
+        spin.add_key('theme_screen', 't - theme picker', genre='action',
+                     scope=MAIN_ST)
+        spin.add_key('spin_theme', 't - cycle theme', genre='action',
+                     scope=THEMES_ST)
+        spin.add_key('kill_mode', 'K - kill mode', vals=[False, True],
+                     obj=self.opts,
+                     comments='Select line + ENTER to kill selected')
+        # 'K' again -- but only on the Help screen, where kill mode has no
+        # meaning.  A scoped registration subtracts HELP from every earlier
+        # binding of the same key, so the two never collide, and the option
+        # shows up in the help list while staying off the report's legend.
+        spin.add_key('show_keys', 'K - show keys (demo mode)', genre='action',
+                     scope=HELP_ST)
+        spin.add_key('fit_to_window', 'f - fit rows to window',
+                     vals=[False, True], obj=self.opts)
+        spin.add_key('groupby', 'g - group by',
+                     vals=['exe', 'cmd', 'pid', 'cgroup', 'cgroupCharge'],
+                     obj=self.opts)
+        spin.add_key('others', 'o - less category detail', vals=[False, True],
+                     obj=self.opts)
+        spin.add_key('sortby', 's - sort by',
+                     vals=['mem', 'cpu', 'name', 'growth'], obj=self.opts)
         # NB: 'L' is a console_window navigation key (end-of-page), so use 'G'.
-        self.spin.add_key('growth_style', 'G - leak/growth mode',
-                          vals=['off', 'both', 'growth', 'rate'], obj=self.opts)
-        self.spin.add_key('growth_top', 't - top-N growers',
-                          vals=['all', '10'], obj=self.opts)
-        self.spin.add_key('units', 'u - memory units',
-                          vals=['MB', 'KB', 'human'], obj=self.opts)
-        self.spin.add_key('cpu', 'c - show cpu',
-                          vals=[False, True], obj=self.opts)
-        self.spin.add_key('psi', 'p - show PSI (header + memPSI%)',
-                          vals=[False, True], obj=self.opts)
-
-        keys_we_handle =  [ord('K'), ord('/'), 27, curses.KEY_ENTER, 10] + list(self.spin.keys)
+        spin.add_key('growth_style', 'G - leak/growth mode',
+                     vals=['off', 'both', 'growth', 'rate'], obj=self.opts)
+        # 't' now opens the theme picker, so the grower cap moves to 'p' (the
+        # biggest "pigs").  PSI takes 'P', the letter of its CLI flag (-P).
+        spin.add_key('growth_top', 'p - top-N growers', vals=['all', '10'],
+                     obj=self.opts)
+        spin.add_key('units', 'u - memory units', vals=['MB', 'KB', 'human'],
+                     obj=self.opts)
+        spin.add_key('cpu', 'c - show cpu', vals=[False, True], obj=self.opts)
+        spin.add_key('psi', 'P - show PSI (header + memPSI%)',
+                     vals=[False, True], obj=self.opts)
+        handled = set(spin.keys) | {ord('/'), curses.KEY_ENTER, 10}
         if os.geteuid() == 0:
             # 'z' zaps the growth history; offered only to root, since the
             # cross-run ledger's coverage depends on root's process view.
-            keys_we_handle.append(ord('z'))
-        # return_if_pos_change=False is essential for smooth navigation.  With the
-        # default (True), console_window's prompt() returns None *without*
-        # rendering as soon as a j/k/arrow key moves the viewport, and this app's
-        # "prompt() returned None" path is the timed-refresh path: it falls
-        # through to self.loop(), which rescans every PID (/proc,
-        # smaps_rollup, /proc/<pid>/cgroup, smaps for changed groups, cgroup
-        # files, growth trackers).  Each keystroke would therefore cost a full
-        # data collection, so a burst of j/k buffered in the tty keeps scrolling
-        # for seconds after the user stops.  With False, prompt() repaints the
-        # already-built rows itself (one screenful, cheap) and only returns on a
-        # handled key or on the loop_secs timeout, so None really does mean
-        # "time to refresh the data".
-        window_opts = ConsoleWindowOpts(head_line=True, keys=keys_we_handle,
-                                        return_if_pos_change=False)
-        self.window = ConsoleWindow(opts=window_opts)
-        is_first = True
-        was_groupby, regroup = self.opts.groupby, True
-        was_others = self.opts.others
-        for _ in range(1000000000):
-            if self.mode == 'help':
-                self.window.set_pick_mode(False)
-                self.help_screen()
-                self.window.render()
-                key = self.window.prompt(self.prompt_secs(self.opts.loop_secs))
-                if key is not None:
-                    if not self.handle_zap_confirm_key(key):
-                        do_key(key)
-                else:
-                    self.zap_confirm_expire()
-                self.window.clear()
-            elif self.mode == 'normal':
-                regroup = bool(was_groupby != self.opts.groupby)
-                if not regroup:
-                    regroup = bool(was_others != self.opts.others)
-                self.loop(datetime.now(), is_first=is_first, regroup=regroup)
+            handled.add(ord('z'))
+        self.window.set_handled_keys(handled)
+        was_groupby, was_others = self.opts.groupby, self.opts.others
+        while True:
+            if (self.opts.groupby != was_groupby
+                    or self.opts.others != was_others):
+                # A grouping change rebuilds every row, so it needs a new sample
+                # rather than a repaint of the old one.
                 was_groupby, was_others = self.opts.groupby, self.opts.others
-                regroup = False
-                self.window.set_pick_mode(self.opts.kill_mode)
-                self.window.render()
-                key = self.window.prompt(self.prompt_secs(self.opts.loop_secs))
-                if key is None:
-                    # prompt() timed out (refresh interval): fall through to a
-                    # fresh scan/redraw.  Navigation keys (j/k, arrows, page
-                    # keys) never produce None here: with
-                    # return_if_pos_change=False, prompt() repaints those
-                    # itself and keeps reading keys, so a keystroke burst is
-                    # drained at paint speed instead of triggering one full
-                    # /proc rescan per key (see the window construction above).
-                    # Never pass None into the key handlers (search bar
-                    # compares it).
-                    self.window.clear()
-                    # An unanswered 'z' prompt is answered by its deadline: no
-                    # answer means 'no'.  (prompt_secs() shortens the idle
-                    # timeout so the decision is never late by one loop_secs.)
-                    self.zap_confirm_expire()
-                    is_first = False
-                    continue
-                # Let confirmation handle keys when active (highest priority)
-                enter_kill_loop = True
-                if self.confirmation.active:
-                    result = self.confirmation.handle_key(key)
-                    if result == 'confirmed':
-                        # User confirmed - execute the kill
-                        group = self.groups_by_line.get(self.window.pick_pos, None)
-                        if group:
-                            pids = [x.pid for x in group.prcset]
-                            killer = KillThem(pids)
-                            ok, message = killer.do_kill()
-                            # Flash result message for 1 second
-                            self.window.flash(f'{"✓" if ok else "✗"} {message}', duration=1.0)
-                        self.confirmation.cancel()
-                        self.window.passthrough_mode = False
-                        self.opts.kill_mode = False
-                        self.window.set_pick_mode(self.opts.kill_mode)
-                    elif result == 'cancelled':
-                        # User cancelled with ESC - go back to outer loop to redisplay
-                        self.confirmation.cancel()
-                        self.window.passthrough_mode = False
-                        enter_kill_loop = False  # Skip kill loop to trigger redisplay
-                # The armed 'z' reset prompt owns the next key: only 'y' acts
-                # (ESC declines, anything else is ignored) so no other key can
-                # slip past a pending destructive action.
-                elif self.zap_confirm_active():
-                    self.handle_zap_confirm_key(key)
-                    enter_kill_loop = False  # redisplay without the prompt
-                # Let search bar handle keys when active
-                elif self.search_bar.is_active and self.search_bar.handle_key(key):
-                    pass  # Key was handled by search bar
-                else:
-                    do_key(key)
-                if enter_kill_loop:
-                    while self.opts.kill_mode and not self.confirmation.active:
-                        if self.mode == 'help':
-                            break
-                        self.window.render()
-                        key = self.window.prompt(self.opts.loop_secs)
-                        if key is None:
-                            continue
-                        # Let search bar handle keys when active
-                        if self.search_bar.is_active and self.search_bar.handle_key(key):
-                            pass  # Key was handled by search bar
-                        else:
-                            do_key(key)
-                            # If confirmation was just started, break to outer loop to show prompt
-                            if self.confirmation.active:
-                                break
+                self.regroup_pending = True
+                self.needs_refresh = True
+            current = self.stack.curr
+            screen = self.screens[current.num]
+            if current.num != MAIN_ST:
+                # Auxiliary screens are rebuilt from scratch every frame; the
+                # report's model is kept so keeping it costs no /proc scan.
                 self.window.clear()
-                is_first = False
+            screen.draw_screen()
+            self.window.render()
+            key = self.window.prompt(self.prompt_secs(self.opts.loop_secs))
+            if key is None:
+                # Idle timeout: take a fresh sample (and settle an armed 'z'.
+                # prompt_secs() shortens the wait while that prompt is armed, so
+                # the decision is never late by one loop_secs).
+                self.zap_confirm_expire()
+                self.needs_refresh = True
             else:
-                assert False, f'unsupported mode ({self.mode})'
+                self.do_key(key)
+            self.stack.perform_actions(self.spin)
+
+####################################################################################
+###### Screens (console-window ScreenStack model)
+####################################################################################
+class PmemScreen(Screen):
+    """Base screen; the report owner (``PmemStat``) is ``self.app``."""
+
+    app: 'PmemStat'
+
+    def screen_escape_ACTION(self):
+        """ESC goes back one screen (MAIN's stack is empty, so it is a no-op)."""
+        self.app.stack.pop()
+
+
+class MainScreen(PmemScreen):
+    """The memory report itself.
+
+    The report's window model is kept between frames (console-window repaints
+    from it), so this screen re-collects and re-emits only when the app asks for
+    a refresh: an idle timeout, a presentation key, or a return from another
+    screen.  That is what keeps j/k navigation from rescanning every PID.
+    """
+
+    def draw_screen(self):
+        app = self.app
+        if not app.needs_refresh:
+            return
+        app.window.clear()
+        app.loop(datetime.now(), is_first=app.first_loop,
+                 regroup=app.regroup_pending)
+        app.first_loop = False
+        app.regroup_pending = False
+        app.needs_refresh = False
+
+    def on_resume(self):
+        # Whatever happened on the other screen (a theme change, a grouping
+        # change made before it) the report should be redrawn from new data.
+        self.app.needs_refresh = True
+        return True
+
+    def help_ACTION(self):
+        """'?' opens the Help screen from the report."""
+        self.app.stack.push(HELP_ST, self.app.window.pick_pos)
+
+    def theme_screen_ACTION(self):
+        """'t' opens the theme picker from the report."""
+        self.app.stack.push(THEMES_ST, self.app.window.pick_pos)
+
+
+class HelpScreen(PmemScreen):
+    """The key list plus this app's own notes (zap prompt, sudo hint)."""
+
+    def draw_screen(self):
+        app = self.app
+        win = app.window
+        win.set_pick_mode(False)
+        win.add_header("-- HELP SCREEN ['?' or ESC closes Help; Ctrl-C exits ] --",
+                       attr=curses.A_BOLD)
+        if app.spin:
+            app.spin.show_help_nav_keys(win)
+            app.spin.show_help_body(win)
+        if app.zap_confirm_active():
+            # An armed 'z' also asks for its answer here, so the prompt is never
+            # invisible while it counts down.
+            win.add_body(app.zap_confirm_text(),
+                         attr=curses.A_BOLD | semantic_attr(Theme.DANGER))
+        if os.geteuid() != 0:
+            win.add_body('Hint: run "sudo pmemstat" to show all PIDs',
+                         attr=curses.A_BOLD)
+        else:
+            win.add_body('z - zap the growth history (current values become '
+                         'baseline) - asks for "y"/ESC')
+
+    def help_ACTION(self):
+        """'?' closes Help again (ESC does the same via screen_escape)."""
+        self.app.stack.pop()
+
+    def show_keys_ACTION(self):
+        """'K' toggles demo mode: the last key pressed is shown on screen.
+
+        Scoped to this screen (see the registration in ``window_loop``): on the
+        report 'K' enters kill mode, and a presentation aid must not compete
+        with that.
+        """
+        win = self.app.window
+        win.set_demo_mode(enabled=None)          # None toggles
+        state = 'on' if getattr(win.opts, 'demo_mode', False) else 'off'
+        win.status(f'demo mode: {state}')
+        self.app.needs_refresh = True
+
+
+class ThemeScreen(PmemScreen):
+    """Theme picker over console-window's themes plus pmemstat's 'mono'.
+
+    console-window has no true no-colour theme (its 'dark-mono'/'light-mono' are
+    still colour themes), so 'mono' is offered here as a pmemstat appearance:
+    the semantic roles collapse to attributes (see ``MONO_ROLES``).
+    """
+
+    ROLES = (
+        (Theme.HOTSWAP, 'HOTSWAP', 'growth, system deltas, growth label'),
+        (Theme.EMPHASIS, 'EMPHASIS', 'titles: column header, TOTALS row'),
+        (Theme.INFO, 'INFO', 'zRAM estimates'),
+        (Theme.SUCCESS, 'SUCCESS', 'new grouping, view descriptor'),
+        (Theme.DANGER, 'DANGER', 'kill / reset confirmations'),
+        (Theme.WARNING, 'WARNING', 'reserved for threshold warnings'),
+    )
+
+    def draw_screen(self):
+        app = self.app
+        win = app.window
+        win.set_pick_mode(False)
+        win.add_header(f'COLOR THEME:  {app.theme_label():^18}', attr=curses.A_BOLD)
+        win.add_header('   Press [t] to cycle themes, ESC to return',
+                       resume=True)
+        swatch = win.glyph('swatch') * 8
+        for pair_id, name, description in self.ROLES:
+            win.add_body(f'{name:10} {swatch}  {description}',
+                         attr=semantic_attr(pair_id))
+        win.add_body('')
+        win.add_body(f'{MONO_THEME:10} no colour at all (bold/reverse only)',
+                     attr=curses.A_DIM)
+        win.add_body('The choice is remembered for the next run.', attr=curses.A_DIM)
+
+    def spin_theme_ACTION(self):
+        """'t' here advances to the next appearance (and persists it)."""
+        self.app.cycle_theme()
+
 
 # Root auto-elevation is opt-in so the tool never escalates behind the
 # user's back; the caller opts in per invocation with ``--sudo`` (which
@@ -2955,6 +3161,29 @@ def args_from_env():
     'two words']``). Raises ``ValueError`` on unbalanced quotes.
     """
     return shlex.split(os.environ.get(ARGS_ENV, ''))
+
+
+def resolve_ui_prefs(opts, prefs, environ=None):
+    """Starting ``(theme, colors)`` from the CLI, the environment and the prefs.
+
+    Precedence, highest first: ``--theme`` / ``--no-color``, the ``NO_COLOR``
+    convention (any non-empty value disables colour), then the saved
+    preference.  ``theme`` is ``''`` for console-window's default; the special
+    value ``'mono'`` is pmemstat's no-colour pseudo-theme, which also forces
+    ``colors`` off and is reported as ``theme=''`` (there is no library theme to
+    install -- mono is an attribute mapping).
+    """
+    env = os.environ if environ is None else environ
+    theme = getattr(opts, 'theme', None)
+    if not theme:
+        theme = prefs.get('theme') or ''
+    colors = bool(prefs.get('colors'))
+    if env.get('NO_COLOR') or getattr(opts, 'no_color', False):
+        colors = False
+    if theme == MONO_THEME:
+        colors = False
+        theme = ''
+    return theme, colors
 
 
 def _resolve_argv(raw_argv, env_text):
@@ -3199,6 +3428,14 @@ def main():
             help='CPU moving-average smoothing window in seconds [5-90, dflt=20]')
     parser.add_argument('-P', '--psi', action='store_true',
             help='show PSI (system pressure in header + memPSI%% column) [dflt=off]')
+    parser.add_argument('--theme', default=None, metavar='NAME',
+            help='initial colour theme (see --list-themes); "mono" disables '
+                 'colour. The T picker remembers the choice.')
+    parser.add_argument('--no-color', '--no-colour', action='store_true',
+            dest='no_color',
+            help='disable colour (the same as --theme mono)')
+    parser.add_argument('--list-themes', action='store_true',
+            help='list the available themes and exit')
     parser.add_argument('-g', '--groupby',
             choices=('exe', 'cmd', 'pid', 'cgroup', 'cgroupCharge'),
             default='exe',
@@ -3259,10 +3496,23 @@ def main():
     opts = parser.parse_args(effective_argv)
     # DB(0, f'opts={opts}')
 
+    if opts.list_themes:
+        for name in Theme.list_all():
+            print(f'{name:16} {Theme.THEMES[name]["name"]}')
+        print(f'{MONO_THEME:16} No colour (bold/reverse attributes only)')
+        return 0
+
     if opts.save_history_now:
         return save_history_now(opts)
     if opts.reset_history_now:
         return reset_history_now(opts)
+
+    # Preferences are loaded *after* the cron-style one-shot modes, which must
+    # never touch (or create) a user's config directory.
+    prefs = UiPrefs()
+    opts.theme, opts.colors = resolve_ui_prefs(opts, prefs)
+    opts.prefs = prefs
+    set_colors_enabled(opts.colors)
 
     if not opts.user and os.geteuid() != 0:
         if opts.sudo:
