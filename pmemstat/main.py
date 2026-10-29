@@ -1863,7 +1863,7 @@ class PmemStat:
             return True
         if result == 'confirmed':
             msg = ('Growth history zapped' if self.zap_history()
-                   else 'Growth baseline reset (ledger not rewritten)')
+                   else 'Growth baseline reset (saved history unchanged)')
         elif result == 'timeout':
             msg = 'Growth baseline unchanged (timed out)'
         else:
@@ -3171,12 +3171,13 @@ class ThemeScreen(PmemScreen):
         self.app.cycle_theme()
 
 
-# Root auto-elevation is opt-in so the tool never escalates behind the
-# user's back; the caller opts in per invocation with ``--sudo`` (which
-# ``PMEMSTAT_ARGS`` can supply persistently), never automatically.
+# pmemstat runs as root by default, re-executing itself through sudo so it can
+# read every process's smaps.  ``-U``/``--user`` is the explicit opt-out for the
+# rare Linux account without root capability (or for a deliberately partial,
+# own-processes-only view).
 
 # Extra default CLI arguments may be supplied once via PMEMSTAT_ARGS, e.g.:
-#     export PMEMSTAT_ARGS='--sudo --psi --loop 3 -s name'
+#     export PMEMSTAT_ARGS='--psi --loop 3 -s name'
 # The value is tokenized like a POSIX shell command line and prepended to the
 # real argv, so explicit command-line arguments still take precedence (and any
 # positional pids given on the command line are added to those from the env).
@@ -3262,8 +3263,19 @@ def _sudo_noninteractive_ok():
         return False
     return proc.returncode == 0
 
+def elevation_required(opts):
+    """True when this run should become root (the default, unless ``-U``).
+
+    Root is the default because reading every process's ``smaps`` requires it;
+    ``-U``/``--user`` is the explicit opt-out for an account that cannot
+    elevate (or for a deliberately user-only view).  A process that is already
+    root -- including the re-exec'd child -- needs no further elevation.
+    """
+    return not getattr(opts, 'user', False) and os.geteuid() != 0
+
+
 def rerun_module_as_root(module_name, args=None):
-    """Re-exec ``module_name`` as root via sudo, but only in a safe, opt-in way.
+    """Re-exec ``module_name`` as root via sudo, safely.
 
     ``args`` is the effective argv (``PMEMSTAT_ARGS`` already merged in) to
     replay for the root process; it defaults to ``sys.argv[1:]``. Passing the
@@ -3277,9 +3289,9 @@ def rerun_module_as_root(module_name, args=None):
     to fail loudly (see :func:`_elevate_or_exit`) instead of silently running
     with partial data.
 
-    Safety properties compared with the previous unconditional re-exec:
-      * never runs by default: the caller opts in via ``--sudo`` (which
-        can be supplied persistently through ``PMEMSTAT_ARGS``);
+    Safety properties:
+      * runs only for the default root view; ``-U``/``--user`` opts out, so
+        no account is escalated behind the user's back;
       * requires an interactive terminal unless sudo is already authorized
         non-interactively, so scripts/CI cannot hang on a password prompt;
       * re-execs the *same interpreter* in isolated mode (``-I``), so the
@@ -3320,29 +3332,29 @@ def _handle_sigterm(signum, _frame):
 
 
 def _elevate_or_exit(opts, effective_argv):
-    """Exit fatally when ``--sudo`` was requested but elevation cannot happen.
+    """Exit fatally when root elevation (the default) cannot happen.
 
-    A non-importable install (or a missing terminal) used to downgrade silently
-    to a user-only run whose warning scrolled off-screen, hiding that the data
-    was partial.  When root data was explicitly requested, failing visibly is
-    the safer behavior.  Callers invoke this only when not already root.
+    pmemstat runs as root by default so it can read every process's smaps.  If
+    that elevation cannot happen, failing visibly is safer than silently
+    downgrading to a partial view whose warning scrolls off-screen.  The one
+    exception is an explicit ``-U``/``--user`` run, which never reaches here.
     """
     reason = rerun_module_as_root('pmemstat.main', effective_argv)
     if reason is None:
         return  # already root; nothing to do
-    print(f'pmemstat: FATAL: root elevation was requested (--sudo) but failed '
-          f'({reason}); run as root (e.g. "sudo pmemstat") or fix the install.',
-          file=sys.stderr)
+    print(f'pmemstat: FATAL: could not elevate to root (the default): {reason}. '
+          'Run as root (e.g. "sudo pmemstat") or pass -U/--user for the '
+          'user-only view.', file=sys.stderr)
     sys.exit(1)
 
 
 def save_history_now(opts):
     """Collect the current stats once and write the ledger, then exit (no UI).
 
-    Intended for cron / system startup: it implies ``--sudo`` (data for all
-    processes needs root) and ignores every other option and environment
-    setting.  Prints nothing on success and returns ``0``; on failure it prints
-    an explanation to stderr and returns ``1``.
+    Intended for cron / system startup: it runs as root (elevating via sudo if
+    needed, because data for all processes needs root) and ignores every other
+    option and environment setting.  Prints nothing on success and returns
+    ``0``; on failure it prints an explanation to stderr and returns ``1``.
     """
     if os.geteuid() == 0:
         return _collect_and_save_history(opts)
@@ -3357,12 +3369,12 @@ def save_history_now(opts):
 def reset_history_now(opts):
     """Reset the ledger so every growth/delta is measured from the current values.
 
-    Like :func:`save_history_now` it performs one silent scan (implying
-    ``--sudo`` and ignoring the other options/environment) and exits, but it
-    *replaces* the ledger instead of merging: the current system and process
-    values become the new baseline, exactly as if the tool had first run just
-    after this boot.  Prints nothing on success and returns ``0``; on failure it
-    prints an explanation to stderr and returns ``1``.
+    Like :func:`save_history_now` it performs one silent scan (as root, ignoring
+    the other options/environment) and exits, but it *replaces* the ledger
+    instead of merging: the current system and process values become the new
+    baseline, exactly as if the tool had first run just after this boot.  Prints
+    nothing on success and returns ``0``; on failure it prints an explanation to
+    stderr and returns ``1``.
     """
     if os.geteuid() == 0:
         return _collect_and_save_history(opts, reset=True)
@@ -3482,18 +3494,19 @@ def main():
     parser.add_argument('-t', '--top-pct', type=int, default=100,
             help='report group contributing to top pct of ptotal [dflt=100]')
     parser.add_argument('-U', '--user', action='store_true',
-            help='run as user (NOT as root); marks the header with a dimmed '
-                 '"--user" so the degraded view is obvious')
-    parser.add_argument('--sudo', action='store_true',
-            help='re-run self as root via sudo '
-                 '(or set PMEMSTAT_ARGS=--sudo)')
+            help='opt out of the default root elevation and run as user; '
+                 'marks the header with a dimmed "--user" so the degraded '
+                 'view is obvious')
+    # Accepted for compatibility with the release that made elevation opt-in;
+    # root is the default again, so this flag is a no-op (and hidden from help).
+    parser.add_argument('--sudo', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--save-history-now', action='store_true',
-            help='save the current stats to the history ledger and exit '
-                 '(implies --sudo; ignores other options and the environment)')
+            help='save the current stats for growth tracking and exit '
+                 '(runs as root; ignores other options and the environment)')
     parser.add_argument('--reset-history-now', action='store_true',
-            help='reset the history ledger so all growth is measured from the '
-                 'current values, then exit '
-                 '(implies --sudo; ignores other options and the environment)')
+            help='reset the saved growth history so all growth is measured '
+                 'from the current values, then exit '
+                 '(runs as root; ignores other options and the environment)')
     parser.add_argument('-o', '--others', action='store_false',
             help='expand "other" into shSYSV, shOth, stack, text')
     parser.add_argument('-u', '--units', choices=('MB', 'KB', 'human'),
@@ -3508,9 +3521,9 @@ def main():
             choices=('all', '10'), default='all',
             help='annotate only the top-N growers: all|10 [dflt=all]')
     parser.add_argument('--no-growth-history', action='store_true',
-            help='do NOT seed growth from the cross-run ledger (fresh baseline)')
+            help='do NOT seed growth from the saved history (fresh baseline)')
     parser.add_argument('--dont-save-growth-history', action='store_true',
-            help='do NOT write the cross-run growth ledger')
+            help='do NOT update the saved growth history')
     parser.add_argument('-/', '--search', default='',
             help='show items with search string in name')
     parser.add_argument('-W', '--no-window', action='store_false', dest='window',
@@ -3543,15 +3556,11 @@ def main():
     opts.prefs = prefs
     set_colors_enabled(opts.colors)
 
-    if not opts.user and os.geteuid() != 0:
-        if opts.sudo:
-            # Opted in explicitly: elevation failure is fatal (a silent
-            # downgrade scrolls off-screen and hides that the data is partial).
-            _elevate_or_exit(opts, effective_argv)
-        elif not opts.window:
-            print("pmemstat: running as user (other users' processes omitted); "
-                  'run "sudo pmemstat" or set PMEMSTAT_ARGS=--sudo for '
-                  'full coverage.', file=sys.stderr)
+    # Root is the default view; only -U/--user opts out.  Elevation failure is
+    # fatal (a silent downgrade scrolls off-screen and hides that the data is
+    # partial).
+    if elevation_required(opts):
+        _elevate_or_exit(opts, effective_argv)
 
 
     if opts.min_delta_kb is None:

@@ -29,7 +29,8 @@ from pmemstat.main import (human, human_kb, ago_str, GrowthTracker,
                            compute_zram_effective, ProcMem, PmemStat,
                            args_from_env, ARGS_ENV, seed_from_baselines,
                            seed_sys_from_baselines, HISTORY_ENV_DISABLE,
-                           save_history_now, reset_history_now, _resolve_argv)
+                           save_history_now, reset_history_now, _resolve_argv,
+                           elevation_required)
 from pmemstat.CGroup import CGroup
 
 GIB = 1024 ** 3
@@ -487,7 +488,7 @@ class TestSaveHistoryNow(unittest.TestCase):
 
     def test_elevate_or_exit_is_fatal_on_failure(self):
         err = io.StringIO()
-        opts = SimpleNamespace(sudo=True, user=False)
+        opts = SimpleNamespace(user=False)
         with mock.patch.object(main_module, 'rerun_module_as_root',
                                return_value='not-importable'), \
              mock.patch('sys.stderr', err):
@@ -495,13 +496,15 @@ class TestSaveHistoryNow(unittest.TestCase):
                 main_module._elevate_or_exit(opts, [])
         self.assertEqual(ctx.exception.code, 1)
         self.assertIn('FATAL', err.getvalue())
+        self.assertIn('-U/--user', err.getvalue())
 
     def test_elevate_or_exit_noop_when_already_root(self):
-        opts = SimpleNamespace(sudo=True, user=False)
+        opts = SimpleNamespace(user=False)
         with mock.patch.object(main_module, 'rerun_module_as_root',
                                return_value=None) as rerun:
             main_module._elevate_or_exit(opts, [])  # must not raise/exit
         rerun.assert_called_once()
+
 
     def test_success_writes_ledger_and_returns_0(self):
         calls = {}
@@ -548,6 +551,26 @@ class TestSaveHistoryNow(unittest.TestCase):
              mock.patch('sys.stderr', err):
             self.assertEqual(save_history_now(self._opts()), 1)
         self.assertIn('FAILED', err.getvalue())
+
+
+class TestElevationPolicy(unittest.TestCase):
+    """Root is the default; ``-U``/``--user`` is the explicit opt-out."""
+
+    def test_default_run_requires_elevation(self):
+        with mock.patch.object(main_module.os, 'geteuid', return_value=1000):
+            self.assertTrue(elevation_required(SimpleNamespace(user=False)))
+
+    def test_user_flag_opts_out_of_elevation(self):
+        with mock.patch.object(main_module.os, 'geteuid', return_value=1000):
+            self.assertFalse(elevation_required(SimpleNamespace(user=True)))
+
+    def test_already_root_needs_no_elevation(self):
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0):
+            self.assertFalse(elevation_required(SimpleNamespace(user=False)))
+
+    def test_missing_user_attribute_defaults_to_elevation(self):
+        with mock.patch.object(main_module.os, 'geteuid', return_value=1000):
+            self.assertTrue(elevation_required(SimpleNamespace()))
 
 
 class TestResetHistoryNow(unittest.TestCase):

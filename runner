@@ -9,8 +9,9 @@
 # friendly, nothing installed per-user or system-wide).  This script re-execs
 # itself with that interpreter when it was started with another one.
 #
-# By default this script also re-execs itself as root via sudo, so that every
-# process is visible.  Pass -U/--user to stay as the invoking user instead.
+# Like the installed tool, this script runs as root by default (re-exec'ing
+# itself via sudo), so that every process is visible.  Pass -U/--user to opt
+# out and stay as the invoking user instead.
 
 import os
 import sys
@@ -49,7 +50,7 @@ def re_exec_in_project_venv():
     directory that root does not search.
 
     This is a developer convenience only: the installed ``pmemstat`` entry
-    point never does this, and its ``--sudo`` path deliberately refuses to
+    point never does this, and its sudo elevation path deliberately refuses to
     inject a user-writable import path into root.
 
     On success the process image is replaced and this function never returns.
@@ -85,14 +86,15 @@ def maybe_elevate():
     """Re-exec this script as root via sudo unless user mode was requested.
 
     Running the working tree as root shows every process.  Elevating through
-    this wrapper (instead of handing the *installed* ``pmemstat`` to sudo, or
-    letting ``pmemstat --sudo`` re-exec an isolated interpreter) runs the
-    project's own ``.venv/bin/python`` (see :func:`re_exec_in_project_venv`), so
-    both the source under test and its pinned dependency are the ones that run.
+    this wrapper (instead of letting ``pmemstat`` re-exec an isolated
+    interpreter) runs the project's own ``.venv/bin/python`` (see
+    :func:`re_exec_in_project_venv`), so both the source under test and its
+    pinned dependency are the ones that run.
 
     On success the process is replaced and this function never returns.  If
-    ``sudo`` cannot be executed at all, it warns and falls back to a user-only
-    run rather than aborting.
+    ``sudo`` cannot be executed at all, it exits fatally: root is the default
+    view, so a silent downgrade would hide that the data is partial.  Pass
+    ``-U``/``--user`` to request the user-only run explicitly.
     """
     if os.geteuid() == 0:
         return
@@ -109,8 +111,10 @@ def maybe_elevate():
     try:
         os.execvp('sudo', cmd)
     except OSError as exc:
-        print(f'pmemstat: could not elevate to root via sudo: {exc}; '
-              'continuing as user (pass -U to silence this)', file=sys.stderr)
+        print(f'pmemstat: FATAL: could not elevate to root via sudo: {exc}; '
+              'run as root or pass -U/--user for the user-only view.',
+              file=sys.stderr)
+        sys.exit(1)
 
 
 re_exec_in_project_venv()

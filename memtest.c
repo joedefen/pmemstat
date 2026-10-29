@@ -1,28 +1,89 @@
-// A test program for 'pmemstat' which grows its memory over time including:
-//    - stack
-//    - heap
-//    - SysV shared memory
-//    - memory mapped files
-// Several instances of the this programs can be run, and, if so, the
-// programs will share the SysV shared memory and the memory mapped files.
+// memtest.c -- a memory-growth test program for 'pmemstat'
 //
-// AGGRESSIVENESS vs. SAFETY
-//   Every loop grows three tracked pools by STEP (1 MiB by default) each --
-//   the SysV shared memory, a memory-mapped file, and the heap -- plus a
-//   smaller amount of stack.  That is ~3 MiB of new memory per loop, well
-//   above pmemstat's default -k gate (1000 KB), so the program reliably shows
-//   up as a grower (for example with --growth-top all) instead of being
+// WHAT IT GROWS
+//   Every loop adds memory to four places so that pmemstat has something
+//   interesting to measure:
+//     - stack              recursion, STACK_STEP = 32 KiB per loop
+//     - heap               malloc,     STEP_SIZE  = 1 MiB per loop
+//     - SysV shared memory shmget/shmat, 1 MiB per loop
+//     - memory-mapped file /tmp/memmapfile, 1 MiB per loop
+//   That is ~3 MiB of *tracked* memory per loop, well above pmemstat's default
+//   -k gate (1000 KB), so the process reliably stays visible and is annotated
+//   as a grower (e.g. --growth-style growth --growth-top all) instead of being
 //   filtered out as "unchanged" after the first loop.
 //
-//   The growth is deliberately bounded so a run cannot push the system toward
-//   the OOM killer:
-//     * the total is capped to a budget derived from physical RAM (at most
-//       ~6% of RAM, itself capped by a hard ceiling), and
+//   Several instances can run at once: they share the same SysV segments (keys
+//   BASE_KEY+idx) and the same mapped file, which is exactly what makes
+//   pmemstat's *proportional* accounting worth watching -- the shared MiBs are
+//   split between the sharers rather than counted once per process.  A SysV
+//   semaphore (BASE_KEY) lets the first instance remove stale leftovers from an
+//   earlier run before the others attach.
+//
+// AGGRESSIVENESS vs. SAFETY
+//   Growth is deliberately bounded so a run cannot push the system toward the
+//   OOM killer:
+//     * the total is capped by a budget derived from physical RAM (at most
+//       ~6% = RAM/16, itself capped by HARD_BUDGET = 256 MiB, and never below
+//       MIN_BUDGET = 16 MiB), and
 //     * the recursion depth -- which is what grows the stack -- is limited so
 //       that depth * STACK_STEP stays well under RLIMIT_STACK; a stack
 //       overflow would SIGSEGV, which is worse than growing too little.
+//   The number of loops actually run is the smallest of: -n, MAX_STEPS (128),
+//   the stack depth limit, and budget/(3*step).
 //   Individual allocations are non-fatal: if one fails, that pool simply stops
 //   growing and the run continues.
+//
+// BUILD AND RUN
+//   cc -O2 memtest.c -o memtest        # -Winfinite-recursion is expected:
+//                                      # loop() recurses on purpose, bounded by
+//                                      # exit() at g_plan loops
+//   ./memtest                       # slow: 10s per loop, up to 128 loops
+//   ./memtest -q                    # 1s per loop
+//   ./memtest -q -n 20 &            # 20 one-second loops, in the background
+//   ./memtest -q -c 4096 -b 64      # 4 MiB per pool per loop, 64 MiB budget
+//
+//   Options:
+//     -q         quick: sleep 1s between loops instead of 10s
+//     -s         short: only 16 loops (same as -n 16)
+//     -n LOOPS   number of loops
+//     -c KiB     KiB added to each pool per loop (default 1024)
+//     -b MiB     total memory budget (default min(256 MiB, RAM/16), floor 16)
+//
+//   Each loop prints one line so you can correlate pmemstat's numbers with
+//   what the program itself claims:
+//     PID: loop=3, shmem=3072K mmap=3072K stack=96K heap=3072K
+//
+// WATCHING IT WITH pmemstat
+//   1. Basic growth/leak view (window mode; the G key cycles the style):
+//        ./memtest -q &
+//        sudo pmemstat --growth-style growth --growth-top all memtest
+//      The row should keep growing ~3 MiB per loop and carry a growth
+//      annotation.  For terminal output instead of the curses window:
+//        sudo pmemstat -W -l 1 -s growth memtest
+//   2. Confirm the SysV category: add -o (with -g pid) so the shSYSV column
+//      appears; that column must climb by 1 MiB with each loop.
+//   3. Proportional sharing: start three instances, then group by exe (the
+//      default -g exe).  Each process's share of the common SysV segment and
+//      mapped file is divided by three, so the sum does not triple the real
+//      cost the way a plain RSS/top view would.
+//   4. Below-the-gate growth: with a small step (-c 256 => 768 KiB/loop) the
+//      default -k 1000 hides the row after the first loop.  Either keep -c at
+//      1 MiB or lower the gate (-k 100, or -k 0 to show any change).  The
+//      stack grows only 32 KiB per loop, so on its own it never clears the
+//      gate; the row stays visible thanks to the heap/shmem/mmap pools.
+//   5. Robustness/races: run several short-lived background sleeps alongside
+//      one long foreground one while pmemstat loops, e.g.
+//        for n in 1 2 3 4 5; do sleep $n & done; sleep 60
+//      This exercises races such as a PID vanishing from /proc while its
+//      smaps is being read.
+//
+// CLEANUP
+//   The SysV segments and /tmp/memmapfile outlive the run; only the *next*
+//   run's first instance removes them.  To clean up explicitly:
+//     ipcs -m                                  # segments keyed from 0xffeeddcc
+//     ipcrm -m <shmid>                         # for each seg created by memtest
+//     rm -f /tmp/memmapfile
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>

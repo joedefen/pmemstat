@@ -1,19 +1,17 @@
 > **Quick Start**: from the CLI (requires **Python 3.10 or later**)
 > * **Install (preferred, per-user):** `pipx install pmemstat`
-> * **Run:** `pmemstat` — shows only *your* processes
-> * **Full view (all processes):** `pmemstat --sudo`. To avoid retyping it, add `export PMEMSTAT_ARGS=--sudo` to your shell init, then just run `pmemstat`.
+> * **Run:** `pmemstat` — runs as root via `sudo` to show *all* processes (your password may be required)
+> * **No root capability?** `pmemstat -U` (or `--user`) — an account without root privilege opts out and sees only *its own* processes
 > * **Upgrade:** `pipx upgrade pmemstat || pipx install pmemstat`
 > * Type `?` within `pmemstat` for the help screen.
 
-> **Note (v4.0.0 — breaking change):** `pmemstat` no longer elevates itself automatically (it did in 3.x); use `--sudo` for the full view.
-
-> **Run `pmemstat` as root if you can. `sudo pmemstat` (or `--sudo`) is strongly recommended; an unprivileged (`-U`) run is a degraded, partial view, not a smaller-but-equivalent one:**
+> **`pmemstat` runs as root by default; an unprivileged (`-U`) run is a degraded, partial view, not a smaller-but-equivalent one:**
 > 1. **You see only your own processes.** Every other user's (and most of root's) memory and CPU is missing, so totals understate real usage; the `PIDs=shown/total` count makes the gap explicit.
 > 2. **System-wide header numbers degrade.** The unaccounted residual `Oth` cannot be split into its kernel (`OthK`) and user (`OthU`) parts — it silently absorbs every process you cannot read, so it is inflated and misleading.
 > 3. **Growth / leak monitoring is crippled.** The cross-run, per-boot history is root-only, so an unprivileged run measures growth only from *this run's start* (no "since boot" baseline), and the `z` zap reset is unavailable.
 > 4. **Kill mode reaches only your own processes.**
 >
-> Use `-U` only when you deliberately want a user-only view (or cannot elevate); otherwise elevate — the tool then works as designed.
+> Use `-U` only when you deliberately want a user-only view (or cannot elevate); otherwise the default root run works as designed.
 
 
 # pmemstat - Proportional Memory Status
@@ -22,14 +20,12 @@
 
 Proportional memory splits the cost of shared memory among the processes sharing it (instead of counting it repeatedly, as `top` does) and excludes uninstantiated virtual memory.
 
-Without `-o`, `pmemstat` is much faster but less detailed (it omits classes such as SysV shared memory, usually absent anyway). With `-o` it may take a few seconds to start, though loop-mode refreshes stay fast because unchanged numbers are not recomputed. In window mode, `o` toggles the detail.
+Without `-o`, `pmemstat` is much faster but less detailed (it omits classes such as SysV shared memory, usually absent anyway). With `-o` it may take a few seconds to start, though loop-mode refreshes stay fast. In window mode, `o` toggles the detail.
 
 Grouping rolls up the resources of multiple processes of one feature (e.g. a browser) so its total memory/CPU impact is apparent. Looping reveals growth that may be a leak, and segregating memory by type makes leaks easier to identify.
 
 ## How `pmemstat` Compares to Other Tools
 Reach for `top`/`ps` when you need a tool that is always installed, and `htop` for a friendly full-screen overview. `pmemstat` differs in its focus on **accurate, proportional memory**: rather than RES/RSS — which double-counts shared pages and ignores uninstantiated virtual memory — it digests `smaps`/`smaps_rollup` to attribute shared memory fairly and break memory down by type. That makes it slower to start (especially with `-o`) but far more truthful about who is really using RAM. The table compares it with its closest peers: `smem` (the other tool that derives **PSS** from `smaps`) and `systemd-cgtop` (whose per-cgroup view `pmemstat` mirrors, with proportional numbers).
-
-Three capabilities are **new or substantially overhauled** recently and marked **🆕** below: **cgroup v2 grouping**, **memory-leak / growth monitoring**, and **system pressure (PSI)**. All three are ✗ for every peer, and each has its own section.
 
 | Feature | `pmemstat` | `smem` | `systemd-cgtop` | `htop` |
 |---|---|---|---|---|
@@ -37,12 +33,12 @@ Three capabilities are **new or substantially overhauled** recently and marked *
 | **Memory-type breakdown** (shared/swap/stack/text/data) | ✓ | ✗ (USS/PSS/RSS/Swap only) | ✗ | ✗ |
 | **Proportional swap** per grouping | ✓ | ✗ (flat Swap column) | ✗ | ✗ (total swap only) |
 | **Group processes** by executable/command | ✓ aggregates PIDs into one row | ✓ by command by default | ✗ | ✗ (tree view only) |
-| **Group by cgroup v2** 🆕 (services, scopes, containers) | ✓ (`-g cgroup`) | ✗ | ✓ (its core design) | ✗ |
-| **Memory-leak / growth monitoring** 🆕 (annotates top-N growers; only re-shows significant growth) | ✓ (`G`, `--growth-style`, growth sort) | ✗ | ✗ | ✗ |
+| **Group by cgroup v2** (services, scopes, containers) | ✓ (`-g cgroup`) | ✗ | ✓ (its core design) | ✗ |
+| **Memory-leak / growth monitoring** (annotates top-N growers; only re-shows significant growth) | ✓ (`G`, `--growth-style`, growth sort) | ✗ | ✗ | ✗ |
 | **zRAM-aware effective RAM** (eTot/eUsed/eAvail) | ✓ | ✗ | ✗ | ✗ |
-| **System pressure (PSI)** 🆕 in header (memory/cpu/io, some/full) | ✓ (`-P`) | ✗ | ✗ | ✗ |
+| **System pressure (PSI)** in header (memory/cpu/io, some/full) | ✓ (`-P`) | ✗ | ✗ | ✗ |
 | **Data source** | `/proc/{PID}/smaps*` | `/proc/{PID}/smaps` | `/sys/fs/cgroup` | `/proc` + libs |
-| **Interactive full-screen window** | ✓ (`console-window`/curses) | ✗ (one-shot) | ✓ | ✓ |
+| **Interactive full-screen window** | ✓ (curses) | ✗ (one-shot) | ✓ | ✓ |
 | **CPU usage reporting** | ✓ | ✗ (memory only) | ✓ | ✓ |
 | **Kill processes** | ✓ (inline confirm) | ✗ | ✗ | ✓ |
 | **Inline search-as-you-type** | ✓ (`/`) | ✗ | ✗ | ✓ (F3) |
@@ -51,10 +47,10 @@ Three capabilities are **new or substantially overhauled** recently and marked *
 For **per-mapped-file attribution** (which shared library or mmap'd file costs the most RAM), use `smem -m` or `pmap`; `pmemstat` deliberately stays focused on per-process and per-cgroup responsibility rather than rolling PSS up by mapped file.
 
 ## Installation Options
-* `pmemstat` requires **Python 3.10 or later** and depends on `console-window` (the curses UI), pinned to an **exact version** on purpose; installing `pmemstat` pulls it automatically, so do not "upgrade" it independently.
-* Root is needed to read `smaps`/`smaps_rollup` for **all** processes; without it only your own are reported. Persistent default flags go in `PMEMSTAT_ARGS` (e.g. `export PMEMSTAT_ARGS='--sudo --psi --loop 3 -s name'`), which is tokenized like a command line and prepended to the real arguments, so anything typed still takes precedence.
-* `pmemstat` runs as the invoking user by default and never silently escalates. If `--sudo` cannot elevate (no terminal for a password prompt and sudo not pre-authorized, or the isolated interpreter cannot import the install), it fails with a clear message and non-zero exit rather than downgrading or hanging.
-* To force user-only operation, use `--user`/`-U`; the header marks such a run with `--user` so the degraded (partial) view is obvious.
+* `pmemstat` requires **Python 3.10 or later**.
+* Root is needed to read `smaps`/`smaps_rollup` for **all** processes, so `pmemstat` runs as root via `sudo` by default. Persistent default flags go in `PMEMSTAT_ARGS` (e.g. `export PMEMSTAT_ARGS='--psi --loop 3 -s name'`); anything typed on the command line still takes precedence.
+* If elevation fails (for example, no terminal for a password prompt and sudo not pre-authorized), the run exits with a clear message rather than silently downgrading.
+* To opt out of elevation and run user-only, use `--user`/`-U`; the header marks such a run with `--user` so the degraded (partial) view is obvious.
 
 See the **Quick Start** above for the basic install; **Alternative Installation Options** below covers system-wide and non-`pipx` installs.
 
@@ -63,7 +59,7 @@ See the **Quick Start** above for the basic install; **Alternative Installation 
 ```
 usage: pmemstat [-h] [-D] [-C] [-a CPU_AVG_SECS] [-P]
                 [-g {exe,cmd,pid,cgroup,cgroupCharge}] [-f] [-k MIN_DELTA_KB]
-                [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-U] [--sudo]
+                [-l LOOP_SECS] [-L CMDLEN] [-t TOP_PCT] [-U]
                 [--save-history-now] [--reset-history-now] [-o]
                 [-u {MB,KB,human}] [-s {mem,cpu,name,growth}]
                 [--growth-style {off,both,growth,rate}] [--growth-top {all,10}]
@@ -95,16 +91,15 @@ options:
   -t, --top-pct TOP_PCT
                         report group contributing to top pct of ptotal
                         [dflt=100]
-  -U, --user            run as user (NOT as root); marks the header with a
-                        dimmed "--user" so the degraded view is obvious
-  --sudo                re-run self as root via sudo (or set
-                        PMEMSTAT_ARGS=--sudo)
-  --save-history-now    save the current stats to the history ledger and exit
-                        (implies --sudo; ignores other options and the
+  -U, --user            opt out of the default root elevation and run as user;
+                        marks the header with a dimmed "--user" so the
+                        degraded view is obvious
+  --save-history-now    save the current stats for growth tracking and exit
+                        (runs as root; ignores other options and the
                         environment)
-  --reset-history-now   reset the history ledger so all growth is measured
-                        from the current values, then exit (implies --sudo;
-                        ignores other options and the environment)
+  --reset-history-now   reset the saved growth history so all growth is
+                        measured from the current values, then exit (runs as
+                        root; ignores other options and the environment)
   -o, --others          expand "other" into shSYSV, shOth, stack, text
   -u, --units {MB,KB,human}
                         units of memory [dflt=MB]
@@ -114,10 +109,10 @@ options:
                         leak/growth style: off|both|growth|rate [dflt=off]
   --growth-top {all,10}
                         annotate only the top-N growers: all|10 [dflt=all]
-  --no-growth-history   do NOT seed growth from the cross-run ledger (fresh
+  --no-growth-history   do NOT seed growth from the saved history (fresh
                         baseline)
   --dont-save-growth-history
-                        do NOT write the cross-run growth ledger
+                        do NOT update the saved growth history
   -/, --search SEARCH   show items with search string in name
   -W, --no-window       show in "curses" window [disables: -D,-t,-L]
 
@@ -129,7 +124,7 @@ Explanation of some options and arguments:
 * `-k MIN_DELTA_KB, --min-delta-kb MIN_DELTA_KB` - when looping, how much change in memory use is required to show the grouping in subsequent loops: a positive value means the group must **grow** by that amount (KB), a non-positive value means it need only **change** by that amount. It also gates the growth annotation (a row is annotated only if its absolute growth is at least `-k`).
 * `--growth-style {off,both,growth,rate}` - the inline growth ("leak") annotation for the groups that are growing (default `off`); the `G` key cycles it in window mode. See "Memory growth (leak) detection" below.
 * `--growth-top {all,10}` - annotate only the top-N growers by the displayed metric (default `all` = no cap).
-* `--no-growth-history` / `--dont-save-growth-history` - opt out of (respectively) seeding growth from the cross-run ledger and writing it; `PMEMSTAT_NO_HISTORY` disables both. A non-root run (`-U`) asserts both regardless. See "Memory growth (leak) detection" below.
+* `--no-growth-history` / `--dont-save-growth-history` - opt out of (respectively) seeding growth from the saved history and updating it; `PMEMSTAT_NO_HISTORY` disables both. A non-root run (`-U`) always disables both. See "Memory growth (leak) detection" below.
 * `-W, --no-window` - report once to the terminal instead of the interactive curses window (with `-l` it loops there too). Window mode (the default) forces `-t 100`, `-L 100` and off `-D`; `-W` forces `-C` (no CPU).
 * `pids` - the positional arguments may be pids (i.e., numbers) or the names of executables (as shown by `-gexe`)
 
@@ -144,15 +139,15 @@ There are two cgroup memory views:
 Because `pmemstat` computes **proportional** memory (PSS), `ptotal` is *not* the number `systemd-cgtop`, `docker stats` or `podman stats` report (they use the non-proportional `memory.current`, which over-counts shared pages). The cgroup groupings therefore keep `ptotal` as a left-hand **reference** column but use the kernel charge as the row total: `-g cgroup` shows `footprt`, `-g cgroupCharge` shows `memory.current` (`kcharge`).
 
 The kernel columns, read from `/sys/fs/cgroup/<path>/` in the `-u` units, decompose that charge, and the slices to the left of the total sum to it:
-* `anon` - `memory.stat`'s `anon`: anonymous memory charged to the cgroup
-* `cache` - page cache: `file` (in the `kcharge` view) or `file - inactive_file` (in the `footprt` view, where reclaimable inactive cache is removed)
-* `kmem` - kernel memory: `kernel` (`kcharge`) or `kernel - slab_reclaimable` (`footprt`)
+* `anon` - anonymous memory charged to the cgroup
+* `cache` - page cache (reclaimable inactive cache removed in the `footprt` view)
+* `kmem` - kernel memory (reclaimable slab removed in the `footprt` view)
 * `swap` - the kernel swap charge (`footprt` view only; swap is not part of `memory.current`). Distinct from `pswap` (the smaps-proportional swap shown in other modes)
-* `oK` - the remainder, `total - (anon + cache + kmem [+ swap])`; normally just `sock`, it guarantees the row adds up
+* `oK` - the remainder, normally just `sock`, so the row adds up
 * `footprt` / `kcharge` - the row **total** for the active grouping (`cgroup` -> `footprt`; `cgroupCharge` -> `kcharge`):
-    * `footprt` (default) - the derived **footprint**: `memory.current - inactive_file - slab_reclaimable + swap`; also the growth metric
+    * `footprt` (default) - the derived **footprint**: what the cgroup really needs to keep resident; also the growth metric
     * `kcharge` - `memory.current`, the kernel's own charge
-* `memPSI%` - `memory.pressure`'s `some avg10`: memory-pressure stall time as a percentage; shown only with `-P` (PSI), beside `cpu%`
+* `memPSI%` - memory-pressure stall time as a percentage; shown only with `-P` (PSI), beside `cpu%`
 
 These columns appear only in the cgroup groupings (`-g cgroup` / `-g cgroupCharge`), and are omitted entirely when the kernel exposes no cgroup v2 data (e.g. a cgroup v1 host).
 
@@ -169,7 +164,7 @@ memPSI%    0.42    0.10    0.02         0.00    0.00    0.00
 cpuPSI%    0.00    0.03    0.00            -       -       -
  ioPSI%    0.15    0.60    1.04         0.10    0.49    0.96
 ```
-Each cell is the kernel's `avg10`/`avg60`/`avg300` stall-time percentage for its window. `SOME` means at least one task was stalled; `FULL` means **all** non-idle tasks were stalled, and is normally available only for `memory` and `io` (cells a resource does not provide show `-`). A resource whose file is absent (a kernel built with `CONFIG_PSI=n`) is omitted; if no resource is readable, the table is not shown.
+Each cell is the kernel's `avg10`/`avg60`/`avg300` stall-time percentage for its window. `SOME` means at least one task was stalled; `FULL` means **all** non-idle tasks were stalled, and is normally available only for `memory` and `io` (cells a resource does not provide show `-`). A resource this kernel does not provide is omitted; if no resource is readable, the table is not shown.
 
 This is the **system-wide** view, distinct from the per-cgroup `memPSI%` column described under "Grouping by cgroup v2".
 
@@ -189,7 +184,7 @@ This is the **system-wide** view, distinct from the per-cgroup `memPSI%` column 
      0.1      39      19      13      70   2x konsole
 ```
 
-This is a **root** (`--sudo`) run; a non-root run shows a single `Oth` (see below).
+This is the default **root** run; an unprivileged (`-U`) run shows a single `Oth` (see below).
 
 In the default window loop we see
 * a **leader line** with the current time, and `Tot`, `Avail`, `Used` (= Tot-Avail) and `Sh+Tmp` from `/proc/meminfo`, plus:
@@ -218,48 +213,17 @@ In the default window loop we see
     * **growth** - inline growth annotation for top-N growers (e.g. `3.5G 2h3m`); only when growth mode is not `off`
     * **key/info** - **{num}x**, the number of processes in the grouping (e.g. `24x browser`), plus the grouping key; `pid` grouping rows show `1x`, the pid and the command line.
 
-## Colour roles
-In window mode the report is coloured with the console-window theme's semantic
-roles, so a theme change — or a terminal that cannot show colour — needs no code
-change:
+## Colour and Themes
+In window mode colour highlights titles and values that are changing; it is
+decoration only, so a terminal without colour (or `TERM=dumb`) still shows the
+full report in plain text.
 
-| Role | Used for |
-|---|---|
-| `EMPHASIS` | titles: the column header line and the TOTALS row |
-| `HOTSWAP` | numbers that are *changing*: a row's growth annotation, the system growth `Δ` values and the `growth` header label |
-| `INFO` | the zRAM line: compression ratio and the effective `eTot`/`eUsed`/`eAvail` estimates |
-| `SUCCESS` | the `A` marker on a grouping that has just appeared, and the `(grouping by sort)` descriptor after `key/info` |
-| `DANGER` | an irreversible action about to run (kill confirmation, growth-baseline reset) |
-| dim | labels, meta text, zero-valued cells and `n/a` |
+`t` opens the theme picker (`ESC` returns) and cycles the appearance. **`mono`**
+turns colour off entirely, using bold and reverse-video attributes for emphasis.
 
-Colour is decoration only and never carries information: on a terminal without
-colour (or with `TERM=dumb`) every role degrades to plain text, and the one-shot
-`-W` report is always plain. Zero-valued cells are dimmed so the non-zero ones
-stand out; `n/a` (a percentage a view cannot total) is dimmed for the same
-reason. Kill mode keeps the colours and still reverses the picked row.
-
-A grouping's *own* name deliberately keeps the default styling rather than
-`EMPHASIS`: the stock `default` theme renders `EMPHASIS` as white on the
-terminal's default background, which a light-background terminal cannot show,
-and `key/info` is the densest text on the screen.
-
-### Themes, `mono`, and persistence
-`t` opens the theme picker (ESC returns) and `t` there cycles the appearance:
-console-window's colour themes plus **`mono`**, which turns colour off entirely.
-`mono` is pmemstat's own appearance, not a console-window theme (the library's
-`dark-mono`/`light-mono` are still colour themes): with it the semantic roles
-above collapse to attributes -- changing numbers and titles bold, confirmations
-bold-and-reversed -- so the report keeps its emphasis hierarchy on a
-monochrome terminal.
-
-The choice is remembered per user in `ui.json` under
-`${XDG_CONFIG_HOME:-~/.config}/pmemstat/` (`PMEMSTAT_CONFIG_DIR` overrides the
-directory). A root run via `sudo` writes the **invoking** user's file (resolved
-through `SUDO_USER`, like the rest of the family), so `sudo pmemstat` does not
-bury your preference under `/root`. Startup precedence is `--theme` /
-`--no-color`, then the standard `NO_COLOR` convention, then the saved choice;
-`--theme mono` is the same as `--no-color`, and `--list-themes` prints the names
-and exits.
+The choice is remembered per user. `--theme` selects a theme, `--no-color` (or
+the standard `NO_COLOR` convention) disables colour, `--theme mono` is the same
+as `--no-color`, and `--list-themes` prints the available names.
 
 ## Memory growth (leak) detection
 
@@ -281,18 +245,13 @@ groups that are growing, making slow leaks visible without scrolling history:
   reshuffle), but in a growth mode the annotations are shown instead, from the
   per-view history that survives the change; a key that genuinely appears later
   still gets its `A`.
-* The baseline comes from a **per-boot history ledger** (see "Updating History
-  from Cron / Startup") that root runs write as they run and on exit, so growth
-  is measured from the group's **first observation this boot** (possibly an
-  earlier run), not merely since this invocation; a reboot resets it. The ledger
-  is system-wide and hence **root-only**: a non-root run (`-U`) neither reads nor
-  writes it and measures from this run's start, since a root baseline compared
-  against a user-only view is meaningless and a user-only write would corrupt it.
-  Opt out with `--no-growth-history` (seed), `--dont-save-growth-history`
-  (write), or `PMEMSTAT_NO_HISTORY` (both).
-* Within a run the baseline is **geometric and self-forgetting** (a group's
-  first 16 seconds never count), so startup bursts age out; growth is clamped at
-  zero, so shrinking is not reported.
+* Growth is measured from the group's **first observation this boot** (possibly
+  an earlier run), not merely since this invocation; a reboot resets it. This
+  history is system-wide and **root-only**: a non-root run (`-U`) measures only
+  from this run's start. Opt out with `--no-growth-history`,
+  `--dont-save-growth-history`, or `PMEMSTAT_NO_HISTORY` (both).
+* Startup bursts age out, and growth is clamped at zero, so shrinking is not
+  reported.
 * A row is annotated only if its growth (KB) is at least `-k` **and** it is
   among the top-N growers (`--growth-top`, default `all`; `p` cycles `all`/`10`).
   `-s growth` sorts by the displayed metric.
@@ -305,17 +264,15 @@ groups that are growing, making slow leaks visible without scrolling history:
   trails as `[1h58m]` in every growth mode.
 
 ## Updating History from Cron / Startup
-`pmemstat --save-history-now` performs one **silent** scan, writes the per-boot
-history ledger and exits (`0` on success, `1` on failure with a message on
-stderr). It implies `--sudo` and ignores all other options and `PMEMSTAT_ARGS`,
-so it is safe from cron or a startup unit. The ledger is per invoking user
-(`/tmp/pmemstat-<uid>`, or `PMEMSTAT_STATE_DIR`), so run it as the user whose
-history you want; a root cron job without `SUDO_UID` updates the root ledger.
-Only root runs use the ledger (see "Memory growth (leak) detection" above).
+`pmemstat --save-history-now` performs one silent scan, saves the current
+history and exits (`0` on success, `1` on failure with a message on stderr). It
+runs as root (elevating via `sudo` if needed) and ignores all other options and
+`PMEMSTAT_ARGS`, so it is safe from cron or a startup unit. Run it as the user
+whose history you want to update.
 
-`pmemstat --reset-history-now` scans the same way but **replaces** the ledger
-rather than merging: current values become the new baseline, as if the tool had
-first run just after boot. It likewise implies `--sudo` and ignores other
+`pmemstat --reset-history-now` scans the same way but **replaces** the saved
+history rather than merging: current values become the new baseline, as if the
+tool had first run just after boot. It likewise runs as root and ignores other
 options. Inside the window, `z` performs the same reset (only as root while the
 growth annotation is on), asking for `y`/`Y` confirmation first; `ESC` or 10
 seconds declines.
@@ -331,21 +288,14 @@ screen:
 `ESC`, to return). `zap` is appended for a root run while the growth annotation
 is showing, since resetting the baseline has no visible effect otherwise.
 
-Two keys are deliberately **not** on this one-line legend: `t` (the theme
-picker) is a once-in-a-while choice, and `K` on the Help screen (demo mode) is a
-presentation aid. Both are listed on the Help screen, and the line stays short
-enough that a narrow terminal truncates the least important trailing entries
-rather than the gateway to the full list.
-
 ## Help Screen (in Window Mode, Press '?')
 In window mode, `?` opens the help screen (and closes it again); **ESC** also
-closes it, the same key the other tools in the family use to leave a screen.
-Navigation keys are at the top and, below the line, the option keys with their
-possible values (the current choice is highlighted). Typing an option key (e.g.
-`c`) advances to the next value, applied on the next loop; the option keys also
-work directly on the main screen without opening the help screen. `t` opens the
-theme picker (where `t` cycles the appearance), and `K` on this screen toggles
-**demo mode**, which shows the last key pressed — handy for screencasts.
+closes it. Navigation keys are at the top and, below the line, the option keys
+with their possible values (the current choice is highlighted). Typing an option
+key (e.g. `c`) advances to the next value, applied on the next loop; the option
+keys also work directly on the main screen without opening the help screen. `t`
+opens the theme picker (where `t` cycles the appearance), and `K` on this screen
+toggles **demo mode**, which shows the last key pressed — handy for screencasts.
 **ENTER** closes nothing here — it stays reserved for kill mode's row selection.
 
 ## Inline Search (Window Mode)
@@ -375,21 +325,8 @@ that would not fit.
 ## Quirks and Details
 * **pswap** comes only from `smaps_rollup`, so it may be slightly out of sync with the `smaps` data.
 * **ptotal** (from `smaps`) and **pss** (from `smaps_rollup`, usually hidden) differ more than expected, though still closely.
-* After the first loop only **pss** is read, and groups with sufficient aggregate change are probed for detail; later loops are therefore faster, at some cost in accuracy.
+* After the first loop, refreshes are faster but slightly less detailed.
 * the "exe" value comes from `/proc/{PID}/cmdline`: the leading path is stripped, and if the result is a script interpreter (python, perl, bash, ...) whose first argument is a full path, it is shown as `{interpreter}->{basename(script)}` (e.g. `python3->pmemstat.py`).
-
-
-## Test Program and Test Suggestions
-The included C program, `memtest.c`, builds with `cc memtest.c -o memtest`. It allocates about **3 MiB per loop** by default across all memory types (SysV shared memory, a memory-mapped file, the heap and a little stack), can run several times concurrently (sharing the SysV and mapped memory), and caps itself near `min(256 MiB, RAM/16)` so it will not trigger the OOM killer.
-
-Because ~3 MiB per loop exceeds `pmemstat`'s default `-k` gate (1000 KB), the program stays visible loop to loop and — with `--growth-style` and `--growth-top all` — is annotated as a grower without relaxing `-k`. Tuning options:
-* `-q` - quick: sleep 1s between loops instead of 10s
-* `-s` - short: only 16 loops
-* `-n LOOPS` - number of loops
-* `-c KiB` - bytes added to each pool per loop (default 1024 KiB)
-* `-b MiB` - total memory budget (default `min(256 MiB, RAM/16)`)
-
-For a robustness test with processes coming and going, run several background `sleep`s of varying durations in a loop plus one in the foreground; this exercises races such as a PID vanishing from `/proc` while its `smaps` is read.
 
 ## Alternative Installation Options
 The Quick Start's per-user `pipx` install is preferred. Variants:
