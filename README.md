@@ -217,7 +217,32 @@ In the default window loop we see
     * *empty* - entry type: **T** (grand total), **A** (newly added grouping) or **O** (overflow groupings below `--top-pct`)
     * **growth** - inline growth annotation for top-N growers (e.g. `3.5G 2h3m`); only when growth mode is not `off`
     * **key/info** - **{num}x**, the number of processes in the grouping (e.g. `24x browser`), plus the grouping key; `pid` grouping rows show `1x`, the pid and the command line.
-        
+
+## Colour roles
+In window mode the report is coloured with the console-window theme's semantic
+roles, so a theme change — or a terminal that cannot show colour — needs no code
+change:
+
+| Role | Used for |
+|---|---|
+| `EMPHASIS` | titles: the column header line and the TOTALS row |
+| `HOTSWAP` | numbers that are *changing*: a row's growth annotation, the system growth `Δ` values and the `growth` header label |
+| `INFO` | the zRAM line: compression ratio and the effective `eTot`/`eUsed`/`eAvail` estimates |
+| `SUCCESS` | the `A` marker on a grouping that has just appeared, and the `(grouping by sort)` descriptor after `key/info` |
+| `DANGER` | an irreversible action about to run (kill confirmation, growth-baseline reset) |
+| dim | labels, meta text, zero-valued cells and `n/a` |
+
+Colour is decoration only and never carries information: on a terminal without
+colour (or with `TERM=dumb`) every role degrades to plain text, and the one-shot
+`-W` report is always plain. Zero-valued cells are dimmed so the non-zero ones
+stand out; `n/a` (a percentage a view cannot total) is dimmed for the same
+reason. Kill mode keeps the colours and still reverses the picked row.
+
+A grouping's *own* name deliberately keeps the default styling rather than
+`EMPHASIS`: the stock `default` theme renders `EMPHASIS` as white on the
+terminal's default background, which a light-background terminal cannot show,
+and `key/info` is the densest text on the screen.
+
 ## Memory growth (leak) detection
 
 With `--growth-style` (or the `G` key in window mode) `pmemstat` annotates the
@@ -230,6 +255,9 @@ groups that are growing, making slow leaks visible without scrolling history:
 * The annotation is `{human growth} {interval}` (e.g. `3.5G 2h3m`); `rate` adds
   a per-day projection (`3.5G/d`) once the baseline spans at least a minute, and
   `growth` shows just the size.
+* The column's `growth` label sits on the **TOTALS** row, directly above the
+  annotations it titles; the TOTALS row's `T` marker is dropped there (its info
+  already reads TOTALS) and returns when growth is `off`.
 * The baseline comes from a **per-boot history ledger** (see "Updating History
   from Cron / Startup") that root runs write as they run and on exit, so growth
   is measured from the group's **first observation this boot** (possibly an
@@ -276,16 +304,18 @@ screen:
 
     ?:help group units sort cpu Kill pSI Growth /{regex}
 
-`?` opens the complete list of keys plus the navigation keys. `zap` is appended
-for a root run while the growth annotation is showing, since resetting the
-baseline has no visible effect otherwise.
+`?` opens the complete list of keys plus the navigation keys (press it again, or
+`ESC`, to return). `zap` is appended for a root run while the growth annotation
+is showing, since resetting the baseline has no visible effect otherwise.
 
 ## Help Screen (in Window Mode, Press '?')
-In window mode, `?` opens the help screen: navigation keys at the top and, below
-the line, the option keys with their possible values (the current choice is
-highlighted). Typing an option key (e.g. `c`) advances to the next value, applied
-on the next loop; the option keys also work directly on the main screen without
-opening the help screen.
+In window mode, `?` opens the help screen (and closes it again); **ESC** also
+closes it, the same key the other tools in the family use to leave a screen.
+Navigation keys are at the top and, below the line, the option keys with their
+possible values (the current choice is highlighted). Typing an option key (e.g.
+`c`) advances to the next value, applied on the next loop; the option keys also
+work directly on the main screen without opening the help screen. **ENTER**
+closes nothing here — it stays reserved for kill mode's row selection.
 
 ## Inline Search (Window Mode)
 Press `/` to activate inline search mode; the live search field is the trailing

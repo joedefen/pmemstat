@@ -18,6 +18,16 @@ except ImportError:  # pragma: no cover - depends on the environment
                   'IncrementalSearchBar', 'InlineConfirmation'):
         setattr(_stub, _name, type(_name, (), {}))
 
+    # The semantic colour-pair ids must match console-window exactly: main.py
+    # styles rows with Theme.<ROLE> and the colour tests assert the resulting
+    # attribute, so a drift here would make the stub disagree with the real
+    # package instead of merely standing in for it.
+    _stub.Theme = type('Theme', (), {
+        'DEFAULT': 0, 'DANGER': 1, 'SUCCESS': 2, 'WARNING': 3, 'INFO': 4,
+        'EMPHASIS': 5, 'ERROR': 6, 'PROGRESS': 7, 'DEFAULT_BG': 8,
+        'HOTSWAP': 9, 'OLD_SUCCESS': 10,
+    })
+
     class _StubConsoleWindowOpts:
         """Minimal stand-in that records the options an app passes."""
 

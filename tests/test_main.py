@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 
+from console_window import Theme
+
 from pmemstat import main as main_module
 from pmemstat.main import (human, human_kb, ago_str, GrowthTracker,
                            compute_zram_effective, ProcMem, PmemStat,
@@ -1312,6 +1314,224 @@ class TestCgroupColumns(unittest.TestCase):
                 raw = pm.cgroup_raw['/a']
                 for key, value in expect.items():
                     self.assertEqual(raw[key], value, f'{view}:{key}')
+
+
+class TestColourRoles(unittest.TestCase):
+    """Colour is decoration: rows keep their exact text and get stable roles.
+
+    The alignment contract is the important one.  console-window stores a body
+    row as one attribute run per ``add_body`` call, so a coloured row is emitted
+    as several resumed calls; if the runs did not concatenate to the original
+    string, the pad would truncate the row at the wrong column and shove every
+    field left.  ``_legacy_row`` is the pre-colour implementation, kept here as
+    an independent formatting oracle.
+    """
+
+    @staticmethod
+    def _pair(name):
+        """The attribute curses produces for a semantic role."""
+        return getattr(Theme, name) << 8
+
+    @staticmethod
+    def _opts(**over):
+        fields = dict(units='MB', debug=0, cpu=False, psi=False, others=True,
+                      groupby='exe', sortby='mem', growth_style='both',
+                      window=True)
+        fields.update(over)
+        return SimpleNamespace(**fields)
+
+    def _pm(self, **over):
+        return PmemStat(self._opts(**over))
+
+    def _colour(self):
+        """Patch curses to report 256 colours, as a live window would."""
+        return (
+            mock.patch.object(main_module.curses, 'has_colors',
+                              return_value=True),
+            mock.patch.object(main_module.curses, 'color_pair',
+                              side_effect=lambda pair: pair << 8),
+        )
+
+    def _segments(self, pm, lead, summary):
+        has_colours, pair = self._colour()
+        with has_colours, pair:
+            return pm.summary_segments(lead, summary)
+
+    @staticmethod
+    def _row():
+        summary = ProcMem.make_summary_dict(info='demo')
+        summary.update({'number': 3, 'pswap': 1024, 'shSYSV': 2048,
+                        'data': 0, 'ptotal': 4096})
+        return summary
+
+    @staticmethod
+    def _legacy_row(pm, lead, summary):
+        """The pre-colour row builder, verbatim, as the formatting oracle."""
+        body = ''
+        combined = bool(pm.opts.others)
+        for item in pm.view_columns():
+            if not item:
+                body += '  '
+                continue
+            value = summary.get(item, 0)
+            if value is None:
+                body += f'{"n/a":>{pm.fwidth}}'
+                continue
+            if item in ('cpu%', 'memPSI%'):
+                body += f'{value:>{pm.fwidth}.1f}'
+                continue
+            if combined and item == pm.OTHER_KEYS[0]:
+                value = sum(summary.get(key, 0) for key in pm.OTHER_KEYS)
+            mbytes = int(round(value*1024/pm.divisor))
+            if pm.divisor > 1:
+                body += f'{mbytes:>{pm.fwidth},}'
+            else:
+                body += f'{human(mbytes):>{pm.fwidth}}'
+        num = summary['number']
+        lead = f'{lead:<{pm.lead_width}}'
+        return (f'{body} {lead} ' + (f'{-num}' if num <= 0 else f'{num}x')
+                + ' ' + summary['info'])
+
+    def test_semantic_attr_is_zero_without_a_screen(self):
+        """No curses screen (the -W report, unit tests): roles collapse to 0."""
+        self.assertEqual(main_module.semantic_attr(Theme.HOTSWAP), 0)
+
+    def test_rows_match_the_legacy_layout_for_every_mode(self):
+        """Colour runs must not move a single column."""
+        cases = [dict(units=units, others=others, cpu=cpu)
+                 for units in ('MB', 'KB', 'human')
+                 for others in (True, False)
+                 for cpu in (False, True)]
+        cases += [dict(units='MB', psi=True, cgroup='footprt'),
+                  dict(units='MB', psi=True, cgroup='kcharge'),
+                  dict(units='MB', psi=True, cgroup='footprt', na=True)]
+        for case in cases:
+            over = dict(case)
+            cgroup = over.pop('cgroup', None)
+            na_cells = over.pop('na', False)
+            pm = self._pm(**over)
+            if cgroup:
+                pm.opts.groupby = ('cgroupCharge' if cgroup == 'kcharge'
+                                   else 'cgroup')
+                pm.cgroup_data_seen = True
+                summary = self._row()
+                summary.update({'memPSI%': None if na_cells else 1.5,
+                                'anon': 100, 'cache': 200, 'kmem': 300,
+                                'swap': 400, 'oK': 50, 'footprt': 1050,
+                                'kcharge': 900})
+            else:
+                summary = self._row()
+            expected = self._legacy_row(pm, '3.5G 2h3m', summary)
+            actual = ''.join(text for text, _ in
+                             self._segments(pm, '3.5G 2h3m', summary))
+            self.assertEqual(actual, expected, case)
+
+    def test_system_growth_line_joins_to_its_plain_form(self):
+        """The Δ line keeps its width and interval spacing, only coloured."""
+        pm = self._pm()
+        pm.sys_growth = {'Used': (1000, 60.0), 'TOTALS': (2000, 60.0),
+                         'ShTmp': (0, 60.0), 'OthK': (500, 60.0),
+                         'OthU': (2500, 60.0)}
+        has_colours, pair = self._colour()
+        with mock.patch.object(main_module.os, 'geteuid', return_value=0), \
+                has_colours, pair:
+            plain = pm.format_sys_growth()
+            segments = pm.sys_growth_segments()
+        self.assertEqual(''.join(text for text, _ in segments), plain)
+        hot = self._pair('HOTSWAP')
+        self.assertIn(hot, [attr for text, attr in segments if '1.0M' in text])
+
+    def test_growth_annotation_is_hotswap(self):
+        pm = self._pm()
+        pm.lead_width = len('3.5G 2h3m')
+        segments = self._segments(pm, '3.5G 2h3m', self._row())
+        self.assertEqual([attr for text, attr in segments if '3.5G' in text],
+                         [self._pair('HOTSWAP')])
+
+    def test_new_group_marker_is_success(self):
+        pm = self._pm()
+        segments = self._segments(pm, 'A', self._row())
+        self.assertEqual([attr for text, attr in segments if 'A' in text],
+                         [self._pair('SUCCESS')])
+
+    def test_totals_row_carries_the_growth_label(self):
+        """`growth` titles the annotation column from the TOTALS row."""
+        pm = self._pm()
+        pm.lead_width = len(pm.GROWTH_HEADER)
+        segments = self._segments(pm, 'T', self._row())
+        label = [run for run in segments
+                 if run[0].strip() == pm.GROWTH_HEADER]
+        self.assertEqual(len(label), 1)
+        self.assertEqual(label[0][1], self._pair('HOTSWAP'))
+
+    def test_totals_lead_keeps_the_marker_with_growth_off(self):
+        """With no annotation column there is nothing to title, so `T` stays."""
+        pm = self._pm(growth_style='off')
+        segments = self._segments(pm, 'T', self._row())
+        self.assertEqual([attr for text, attr in segments
+                          if text.strip() == 'T'],
+                         [self._pair('EMPHASIS')])
+
+    def test_growth_label_reserves_the_same_width_as_the_header_lead(self):
+        """Moving the label down must not move `key/info` sideways."""
+        pm = self._pm()
+        pm.lead_width = len(pm.GROWTH_HEADER)
+        self.assertEqual(pm.growth_lead_blank(), ' ' * (pm.lead_width + 1))
+        self.assertEqual(len(pm.growth_lead_blank()),
+                         len(pm.growth_lead_header()))
+        # The TOTALS label run and a row's annotation run are the same width
+        # when the annotation fits the column, so the counting field starts at
+        # the same offset on both lines.  (A wider annotation grows lead_width
+        # first, which is why both cells are built from it.)
+        label_run = pm.lead_segment('T')[0]
+        self.assertEqual(len(label_run), pm.lead_width + 2)
+        self.assertEqual(len(label_run), len(pm.lead_segment('3.5G')[0]))
+
+    def test_titles_are_emphasis_but_row_names_stay_plain(self):
+        """Titles are EMPHASIS; a group's own name must read in any theme."""
+        pm = self._pm()
+        plain = self._segments(pm, '', self._row())
+        self.assertEqual([attr for text, attr in plain if 'demo' in text],
+                         [None])
+        totals = self._segments(pm, 'T', self._row())
+        self.assertEqual([attr for text, attr in totals if 'demo' in text],
+                         [self._pair('EMPHASIS')])
+
+    def test_others_and_dead_rows_are_dim(self):
+        """The synthesized OTHERS/dead rows are context, not findings."""
+        for lead in ('O', 'x'):
+            pm = self._pm()
+            segments = self._segments(pm, lead, self._row())
+            lead_run = next(run for run in segments if run[0].strip() == lead)
+            # The count ('3x') stays plain: it is a fact, not a synthesis.
+            self.assertEqual(lead_run[1], curses.A_DIM, lead_run)
+            self.assertEqual(segments[-1][1], curses.A_DIM, segments[-1])
+            self.assertIsNone(segments[-2][1], segments[-2])
+
+    def test_zero_cells_are_dimmed(self):
+        pm = self._pm()
+        segments = self._segments(pm, 'A', self._row())
+        zeros = [attr for text, attr in segments if text.strip() == '0']
+        self.assertTrue(zeros)
+        self.assertEqual(set(zeros), {curses.A_DIM})
+
+    def test_segments_land_on_one_window_row(self):
+        """The first run starts the row; every later run resumes it."""
+        pm = self._pm()
+        pm.window = mock.Mock()
+        pm.emit_segments([('ab', 1), ('cd', 2)])
+        calls = pm.window.add_body.call_args_list
+        self.assertEqual([call.args[0] for call in calls], ['ab', 'cd'])
+        self.assertFalse(calls[0].kwargs['resume'])
+        self.assertTrue(calls[1].kwargs['resume'])
+
+    def test_non_window_report_prints_one_plain_line(self):
+        """The -W report has no attributes, so the runs join into one print."""
+        pm = self._pm()
+        with mock.patch('builtins.print') as printer:
+            pm.emit_segments([('ab', 1), ('cd', 2)])
+        printer.assert_called_once()
+        self.assertIn('abcd', printer.call_args.args[0])
 
 
 if __name__ == '__main__':

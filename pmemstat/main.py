@@ -60,7 +60,7 @@ from datetime import datetime, timedelta, timezone
 # Keep this in sync with the pin in pyproject.toml's ``dependencies``.
 from console_window import (ConsoleWindow, ConsoleWindowOpts,
                             OptionSpinner, IncrementalSearchBar,
-                            InlineConfirmation)
+                            InlineConfirmation, Theme)
 from pmemstat.KillThem import KillThem
 from pmemstat.CpuSmooth import CpuSmooth, SysStat
 from pmemstat import History
@@ -137,6 +137,41 @@ def cgroup_view_totals(data):
                            - slab_reclaimable + swap) // 1024),
         'kcharge': current // 1024,
     }
+
+
+##############################################################################
+##   Colour roles
+##############################################################################
+# Colour is decoration, never information: every role degrades to "no
+# attribute" (plain text) when the terminal has no colour.  The pair ids are
+# console-window's semantic Theme roles, so a theme change recolours the whole
+# report without an edit here.  Roles used:
+#   HOTSWAP  - numbers that are *changing*: a row's growth annotation, the Δ
+#              values on the system growth line, the 'growth' header label
+#   EMPHASIS - titles: the column header line and the TOTALS row.  Deliberately
+#              NOT every row's grouping name: the stock 'default' theme renders
+#              EMPHASIS as white on the terminal's default background, which is
+#              invisible on a light terminal, and the key/info column is the
+#              densest text in the report.
+#   INFO     - the zRAM estimate block (effective RAM, compression ratio)
+#   SUCCESS  - the 'A' marker on a group that has just appeared
+#   DANGER   - an irreversible action about to happen (kill / growth reset)
+#   A_DIM    - labels, meta text, zero-valued cells and 'n/a' (skipped by eye)
+def semantic_attr(pair_id):
+    """Attribute for a console-window ``Theme`` pair, or 0 when no colour.
+
+    Both ``curses.has_colors()`` and ``curses.color_pair()`` raise
+    ``curses.error`` before ``initscr()``; the one-shot (``-W``) report and the
+    unit tests both run with no screen, and a failed colour lookup must never
+    abort a refresh.  A terminal without colour -- or a theme that did not
+    install the pair -- therefore degrades to plain text.
+    """
+    try:
+        if not curses.has_colors():
+            return 0
+        return curses.color_pair(pair_id)
+    except curses.error:
+        return 0
 
 
 ##############################################################################
@@ -1803,10 +1838,25 @@ class PmemStat:
         every other column header.  With growth ``off`` the fragment is the
         same width of blank space (one space plus the column plus the separator)
         so ``key/info`` stays where the rows put it.
+
+        This is emitted on the TOTALS row (the last header line, directly above
+        the annotations it titles -- see :meth:`lead_segment`); the column
+        header line above it reserves the same width with
+        :meth:`growth_lead_blank`.
         """
         if getattr(self.opts, 'growth_style', 'off') == 'off':
             return ' ' * (self.lead_width + 1)
         return f' {self.GROWTH_HEADER:>{self.lead_width}}'
+
+    def growth_lead_blank(self):
+        """Blank lead field for the column-header line.
+
+        The ``growth`` label rides on the TOTALS row instead, so the column
+        header reserves the identical width with blank space: ``key/info`` does
+        not move, and the only two lines that change are the two that carry the
+        label and the marker.
+        """
+        return ' ' * (self.lead_width + 1)
 
     def select_growth_rows(self, alive_groups):
         """Group keys allowed to annotate: absolute ``-k`` gate plus top-N."""
@@ -1862,6 +1912,17 @@ class PmemStat:
         in particular a ``rate`` projection, which is otherwise silent about the
         window it extrapolates from.
         """
+        return ''.join(text for text, _ in self.sys_growth_segments())
+
+    def sys_growth_segments(self):
+        """The system growth line as ``(text, attr)`` runs.
+
+        Concatenating the runs reproduces :meth:`format_sys_growth` exactly, so
+        the value width (and its shrink hysteresis) is unchanged; only the
+        styling differs.  The ``Δ`` values carry ``HOTSWAP`` -- the same role as
+        a row's growth annotation, because they are the same measurement -- and
+        the labels are dim so the numbers stand out.
+        """
         def value_of(key):
             result = self.sys_growth.get(key)
             if not result:
@@ -1883,14 +1944,23 @@ class PmemStat:
         width = max(len(text) for text in values.values())
         self.sys_growth_width, self._sysgrow_small = self._debounced_width(
             self.sys_growth_width, width, self._sysgrow_small)
-        line = '    ' + '  '.join(
-            f'Δ{key} {values[key]:<{self.sys_growth_width}}' for key in keys)
+        hot = semantic_attr(Theme.HOTSWAP)
+        segments = [('    ', None)]
+        for idx, key in enumerate(keys):
+            if idx:
+                segments.append(('  ', None))
+            segments.append((f'Δ{key} ', curses.A_DIM))
+            segments.append((f'{values[key]:<{self.sys_growth_width}}', hot))
+        # rstrip the trailing pad before appending the shared interval, exactly
+        # as the single-string form did, so the gap stays one space.
+        text, attr = segments[-1]
+        segments[-1] = (text.rstrip(), attr)
         if self.opts.growth_style != 'off':
             result = next((self.sys_growth.get(key) for key in keys
                            if self.sys_growth.get(key)), None)
             if result:
-                line = line.rstrip() + f' [{ago_str(result[1])}]'
-        return line.rstrip()
+                segments.append((f' [{ago_str(result[1])}]', curses.A_DIM))
+        return [(text, attr) for text, attr in segments if text]
 
     def prc_group(self, group):
         """Process on group"""
@@ -2019,32 +2089,99 @@ class PmemStat:
         return cols
 
     def pr_summary(self, lead, summary, attr=None, to_head=False):
-        """Print a summary of memory use (columns from view_columns())."""
-        body = ''
+        """Print a summary of memory use (columns from view_columns()).
+
+        The row is emitted as attribute runs (see :meth:`emit_segments`) so the
+        growth annotation, the new-group marker and the grouping name can carry
+        a colour role.  The runs concatenate to exactly the one-line string this
+        method has always produced, so the column layout is unchanged.
+        """
+        segments = self.summary_segments(lead, summary)
+        if attr is not None:
+            # A caller-supplied whole-row attribute wins: collapse the runs so
+            # its style is not mixed with the role colours.
+            self.emit_segments([(''.join(text for text, _ in segments), attr)],
+                               to_head=to_head)
+        else:
+            self.emit_segments(segments, to_head=to_head)
+
+    def summary_segments(self, lead, summary):
+        """One summary row as ``(text, attr)`` runs (see :meth:`pr_summary`).
+
+        Zero-valued cells are dimmed: in a typical report most cells of most
+        rows are zero, and de-emphasizing them is what makes the non-zero ones
+        readable at a glance.  ``n/a`` is dimmed for the same reason.
+        """
+        segments = []
         combined = bool(self.opts.others)
         for item in self.view_columns():
             if not item:
-                body += '  '
+                segments.append(('  ', None))
                 continue
             value = summary.get(item, 0)
             if value is None:
-                body += f'{"n/a":>{self.fwidth}}'
+                segments.append((f'{"n/a":>{self.fwidth}}', curses.A_DIM))
                 continue
             if item in ('cpu%', 'memPSI%'):
-                body += f'{value:>{self.fwidth}.1f}'
+                segments.append((f'{value:>{self.fwidth}.1f}',
+                                 None if value else curses.A_DIM))
                 continue
             if combined and item == self.OTHER_KEYS[0]:
                 value = sum(summary.get(key, 0) for key in self.OTHER_KEYS)
             mbytes = int(round(value*1024/self.divisor))
             if self.divisor > 1:
-                body += f'{mbytes:>{self.fwidth},}'
+                text = f'{mbytes:>{self.fwidth},}'
             else:
-                body += f'{human(mbytes):>{self.fwidth}}'
+                text = f'{human(mbytes):>{self.fwidth}}'
+            segments.append((text, curses.A_DIM if mbytes == 0 else None))
         num = summary['number']
-        lead = f'{lead:<{self.lead_width}}'
-        self.emit(f'{body} {lead} '
-                  + (f'{-num}' if num <= 0 else f'{num}x')
-                  + ' ' + summary['info'], attr=attr, to_head=to_head)
+        segments.append(self.lead_segment(lead))
+        segments.append((f'{-num}' if num <= 0 else f'{num}x', None))
+        segments.append((f' {summary["info"]}', self.info_attr(lead)))
+        return segments
+
+    def lead_attr(self, lead):
+        """Colour role for a summary row's inline growth/marker column."""
+        marker = lead.strip()
+        if marker == 'A':
+            return semantic_attr(Theme.SUCCESS)
+        if marker == 'T':
+            return semantic_attr(Theme.EMPHASIS)
+        if marker in ('O', 'x'):
+            return curses.A_DIM
+        if marker:
+            # The only other value this column holds is a growth annotation.
+            return semantic_attr(Theme.HOTSWAP)
+        return None
+
+    def info_attr(self, lead):
+        """Colour role for the grouping name at the end of a summary row.
+
+        Only the TOTALS row is a title.  A group's own name stays default
+        styling on purpose: the stock 'default' theme's EMPHASIS is white on the
+        terminal's default background, which a light terminal cannot show, and
+        this column is the densest text on screen (see the roles comment above).
+        """
+        marker = lead.strip()
+        if marker in ('O', 'x'):
+            return curses.A_DIM
+        if marker == 'T':
+            return semantic_attr(Theme.EMPHASIS)
+        return None
+
+    def lead_segment(self, lead):
+        """The lead (growth/marker) cell of a summary row, plus its pad.
+
+        The TOTALS row shows the ``growth`` label instead of its ``T`` marker:
+        the row's own info already reads TOTALS, so the marker is redundant
+        there, and putting the label on the last header line places it directly
+        above the annotations it titles.  With growth ``off`` there is no
+        annotation column to title, so ``T`` is kept.
+        """
+        if lead == 'T' and getattr(self.opts, 'growth_style', 'off') != 'off':
+            label = self.growth_lead_header()
+            return (f'{label} ', self.lead_attr(self.GROWTH_HEADER))
+        return (f' {lead:<{self.lead_width}} ', self.lead_attr(lead))
 
     @staticmethod
     def get_meminfo():
@@ -2152,8 +2289,10 @@ class PmemStat:
             # question is impossible to miss; its countdown ticks down with each
             # refresh of the report.
             if self.zap_confirm_active():
+                # Destructive: DANGER (not underline) so it cannot be mistaken
+                # for the growth annotation it sits under.
                 self.emit(self.zap_confirm_text(), to_head=True,
-                          attr=curses.A_BOLD|curses.A_UNDERLINE)
+                          attr=curses.A_BOLD | semantic_attr(Theme.DANGER))
             resume = False
             # print timestamp of report
             leader = '' if windowed else '--- '
@@ -2180,27 +2319,36 @@ class PmemStat:
             # System growth line (attribution identity), only when enabled and
             # a baseline exists.
             if self.opts.growth_style != 'off' and self.sys_growth:
-                self.emit(self.format_sys_growth(), to_head=True, resume=False)
+                self.emit_segments(self.sys_growth_segments(),
+                                   to_head=True, resume=False)
                 resume = True
 
             if self.has_zram(): # second line if zRAM
-                resume = False
                 proj = self.zram_projector
+                # The zRAM line reports estimates of effective RAM, so its
+                # values carry INFO and its labels are dim; the zRAM size itself
+                # stays bold to read as the headline number of the line.
+                info = semantic_attr(Theme.INFO)
+                segments = []
                 if self.opts.cpu:
-                    leader = f'{kernel_cpu:8.1f}%/ker '
-                    self.emit(leader, to_head=True, resume=resume)
-                    resume = True
-                self.emit(f'MajF/s={major_fault_rate} ', to_head=True, resume=resume)
-                resume = True
-                self.emit(f' zRAM={human(self.zram_projector.meminfo.MemZram)}',
-                          to_head=True, attr=curses.A_BOLD, resume=resume)
-                leader = ''
-                leader += f' CR={proj.ratio:.1f}'
-                leader += f' eTot:{proj.human_pct(proj.e_max_used)}'
-                leader += f' eUsed:{proj.human_pct(proj.e_used)}'
-                leader += f' eAvail:{proj.human_pct(proj.e_avail)}'
+                    segments.append((f'{kernel_cpu:8.1f}%/ker ', None))
+                segments += [
+                    ('MajF/s=', curses.A_DIM),
+                    (f'{major_fault_rate} ', info),
+                    (' zRAM=', curses.A_DIM),
+                    (f'{human(self.zram_projector.meminfo.MemZram)}',
+                     curses.A_BOLD | info),
+                    (' CR=', curses.A_DIM),
+                    (f'{proj.ratio:.1f}', info),
+                    (' eTot:', curses.A_DIM),
+                    (f'{proj.human_pct(proj.e_max_used)}', info),
+                    (' eUsed:', curses.A_DIM),
+                    (f'{proj.human_pct(proj.e_used)}', info),
+                    (' eAvail:', curses.A_DIM),
+                    (f'{proj.human_pct(proj.e_avail)}', info),
+                ]
                 # leader += f' Dirty={human(meminfoKB["Dirty"]*1024)}'
-                self.emit(leader, to_head=True, resume=resume)
+                self.emit_segments(segments, to_head=True, resume=False)
             elif self.opts.cpu: # second line if reporting cpu
                 resume = False
                 leader = f'{kernel_cpu:8.1f}%/ker'
@@ -2213,7 +2361,10 @@ class PmemStat:
             if self.opts.psi: # PSI leader block (opt-in, one line per resource)
                 for idx, psi_line in enumerate(
                         format_pressure_lines(self.pressure)):
-                    attr = curses.A_BOLD if idx == 0 else None
+                    # The heading row is a title (EMPHASIS); the value rows keep
+                    # their default styling until a threshold policy is agreed.
+                    attr = (curses.A_BOLD | semantic_attr(Theme.EMPHASIS)
+                            if idx == 0 else None)
                     self.emit(psi_line, to_head=True, resume=False, attr=attr)
 
         self.loop_num += 1
@@ -2365,13 +2516,22 @@ class PmemStat:
             label = ('other' if (self.opts.others and item == self.OTHER_KEYS[0])
                      else item)
             header += f'{label:>{self.fwidth}}'
-        # The growth column sits between the numeric columns and 'key/info';
-        # its bold, right-justified label keeps the header aligned with the
-        # rows, which reserve the same field for the growth annotation (or a
-        # blank pad when growth is off).
-        self.emit(f'{header}{self.growth_lead_header()} key/info'
-                + f' ({self.opts.groupby} by {self.get_sortby()})',
-                to_head=True, attr=curses.A_BOLD)
+        # The growth column sits between the numeric columns and 'key/info'.
+        # Titles are EMPHASIS.  The lead column is blank on this line: its
+        # 'growth' label rides on the TOTALS row now (see lead_segment),
+        # directly above the annotations it titles, while this line reserves
+        # the same width so key/info does not move.
+        # The '(grouping by sort)' descriptor names the current view -- what a
+        # reader looks for first when the numbers surprise them -- so it is
+        # SUCCESS rather than dim meta text.
+        emphasis = curses.A_BOLD | semantic_attr(Theme.EMPHASIS)
+        self.emit_segments([
+            (header, emphasis),
+            (self.growth_lead_blank(), None),
+            (' key/info', emphasis),
+            (f' ({self.opts.groupby} by {self.get_sortby()})',
+             curses.A_BOLD | semantic_attr(Theme.SUCCESS)),
+        ], to_head=True)
         self.pr_summary('T', grand_summary, to_head=True)
 
         alive_groups = {}
@@ -2432,7 +2592,11 @@ class PmemStat:
                         prompt = f'  Type "y" to kill: {self.confirmation.identity} (ESC to cancel)'
                         if self.confirmation.input_buffer:
                             prompt += f' [{self.confirmation.input_buffer}_]'
-                        self.emit(prompt, attr=curses.A_REVERSE)
+                        # DANGER rather than reverse-video: the row under the
+                        # pick is already reversed, and a kill prompt should not
+                        # look like another picked row.
+                        self.emit(prompt,
+                                  attr=curses.A_BOLD | semantic_attr(Theme.DANGER))
                     shown_cnt += 1
                     # DB(0, f'obj: {vars(obj)}')
             elif is_first or self.opts.window:
@@ -2512,6 +2676,28 @@ class PmemStat:
         return (os.geteuid() == 0
                 and getattr(self.opts, 'growth_style', 'off') != 'off')
 
+    def emit_segments(self, segments, to_head=False, resume=False):
+        """Emit one row built from ``(text, attr)`` runs.
+
+        console-window stores a row as one attribute run per ``add_*`` call and
+        *appends* a run when ``resume=True`` (see ``ConsoleWindow._add``), so a
+        coloured row is several calls that all land on the same row.  The runs
+        must concatenate to exactly the plain row text: the pad truncates each
+        call to the *remaining* width, which is what keeps the columns aligned.
+        """
+        segments = [(text, attr) for text, attr in segments if text]
+        if not segments:
+            return
+        if not self.window:
+            # The one-shot report has no attributes at all: keep its output
+            # byte-identical by printing the joined row once.
+            self.emit(''.join(text for text, _ in segments),
+                      to_head=to_head, resume=resume)
+            return
+        for idx, (text, attr) in enumerate(segments):
+            self.emit(text, to_head=to_head, attr=attr,
+                      resume=bool(resume) or idx > 0)
+
     def emit(self, line, to_head=False, attr=None, resume=False):
         """ Emit a line of the report"""
         if self.window:
@@ -2525,13 +2711,14 @@ class PmemStat:
 
     def help_screen(self):
         """Populate help screen"""
-        self.emit("-- HELP SCREEN ['?' or ENTER closes Help; Ctrl-C exits ] --",
+        self.emit("-- HELP SCREEN ['?' or ESC closes Help; Ctrl-C exits ] --",
                    to_head=True, attr=curses.A_BOLD)
         self.spin.show_help_nav_keys(self.window)
         if self.zap_confirm_active():
             # An armed 'z' also asks for its answer on the help screen, so the
             # prompt is never invisible while it counts down.
-            self.emit(self.zap_confirm_text(), attr=curses.A_REVERSE)
+            self.emit(self.zap_confirm_text(),
+                      attr=curses.A_BOLD | semantic_attr(Theme.DANGER))
         if os.geteuid() != 0:
             self.emit('Hint: run "sudo pmemstat" to show all PIDs',
                        attr=curses.A_BOLD)
@@ -2550,6 +2737,14 @@ class PmemStat:
                 self.search_bar.start(self.opts.search)
                 self.window.passthrough_mode = True
                 return regroup
+            if key == 27:
+                # ESC backs out of the Help screen -- the same key the rest of
+                # the family uses to leave a screen.  In the main view it does
+                # nothing here, and kill mode owns ESC through its own prompt.
+                if self.mode == 'help':
+                    self.mode = 'normal'
+                    self.window.set_pick_mode(self.opts.kill_mode)
+                return regroup
             if key in (ord('z'), ):
                 # Runtime equivalent of --reset-history-now (root only; the key
                 # is only routed here when root -- see keys_we_handle).  It is
@@ -2565,16 +2760,18 @@ class PmemStat:
                 if key in (ord('u'), ):
                     self._set_units()
                 elif key in (ord('?'), ):
+                    # '?' is an action, not a cycle: it opens or closes Help.
+                    self.mode = 'normal' if self.mode == 'help' else 'help'
                     self.window.set_pick_mode(False if self.mode == 'help'
-                                           else self.opts.kill_mode)
+                                              else self.opts.kill_mode)
                 elif key in (ord('K'), ):
                     if self.mode == 'normal':
                         self.window.set_pick_mode(self.opts.kill_mode)
 
             elif key in (curses.KEY_ENTER, 10):
-                if self.mode == 'help':
-                    self.mode = 'normal'
-                elif self.opts.kill_mode:
+                # ENTER no longer closes Help: ESC is the one way back, as in
+                # the other apps.  ENTER keeps its meaning in kill mode.
+                if self.opts.kill_mode:
                     win = self.window
                     group = self.groups_by_line.get(win.pick_pos, None)
                     if group:
@@ -2595,8 +2792,11 @@ class PmemStat:
             return regroup
 
         self.spin = OptionSpinner()
-        self.spin.add_key('mode', '? - help screen',
-                          vals=['normal', 'help'], obj=self)
+        # '?' is an action, not a spinner (it used to cycle a 'mode' option).
+        # do_key dispatches it explicitly, so the spinner's one-shot flag is
+        # parked on a throwaway object; registering it here only keeps the key
+        # in the help screen's list.
+        self.spin.add_key('help', '? - help screen', obj=SimpleNamespace())
         self.spin.add_key('kill_mode', 'K - kill mode', vals=[False, True],
                 comments='Select line + ENTER to kill selected', obj=self.opts)
         self.spin.add_key('fit_to_window', 'f - fit rows to window',
