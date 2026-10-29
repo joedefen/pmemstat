@@ -214,7 +214,7 @@ In the default window loop we see
       * **text** - proportional use of text memory (the read-only binary code, per smaps)
     * **data** - exclusive data ("heap") use per smaps
     * **ptotal** - proportional memory of all categories (sum of the columns to the left); with zRAM it includes **pswap**
-    * *empty* - entry type: **T** (grand total), **A** (newly added grouping) or **O** (overflow groupings below `--top-pct`)
+    * *empty* - entry type: **T** (grand total), **A** (newly added grouping), **O** (overflow groupings below `--top-pct`) or **x** (a grouping whose processes have all ended; its last summary is kept briefly)
     * **growth** - inline growth annotation for top-N growers (e.g. `3.5G 2h3m`); only when growth mode is not `off`
     * **key/info** - **{num}x**, the number of processes in the grouping (e.g. `24x browser`), plus the grouping key; `pid` grouping rows show `1x`, the pid and the command line.
 
@@ -276,6 +276,11 @@ groups that are growing, making slow leaks visible without scrolling history:
 * The column's `growth` label sits on the **TOTALS** row, directly above the
   annotations it titles; the TOTALS row's `T` marker is dropped there (its info
   already reads TOTALS) and returns when growth is `off`.
+* Changing the grouping (`g`/`o`) rebuilds every row, which would mark them all
+  new for one refresh. With growth `off` that `A` flash is kept (it explains the
+  reshuffle), but in a growth mode the annotations are shown instead, from the
+  per-view history that survives the change; a key that genuinely appears later
+  still gets its `A`.
 * The baseline comes from a **per-boot history ledger** (see "Updating History
   from Cron / Startup") that root runs write as they run and on exit, so growth
   is measured from the group's **first observation this boot** (possibly an

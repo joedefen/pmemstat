@@ -1147,6 +1147,56 @@ class TestGrowthHeader(unittest.TestCase):
         self.assertEqual(len(pm.growth_lead_header()), pm.lead_width + 1)
 
 
+class TestRegroupMarker(unittest.TestCase):
+    """A grouping change must not flash 'A' over the growth annotations.
+
+    The 'g'/'o' keys rebuild every group, so without suppression each row is
+    "new" for one refresh.  In a growth mode the annotations the user switched
+    *to* should be shown instead; with growth off the 'A' flash explains the
+    reshuffle and is kept.  A key that genuinely appears on a later sample
+    still gets its 'A'.
+    """
+
+    @staticmethod
+    def _pm(**over):
+        fields = dict(units='MB', debug=0, groupby='exe', growth_style='both')
+        fields.update(over)
+        return PmemStat(SimpleNamespace(**fields))
+
+    def test_grouping_change_suppresses_in_every_growth_mode(self):
+        for style in ('both', 'growth', 'rate'):
+            pm = self._pm(growth_style=style)
+            pm.regroup_from_key = True
+            self.assertTrue(pm.suppresses_new_marker(True), style)
+
+    def test_growth_off_keeps_the_marker(self):
+        """The mass 'A' explains a reshuffle when there is no annotation."""
+        pm = self._pm(growth_style='off')
+        pm.regroup_from_key = True
+        self.assertFalse(pm.suppresses_new_marker(True))
+
+    def test_initial_frame_keeps_the_marker(self):
+        """regroup_pending is set on the first frame, but no key caused it."""
+        pm = self._pm()
+        self.assertFalse(pm.suppresses_new_marker(True))
+
+    def test_plain_sample_keeps_the_marker(self):
+        """A new key appearing on a normal refresh still gets its 'A'."""
+        pm = self._pm()
+        pm.regroup_from_key = True
+        self.assertFalse(pm.suppresses_new_marker(False))
+
+    def test_suppressed_groups_are_not_marked_new(self):
+        pm = self._pm()
+        pm._suppress_new_marker = True  # pylint: disable=protected-access
+        self.assertFalse(pm.get_group('a').is_new)
+
+    def test_normal_groups_are_marked_new(self):
+        """Outside a suppressed regroup every fresh group is 'new'."""
+        pm = self._pm()
+        self.assertTrue(pm.get_group('a').is_new)
+
+
 class TestSysGrowthSplit(unittest.TestCase):
     """The system growth line splits the residual only when running as root."""
 

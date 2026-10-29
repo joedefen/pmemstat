@@ -1223,6 +1223,11 @@ class PmemStat:
         self.needs_refresh = True
         self.first_loop = True
         self.regroup_pending = True
+        # True only when the pending regroup came from a 'g'/'o' key press (not
+        # from the initial frame), so the first post-change sample can suppress
+        # the regroup's mass 'A' markers while growth is showing (see loop()).
+        self.regroup_from_key = False
+        self._suppress_new_marker = False
         set_colors_enabled(getattr(opts, 'colors', True))
         self.groups_by_line = {}
         # Persistent per-(view, key) growth trackers. They live on the singleton
@@ -1342,11 +1347,17 @@ class PmemStat:
         self.fwidth = max(self.fwidth, label_width + 1)
 
     def get_group(self, key):
-        """Per group info."""
+        """Per group info.
+
+        A group created on the first sample after a *grouping change* is not
+        marked ``is_new`` while the growth annotation is showing: every key is
+        new by construction there, so an 'A' on every row would only flash over
+        the growth values for one refresh (see :meth:`PmemStat.loop`).
+        """
         group = self.groups.get(key, None)
         if not group:
             group = SimpleNamespace(key=key,
-                    is_new=True,
+                    is_new=not self._suppress_new_marker,
                     alive=False,
                     why_not=None,
                     is_changed=False,
@@ -1500,6 +1511,21 @@ class PmemStat:
             if total_key == 'footprt':
                 parts += group.summary['swap']
             group.summary['oK'] = (total - parts) if total is not None else None
+
+    def suppresses_new_marker(self, regroup):
+        """True when a sample's re-created rows must not show the 'A' marker.
+
+        A grouping change clears ``self.groups``, so every row is re-created as
+        "new" and would show an 'A' for exactly one refresh.  That is fine when
+        growth is off (it explains the reshuffle), but in a growth mode it
+        merely hides the annotations the user switched grouping to watch: the
+        per-view trackers survive the change and already hold the values to
+        show, so annotate with those instead.  The initial frame is not a
+        grouping change (``regroup_from_key`` is False), so its markers stay;
+        a key that genuinely appears on a later sample still gets its 'A'.
+        """
+        return bool(regroup and self.regroup_from_key
+                    and getattr(self.opts, 'growth_style', 'off') != 'off')
 
     def prep_new_loop(self, regroup):
         """Prepare for a new loop.
@@ -2447,6 +2473,8 @@ class PmemStat:
         wanted_prcs = {}
         self.kernel_prcs = []
 
+        self._suppress_new_marker = self.suppresses_new_marker(regroup)
+        self.regroup_from_key = False
         self.prep_new_loop(regroup)
 
         if self.window and (is_first or regroup):
@@ -2994,6 +3022,7 @@ class PmemStat:
                 # rather than a repaint of the old one.
                 was_groupby, was_others = self.opts.groupby, self.opts.others
                 self.regroup_pending = True
+                self.regroup_from_key = True
                 self.needs_refresh = True
             current = self.stack.curr
             screen = self.screens[current.num]
