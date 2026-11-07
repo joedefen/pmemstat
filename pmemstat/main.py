@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Pending Features:
   - Iffy:
@@ -41,33 +40,45 @@ NOTE: kB is a misnomer ... should be "KB".  Morons.
 # pylint: disable=too-many-public-methods
 
 
+import curses
 import os
 import re
 import shlex
 import signal
 import subprocess
 import sys
-import traceback
 import time
-import curses
+import traceback
+from datetime import datetime, timedelta, timezone
+from io import StringIO
+
 # from curses.textpad import rectangle
 from types import SimpleNamespace
-from io import StringIO
-from datetime import datetime, timedelta, timezone
+
 # console-window is intentionally pinned to an exact version (see pyproject.toml).
 # Provide a clear, actionable message instead of a bare ImportError when the
 # pinned package is missing or when a different version has been substituted.
 # Keep this in sync with the pin in pyproject.toml's ``dependencies``.
-from console_window import (ConsoleWindow, ConsoleWindowOpts,
-                            OptionSpinner, IncrementalSearchBar,
-                            InlineConfirmation, Theme, Screen, ScreenStack,
-                            colors_enabled, resolve_appearance, semantic_attr,
-                            set_colors_enabled)
-from pmemstat.KillThem import KillThem
-from pmemstat.CpuSmooth import CpuSmooth, SysStat
+from console_window import (
+    ConsoleWindow,
+    ConsoleWindowOpts,
+    IncrementalSearchBar,
+    InlineConfirmation,
+    OptionSpinner,
+    Screen,
+    ScreenStack,
+    Theme,
+    colors_enabled,
+    resolve_appearance,
+    semantic_attr,
+    set_colors_enabled,
+)
+
 from pmemstat import History
-from pmemstat.CGroup import (CGroup, cgroup_leaf, has_descendant,
-                             local_values, parse_cgroup_lines)
+from pmemstat import __version__ as PMEMSTAT_VERSION
+from pmemstat.CGroup import CGroup, cgroup_leaf, has_descendant, local_values, parse_cgroup_lines
+from pmemstat.CpuSmooth import CpuSmooth, SysStat
+from pmemstat.KillThem import KillThem
 from pmemstat.Pressure import format_pressure_lines, read_system_pressure
 from pmemstat.UiPrefs import UiPrefs
 
@@ -551,7 +562,8 @@ class ZramProjector:
                     for line in fh: # one value, one line
                         setattr(ns, param, int(line.strip()))
                         break
-            if self.DB: print(f'DB: {device}: {ns}')
+            if self.DB:
+                print(f'DB: {device}: {ns}')
 
         self.devs = infos
         return infos
@@ -1171,7 +1183,7 @@ class PmemStat:
         self.pressure = {}  # PSI snapshot (only read when opts.psi)
         self.spin = OptionSpinner()
         self.units, self.divisor, self.fwidth = 0, 0, 0
-        setattr(opts, 'kill_mode', False) # pseudo option
+        opts.kill_mode = False # pseudo option
         # Screen-model state.  The report's window model survives between
         # frames, so `needs_refresh` is what asks for a fresh /proc sample (a
         # timeout, a presentation key, or returning from another screen), and
@@ -3411,6 +3423,11 @@ def main():
     global DebugLevel
     import argparse
     parser = argparse.ArgumentParser()
+    # The release gate's smoke stage runs `pmemstat --version` in a throwaway
+    # venv.  argparse answers and exits before curses or root elevation is
+    # touched, so the installed script can prove which version it carries.
+    parser.add_argument('--version', action='version',
+            version=f'%(prog)s {PMEMSTAT_VERSION}')
     parser.add_argument('-D', '--debug', action='count', default=0,
             help='debug mode (the more Ds, the higher the debug level)')
     parser.add_argument('-C', '--no-cpu', action='store_false', dest='cpu',

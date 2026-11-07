@@ -4,7 +4,10 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "pmemstat"
-version = "4.1.1"
+# The release number lives in `pmemstat/__init__.py:__version__` only.  `bless`,
+# the built artifacts and `pmemstat --version` all read that one line, so this
+# table declares where it comes from instead of carrying a second copy.
+dynamic = ["version"]
 description = "Report Proportional Memory on Linux"
 authors = [
     {name = "Joe Defen", email = "joedef@duck.com"},
@@ -34,14 +37,54 @@ dependencies = [
 "Bug Tracker" = "https://github.com/joedefen/pmemstat/issues"
 
 [project.optional-dependencies]
-# Local development tooling.  Create the project venv with:
-#     python3 -m venv .venv
-#     .venv/bin/python -m pip install -e '.[dev]'
+# The release gate `./bless` runs ruff, compileall and pytest --cov, and refuses
+# to start unless twine>=7 and packaging>=26 are present.  Keep this extra in
+# step with those floors; `bt penv` installs it into the project's .venv.
 # (pylint is pinned here to match the CI lint gate.)
 dev = [
     'pylint == 3.3.4',
-    'build',
+    'ruff >= 0.9',
+    'pytest >= 7.0',
+    'pytest-cov >= 4.0',
+    'build >= 1.2',
+    'twine >= 7',
+    'packaging >= 26',
+    # `bless` and the inspector read pyproject.toml with tomllib, which only
+    # joined the stdlib in 3.11; this project still supports 3.10.
+    'tomli >= 2.0; python_version < "3.11"',
 ]
 
 [project.scripts]
 pmemstat = "pmemstat.main:run"
+
+[tool.bless]
+# `./bless` publishes only from the branches named here.  This project commits
+# to the trunk; the old `dev` branch is fully merged into `main`, so releasing
+# from `main` alone is the model that matches it.
+branches = ["main"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+# Committed rather than inherited so `./bless`, CI and a developer's shell run
+# the same gate.  `requires-python` starts at 3.10.
+target-version = "py310"
+line-length = 120
+src = ["pmemstat", "tests"]
+extend-exclude = ["build", "dist", ".venv"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.coverage.run]
+# Pin the measured package so the coverage number the release gate prints is
+# reproducible from any working directory.
+source = ["pmemstat"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+# Set just below the measured number when the shared gate was adopted; raise it
+# when the number rises, never lower it.
+fail_under = 70
+show_missing = true

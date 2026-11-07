@@ -147,7 +147,7 @@ except ImportError:  # pragma: no cover - depends on the environment
         _StubTheme.OLD_SUCCESS: curses.A_NORMAL,
         _StubTheme.HOTSWAP: curses.A_NORMAL,
     }
-    setattr(_stub, 'MONO_ROLES', _mono_roles)
+    _stub.MONO_ROLES = _mono_roles
     _stub_state = {'colors_enabled': True}
 
     def _set_colors_enabled(enabled):

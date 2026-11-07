@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Class for fetching CPU usage from processes.
 """
 # pylint: disable=invalid-name,broad-exception-caught,too-many-instance-attributes
 # pylint: disable=import-outside-toplevel,too-many-branches,too-many-locals
 # pylint: disable=consider-using-with,too-many-statements
-import os
-import time
-import re
-import traceback
 import math
+import os
+import re
+import time
+import traceback
 from types import SimpleNamespace
+
 
 class Term:
     """ Escape sequences; e.g., see:
@@ -76,7 +76,7 @@ class SysStat:
         """ TBD """
         if not self.fh:
             pathname = '/proc/stat'
-            self.fh = open(pathname, "r", encoding='utf-8')
+            self.fh = open(pathname, encoding='utf-8')
         self.fh.seek(0)
 
         ns = SimpleNamespace(mono=time.monotonic(),

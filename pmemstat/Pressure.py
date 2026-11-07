@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Read and format Linux Pressure Stall Information (PSI).
 
 The kernel exposes PSI through ``/proc/pressure/{memory,cpu,io}`` (see

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Tests for the cgroup v2 helpers in pmemstat.CGroup.
 
 These tests never touch the real ``/proc`` or ``/sys/fs/cgroup``: the
@@ -11,10 +10,18 @@ import os
 import tempfile
 import unittest
 
-from pmemstat.CGroup import (CGroup, cgroup_leaf, decode_cgroup_name,
-                             has_descendant, local_values, parse_cgroup_lines,
-                             parse_memory_current, parse_memory_pressure,
-                             parse_memory_stat, path_is_descendant)
+from pmemstat.CGroup import (
+    CGroup,
+    cgroup_leaf,
+    decode_cgroup_name,
+    has_descendant,
+    local_values,
+    parse_cgroup_lines,
+    parse_memory_current,
+    parse_memory_pressure,
+    parse_memory_stat,
+    path_is_descendant,
+)
 
 
 class TestParseCgroupLines(unittest.TestCase):

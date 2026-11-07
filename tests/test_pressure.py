@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Tests for the Linux PSI helpers in pmemstat.Pressure.
 
 These tests never touch the real ``/proc``: the parsers take text and the
@@ -10,8 +9,7 @@ import os
 import tempfile
 import unittest
 
-from pmemstat.Pressure import (format_pressure_lines, parse_pressure,
-                               read_system_pressure)
+from pmemstat.Pressure import format_pressure_lines, parse_pressure, read_system_pressure
 
 SOME = 'some avg10=0.42 avg60=0.10 avg300=0.02 total=123456'
 FULL = 'full avg10=0.00 avg60=0.00 avg300=0.00 total=0'

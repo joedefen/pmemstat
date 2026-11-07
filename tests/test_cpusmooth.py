@@ -7,7 +7,7 @@ when pointformatted at the current process.
 import os
 import unittest
 
-from pmemstat.CpuSmooth import Term, SysStat, CpuSmooth
+from pmemstat.CpuSmooth import CpuSmooth, SysStat, Term
 
 
 class TestTerm(unittest.TestCase):

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Durable UI preferences for pmemstat (the colour theme and whether colour is on).
 
 This is deliberately *not* :mod:`pmemstat.History`.  The history ledger is

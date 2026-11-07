@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Read authoritative Linux cgroup v2 accounting.
 
 This module is intentionally dependency-free (standard library only) so that it

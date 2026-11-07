@@ -24,14 +24,26 @@ except ImportError:  # pragma: no cover - direct script execution
     REAL_CONSOLE_WINDOW = False
 
 from pmemstat import main as main_module
-from pmemstat.UiPrefs import UiPrefs
-from pmemstat.main import (human, human_kb, ago_str, GrowthTracker,
-                           compute_zram_effective, ProcMem, PmemStat,
-                           args_from_env, ARGS_ENV, seed_from_baselines,
-                           seed_sys_from_baselines, HISTORY_ENV_DISABLE,
-                           save_history_now, reset_history_now, _resolve_argv,
-                           elevation_required)
 from pmemstat.CGroup import CGroup
+from pmemstat.main import (
+    ARGS_ENV,
+    HISTORY_ENV_DISABLE,
+    GrowthTracker,
+    PmemStat,
+    ProcMem,
+    _resolve_argv,
+    ago_str,
+    args_from_env,
+    compute_zram_effective,
+    elevation_required,
+    human,
+    human_kb,
+    reset_history_now,
+    save_history_now,
+    seed_from_baselines,
+    seed_sys_from_baselines,
+)
+from pmemstat.UiPrefs import UiPrefs
 
 GIB = 1024 ** 3
 FIXTURES = os.path.join(os.path.dirname(__file__), 'fixtures')
@@ -1719,7 +1731,7 @@ class TestThemeChoices(unittest.TestCase):
 
     def test_cycle_steps_through_the_palettes(self):
         names = Theme.list_all()
-        for before, after in zip(names, names[1:]):
+        for before, after in zip(names, names[1:], strict=False):
             self.assertEqual(main_module.next_theme_choice(before), after)
 
     def test_cycle_wraps_from_mono_to_the_first_palette(self):
@@ -1748,8 +1760,7 @@ class TestScreens(unittest.TestCase):
     """Screen/Stack wiring: push/pop, ESC, and the theme picker."""
 
     def _app(self, **over):
-        from console_window import (ConsoleWindow, ConsoleWindowOpts,
-                                    OptionSpinner, ScreenStack)
+        from console_window import ConsoleWindow, ConsoleWindowOpts, OptionSpinner, ScreenStack
         from console_window.backend import HeadlessBackend
         directory = tempfile.mkdtemp(prefix='pmemstat-screens-')
         prefs = UiPrefs(os.path.join(directory, 'ui.json'))

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Module to kill a set of processes and ensure they are really gone.
 """
 # pylint: disable=broad-except,invalid-name,too-few-public-methods
 
 import os
-import sys
 import signal
+import sys
 import time
 import traceback
 
-class KillThem():
+
+class KillThem:
     """Class to help kill a bunch of processes"""
     def __init__(self, pids):
         if isinstance(pids, (list, set, dict)):

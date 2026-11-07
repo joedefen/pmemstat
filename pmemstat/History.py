@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Boot-scoped, mutable growth ledger for pmemstat's cross-run leak tracking.
 
 This module owns the *durable* side of the growth feature.  Where the phase-1
@@ -36,7 +35,7 @@ import os
 import socket
 import tempfile
 from datetime import datetime, timezone
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, version
 
 # Schema version.  Bump only for an incompatible change; a stored ledger whose
 # ``v`` is not exactly this value is refused (treated as empty).
@@ -154,7 +153,7 @@ def _state_path(name, create=False):
 def current_boot():
     """Contents of the kernel boot UUID, or ``''`` when unavailable."""
     try:
-        with open(BOOT_ID_PATH, 'r', encoding='ascii') as handle:
+        with open(BOOT_ID_PATH, encoding='ascii') as handle:
             return handle.read().strip()
     except OSError:
         return ''
