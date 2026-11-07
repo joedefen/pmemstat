@@ -60,7 +60,9 @@ from datetime import datetime, timedelta, timezone
 # Keep this in sync with the pin in pyproject.toml's ``dependencies``.
 from console_window import (ConsoleWindow, ConsoleWindowOpts,
                             OptionSpinner, IncrementalSearchBar,
-                            InlineConfirmation, Theme, Screen, ScreenStack)
+                            InlineConfirmation, Theme, Screen, ScreenStack,
+                            colors_enabled, resolve_appearance, semantic_attr,
+                            set_colors_enabled)
 from pmemstat.KillThem import KillThem
 from pmemstat.CpuSmooth import CpuSmooth, SysStat
 from pmemstat import History
@@ -107,9 +109,16 @@ GROWTH_VIEWS = ('exe', 'cmd', 'pid') + CGROUP_GROUPS
 HISTORY_ENV_DISABLE = 'PMEMSTAT_NO_HISTORY'
 
 # pmemstat's own "no colour at all" pseudo-theme.  console-window has no such
-# theme (its 'dark-mono'/'light-mono' are still colour themes), so mono lives
-# here: every semantic role degrades to an attribute instead of a colour pair.
+# theme (its 'dark-mono'/'light-mono' are still colour themes), so mono is not a
+# palette but a mode: choosing it turns the appearance layer's process-wide
+# colour switch off, and every semantic role degrades to an attribute instead of
+# a colour pair.  It is accepted as ``--theme mono`` and sits last in the
+# picker's cycle, so ``t`` steps from the final palette into mono and wraps back
+# to the first palette.
 MONO_THEME = 'mono'
+
+# The picker's cycle: the library's palettes, then pmemstat's mono mode.
+THEME_CHOICES = (*Theme.list_all(), MONO_THEME)
 
 # Screen identities for the ScreenStack; MAIN is the report itself.
 MAIN_ST, HELP_ST, THEMES_ST = 0, 1, 2
@@ -152,10 +161,11 @@ def cgroup_view_totals(data):
 ##############################################################################
 ##   Colour roles
 ##############################################################################
-# Colour is decoration, never information: every role degrades to "no
-# attribute" (plain text) when the terminal has no colour.  The pair ids are
-# console-window's semantic Theme roles, so a theme change recolours the whole
-# report without an edit here.  Roles used:
+# Colour is decoration, never information.  The pair ids are console-window's
+# semantic Theme roles, and the role -> attribute fallback, the process-wide
+# colour switch and the resolver all come from ``console_window.appearance``
+# (imported above), so a theme change recolours the whole report without an
+# edit here.  Roles used:
 #   HOTSWAP  - numbers that are *changing*: a row's growth annotation, the Δ
 #              values on the system growth line, the 'growth' header label
 #   EMPHASIS - titles: the column header line and the TOTALS row.  Deliberately
@@ -167,57 +177,6 @@ def cgroup_view_totals(data):
 #   SUCCESS  - the 'A' marker on a group that has just appeared
 #   DANGER   - an irreversible action about to happen (kill / growth reset)
 #   A_DIM    - labels, meta text, zero-valued cells and 'n/a' (skipped by eye)
-# Role -> attribute used when colour is off (the 'mono' theme).  The hierarchy
-# is preserved with emphasis instead of hue: changing numbers and titles are
-# bold, destructive prompts are bold+reversed, and informational values carry
-# nothing (their dim labels already distinguish them).
-MONO_ROLES = {
-    Theme.HOTSWAP: curses.A_BOLD,
-    Theme.EMPHASIS: curses.A_BOLD,
-    Theme.SUCCESS: curses.A_BOLD,
-    Theme.WARNING: curses.A_BOLD,
-    Theme.DANGER: curses.A_BOLD | curses.A_REVERSE,
-    Theme.ERROR: curses.A_BOLD | curses.A_REVERSE,
-    Theme.INFO: curses.A_NORMAL,
-    Theme.PROGRESS: curses.A_NORMAL,
-    Theme.OLD_SUCCESS: curses.A_NORMAL,
-}
-
-# Process-wide colour switch, mirroring console-window's glyph-mode policy: one
-# terminal, so one decision.  Seeded from the options at startup and flipped by
-# the 'mono' entry in the theme picker.
-_COLORS_ENABLED = True
-
-
-def set_colors_enabled(enabled):
-    """Turn semantic colour on or off for the whole process ('mono' turns it off)."""
-    global _COLORS_ENABLED  # pylint: disable=global-statement
-    _COLORS_ENABLED = bool(enabled)
-
-
-def colors_enabled():
-    """True while semantic roles resolve to colour pairs rather than attributes."""
-    return _COLORS_ENABLED
-
-
-def semantic_attr(pair_id):
-    """Attribute for a console-window ``Theme`` pair, or 0 when no colour.
-
-    With colour off (the 'mono' theme) the role becomes an attribute from
-    :data:`MONO_ROLES` instead, so the report keeps its emphasis hierarchy on a
-    monochrome terminal.  Otherwise: both ``curses.has_colors()`` and
-    ``curses.color_pair()`` raise ``curses.error`` before ``initscr()``, and the
-    one-shot (``-W``) report and the unit tests both run with no screen, so a
-    failed lookup must never abort a refresh; it degrades to plain text.
-    """
-    if not _COLORS_ENABLED:
-        return MONO_ROLES.get(pair_id, curses.A_NORMAL)
-    try:
-        if not curses.has_colors():
-            return 0
-        return curses.color_pair(pair_id)
-    except curses.error:
-        return 0
 
 
 ##############################################################################
@@ -2892,45 +2851,6 @@ class PmemStat:
             self.window.passthrough_mode = False
         self.needs_refresh = True
 
-    def theme_label(self):
-        """The appearance the picker should show as current."""
-        if not colors_enabled():
-            return MONO_THEME
-        return getattr(self.opts, 'theme', '') or 'default'
-
-    def theme_choices(self):
-        """Every appearance the picker cycles, in order."""
-        return list(Theme.list_all()) + [MONO_THEME]
-
-    def apply_theme(self, name):
-        """Make *name* the live appearance ('mono' turns colour off) and persist it.
-
-        ``console-window`` installs colour pairs per terminal and the picker's
-        choice must outlive the run, so this is the one place that touches both
-        the pair table and the preference file.
-        """
-        mono = name == MONO_THEME
-        self.opts.colors = not mono
-        self.opts.theme = '' if mono else name
-        set_colors_enabled(not mono)
-        if self.window:
-            self.window.set_theme('default' if mono else name)
-        prefs = self.prefs
-        if prefs is not None:
-            prefs.set('colors', not mono)
-            prefs.set('theme', self.opts.theme)
-            prefs.save()
-        self.needs_refresh = True
-        if self.window:
-            self.window.status(f'theme: {self.theme_label()}')
-
-    def cycle_theme(self):
-        """Advance the picker by one appearance."""
-        choices = self.theme_choices()
-        current = self.theme_label()
-        idx = choices.index(current) if current in choices else -1
-        self.apply_theme(choices[(idx + 1) % len(choices)])
-
     def window_loop(self):
         """Run the report under console-window's Screen model.
 
@@ -3140,42 +3060,69 @@ class HelpScreen(PmemScreen):
         self.app.needs_refresh = True
 
 
-class ThemeScreen(PmemScreen):
-    """Theme picker over console-window's themes plus pmemstat's 'mono'.
+def theme_choice(opts, win):
+    """The picker's current choice: ``mono`` while colour is off, else a palette.
 
-    console-window has no true no-colour theme (its 'dark-mono'/'light-mono' are
-    still colour themes), so 'mono' is offered here as a pmemstat appearance:
-    the semantic roles collapse to attributes (see ``MONO_ROLES``).
+    Colour can be off while a palette is still selected (``--no-color`` keeps
+    ``--theme``), so the switch -- not the window's palette -- decides whether
+    the choice is the mono mode.  Otherwise the window is the authority, because
+    a palette may have been installed before ``opts`` was filled in.
+    """
+    if not colors_enabled():
+        return MONO_THEME
+    return getattr(opts, 'theme', None) or Theme.theme_of(win) or 'default'
+
+
+def next_theme_choice(current):
+    """The choice after *current* in :data:`THEME_CHOICES` (wrapping)."""
+    idx = THEME_CHOICES.index(current) if current in THEME_CHOICES else -1
+    return THEME_CHOICES[(idx + 1) % len(THEME_CHOICES)]
+
+
+class ThemeScreen(Theme.create_picker_screen(PmemScreen, cycle_key='t')):
+    """console-window's canned picker, extended with pmemstat's mono mode.
+
+    The stock screen draws the header, the cycle hint and one swatch per
+    semantic role; there is deliberately no extra commentary line.  Two hooks
+    turn it into this app's picker:
+
+    * ``theme_label()`` names ``mono`` while colour is off, so the header agrees
+      with the swatches, which then show role attributes rather than a palette.
+    * ``spin_theme_ACTION()`` cycles :data:`THEME_CHOICES` -- the library
+      palettes plus ``mono`` -- and remembers the pick in the user's prefs.
+
+    A palette is a request for colour, so selecting one lifts a ``--no-color``
+    switch (the ``appearance`` layer's documented contract); ``mono`` turns the
+    switch off and leaves the selected palette installed underneath it.
     """
 
-    ROLES = (
-        (Theme.HOTSWAP, 'HOTSWAP', 'growth, system deltas, growth label'),
-        (Theme.EMPHASIS, 'EMPHASIS', 'titles: column header, TOTALS row'),
-        (Theme.INFO, 'INFO', 'zRAM estimates'),
-        (Theme.SUCCESS, 'SUCCESS', 'new grouping, view descriptor'),
-        (Theme.DANGER, 'DANGER', 'kill / reset confirmations'),
-        (Theme.WARNING, 'WARNING', 'reserved for threshold warnings'),
-    )
-
-    def draw_screen(self):
-        app = self.app
-        win = app.window
-        win.set_pick_mode(False)
-        win.add_header(f'COLOR THEME:  {app.theme_label():^18}', attr=curses.A_BOLD)
-        win.add_header('   Press [t] to cycle themes, ESC to return',
-                       resume=True)
-        swatch = win.glyph('swatch') * 8
-        for pair_id, name, description in self.ROLES:
-            win.add_body(f'{name:10} {swatch}  {description}',
-                         attr=semantic_attr(pair_id))
-        win.add_body('')
-        win.add_body(f'{MONO_THEME:10} no colour at all (bold/reverse only)',
-                     attr=curses.A_DIM)
-        win.add_body('The choice is remembered for the next run.', attr=curses.A_DIM)
+    def theme_label(self, theme_name):
+        """Name the mode in effect: ``mono`` while colour is off."""
+        if not colors_enabled():
+            return MONO_THEME
+        return super().theme_label(theme_name)
 
     def spin_theme_ACTION(self):
-        """'t' here advances to the next appearance (and persists it)."""
-        self.app.cycle_theme()
+        """Step to the next choice in :data:`THEME_CHOICES`."""
+        self.apply_theme_choice(
+            next_theme_choice(theme_choice(self.app.opts, self.app.win)))
+
+    def apply_theme_choice(self, choice):
+        """Make *choice* live and remember it for the next run."""
+        opts = self.app.opts
+        if choice == MONO_THEME:
+            set_colors_enabled(False)
+            opts.colors = False
+        else:
+            set_colors_enabled(True)
+            opts.colors = True
+            Theme.apply_to(self.app.win, choice)
+            opts.theme = choice
+        prefs = getattr(self.app, 'prefs', None)
+        if prefs is not None:
+            prefs.set('theme', getattr(opts, 'theme', '') or '')
+            prefs.set('colors', opts.colors)
+            prefs.save()
 
 
 # pmemstat runs as root by default, re-executing itself through sudo so it can
@@ -3203,24 +3150,20 @@ def args_from_env():
 def resolve_ui_prefs(opts, prefs, environ=None):
     """Starting ``(theme, colors)`` from the CLI, the environment and the prefs.
 
-    Precedence, highest first: ``--theme`` / ``--no-color``, the ``NO_COLOR``
-    convention (any non-empty value disables colour), then the saved
-    preference.  ``theme`` is ``''`` for console-window's default; the special
-    value ``'mono'`` is pmemstat's no-colour pseudo-theme, which also forces
-    ``colors`` off and is reported as ``theme=''`` (there is no library theme to
-    install -- mono is an attribute mapping).
+    The precedence and the ``NO_COLOR`` handling live in
+    :func:`console_window.appearance.resolve_appearance`; this wrapper only
+    translates pmemstat's ``--theme mono`` pseudo-theme, which means "no colour"
+    and has no library theme to install.  ``theme`` is ``''`` for
+    console-window's default, otherwise a resolved library theme name.
     """
-    env = os.environ if environ is None else environ
-    theme = getattr(opts, 'theme', None)
-    if not theme:
-        theme = prefs.get('theme') or ''
-    colors = bool(prefs.get('colors'))
-    if env.get('NO_COLOR') or getattr(opts, 'no_color', False):
-        colors = False
-    if theme == MONO_THEME:
-        colors = False
-        theme = ''
-    return theme, colors
+    cli_theme = getattr(opts, 'theme', None)
+    mono = cli_theme == MONO_THEME
+    return resolve_appearance(
+        cli_theme=None if mono else cli_theme,
+        no_color=mono or getattr(opts, 'no_color', False),
+        saved_theme='' if mono else (prefs.get('theme') or ''),
+        saved_colors=bool(prefs.get('colors')),
+        environ=environ)
 
 
 def _resolve_argv(raw_argv, env_text):
@@ -3478,7 +3421,7 @@ def main():
             help='show PSI (system pressure in header + memPSI%% column) [dflt=off]')
     parser.add_argument('--theme', default=None, metavar='NAME',
             help='initial colour theme (see --list-themes); "mono" disables '
-                 'colour. The T picker remembers the choice.')
+                 'colour (it is also the last entry in the T picker).')
     parser.add_argument('--no-color', '--no-colour', action='store_true',
             dest='no_color',
             help='disable colour (the same as --theme mono)')

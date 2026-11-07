@@ -1632,7 +1632,10 @@ class TestMonoRoles(unittest.TestCase):
     def test_roles_become_attributes(self):
         main_module.set_colors_enabled(False)
         self.assertFalse(main_module.colors_enabled())
-        self.assertEqual(main_module.semantic_attr(Theme.HOTSWAP), curses.A_BOLD)
+        # The mapping is console_window.appearance.MONO_ROLES: hot-swap and
+        # informational roles are plain, emphasis and success are bold, and the
+        # destructive roles are bold+reversed.
+        self.assertEqual(main_module.semantic_attr(Theme.HOTSWAP), curses.A_NORMAL)
         self.assertEqual(main_module.semantic_attr(Theme.EMPHASIS), curses.A_BOLD)
         self.assertEqual(main_module.semantic_attr(Theme.INFO), curses.A_NORMAL)
         self.assertEqual(main_module.semantic_attr(Theme.DANGER),
@@ -1643,7 +1646,7 @@ class TestMonoRoles(unittest.TestCase):
         self.assertEqual(main_module.semantic_attr(999), curses.A_NORMAL)
 
     def test_mono_row_runs_use_attributes(self):
-        """A growth run is bold (not orange) when colour is off."""
+        """A growth run is plain (not orange) when colour is off."""
         # PmemStat.__init__ seeds the process-wide switch from opts.colors, so
         # this is also the check that the option plumbing reaches the roles.
         pm = PmemStat(SimpleNamespace(units='MB', debug=0, cpu=False, psi=False,
@@ -1654,7 +1657,7 @@ class TestMonoRoles(unittest.TestCase):
         pm.lead_width = len('3.5G 2h3m')
         segments = pm.summary_segments('3.5G 2h3m', summary)
         self.assertEqual([attr for text, attr in segments if '3.5G' in text],
-                         [curses.A_BOLD])
+                         [curses.A_NORMAL])
 
 
 class TestResolveUiPrefs(unittest.TestCase):
@@ -1701,6 +1704,42 @@ class TestResolveUiPrefs(unittest.TestCase):
         _, colors = main_module.resolve_ui_prefs(
             self._opts(), self._prefs('', False), environ={})
         self.assertFalse(colors)
+
+
+class TestThemeChoices(unittest.TestCase):
+    """The picker cycles the palettes and then pmemstat's mono mode."""
+
+    def setUp(self):
+        self.addCleanup(main_module.set_colors_enabled, True)
+
+    def test_mono_is_last_and_reachable(self):
+        self.assertEqual(main_module.THEME_CHOICES[-1], main_module.MONO_THEME)
+        self.assertEqual(main_module.THEME_CHOICES[:-1],
+                         tuple(Theme.list_all()))
+
+    def test_cycle_steps_through_the_palettes(self):
+        names = Theme.list_all()
+        for before, after in zip(names, names[1:]):
+            self.assertEqual(main_module.next_theme_choice(before), after)
+
+    def test_cycle_wraps_from_mono_to_the_first_palette(self):
+        self.assertEqual(main_module.next_theme_choice(main_module.MONO_THEME),
+                         Theme.list_all()[0])
+
+    def test_unknown_choice_restarts_the_cycle(self):
+        self.assertEqual(main_module.next_theme_choice('no-such-theme'),
+                         Theme.list_all()[0])
+
+    def test_colour_off_names_mono_even_with_a_palette_selected(self):
+        main_module.set_colors_enabled(False)
+        opts = SimpleNamespace(theme='nord')
+        self.assertEqual(main_module.theme_choice(opts, None),
+                         main_module.MONO_THEME)
+
+    def test_colour_on_names_the_selected_palette(self):
+        main_module.set_colors_enabled(True)
+        opts = SimpleNamespace(theme='nord')
+        self.assertEqual(main_module.theme_choice(opts, None), 'nord')
 
 
 @unittest.skipUnless(REAL_CONSOLE_WINDOW,
@@ -1791,14 +1830,19 @@ class TestScreens(unittest.TestCase):
         self._press(pm, 27)
         self.assertEqual(pm.stack.curr.num, main_module.MAIN_ST)
 
-    def test_theme_screen_lists_mono(self):
+    def test_theme_screen_is_the_canned_picker(self):
+        """The stock picker is used, with no app commentary lines."""
         pm = self._app()
         self._press(pm, ord('t'))
         self.assertEqual(pm.stack.curr.num, main_module.THEMES_ST)
         pm.screens[main_module.THEMES_ST].draw_screen()
-        text = ' '.join(pm.window.body.texts)
-        self.assertIn(main_module.MONO_THEME, text)
-        self.assertIn('remembered', text)
+        head = ' '.join(pm.window.head.texts)
+        body = ' '.join(pm.window.body.texts)
+        self.assertIn('COLOR THEME', head)
+        self.assertIn('HOTSWAP', body)
+        self.assertIn('DANGER', body)
+        self.assertNotIn(main_module.MONO_THEME, body)
+        self.assertNotIn('remembered', body)
 
     def test_theme_cycles_persist_the_choice(self):
         pm = self._app()
@@ -1809,19 +1853,49 @@ class TestScreens(unittest.TestCase):
         self.assertEqual(pm.prefs.get('theme'), chosen)
         self.assertTrue(pm.prefs.get('colors'))
 
-    def test_mono_cycle_turns_colour_off_and_remembers_it(self):
+    def test_theme_pick_turns_colour_on_and_remembers_it(self):
+        """A pick is a request for colour, so it lifts a --no-color run."""
+        pm = self._app(colors=False)
+        self.addCleanup(main_module.set_colors_enabled, True)
+        self.assertFalse(main_module.colors_enabled())
+        self._press(pm, ord('t'))
+        self._press(pm, ord('t'))
+        chosen = pm.opts.theme
+        self.assertIn(chosen, Theme.list_all())
+        self.assertTrue(main_module.colors_enabled())
+        self.assertTrue(pm.opts.colors)
+        self.assertEqual(pm.prefs.get('theme'), chosen)
+        self.assertTrue(pm.prefs.get('colors'))
+
+    def test_theme_cycle_reaches_mono_and_remembers_no_colour(self):
+        """mono is in the cycle: it turns colour off and is remembered."""
         pm = self._app()
         self.addCleanup(main_module.set_colors_enabled, True)
         self._press(pm, ord('t'))
-        for _ in range(len(pm.theme_choices())):
-            if pm.theme_label() == main_module.MONO_THEME:
-                break
+        for _ in range(len(main_module.THEME_CHOICES)):
             self._press(pm, ord('t'))
-        self.assertEqual(pm.theme_label(), main_module.MONO_THEME)
+            if not main_module.colors_enabled():
+                break
         self.assertFalse(main_module.colors_enabled())
-        self.assertEqual(pm.prefs.get('theme'), '')
+        self.assertFalse(pm.opts.colors)
         self.assertFalse(pm.prefs.get('colors'))
-        self.assertEqual(main_module.semantic_attr(Theme.HOTSWAP), curses.A_BOLD)
+        self.assertEqual(main_module.theme_choice(pm.opts, pm.window),
+                         main_module.MONO_THEME)
+        pm.screens[main_module.THEMES_ST].draw_screen()
+        self.assertIn(main_module.MONO_THEME, ' '.join(pm.window.head.texts))
+
+    def test_theme_cycle_wraps_from_mono_to_the_first_palette(self):
+        """mono is not a dead end: the next step returns to a real theme."""
+        pm = self._app(colors=False)
+        self.addCleanup(main_module.set_colors_enabled, True)
+        self._press(pm, ord('t'))
+        self.assertEqual(main_module.theme_choice(pm.opts, pm.window),
+                         main_module.MONO_THEME)
+        self._press(pm, ord('t'))
+        self.assertTrue(main_module.colors_enabled())
+        self.assertEqual(pm.opts.theme, Theme.list_all()[0])
+        self.assertEqual(pm.prefs.get('theme'), Theme.list_all()[0])
+        self.assertTrue(pm.prefs.get('colors'))
 
     def test_kill_and_demo_share_k_without_colliding(self):
         """'K' kills on the report and toggles demo mode on Help only."""

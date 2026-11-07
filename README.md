@@ -220,12 +220,13 @@ In window mode colour highlights titles and values that are changing; it is
 decoration only, so a terminal without colour (or `TERM=dumb`) still shows the
 full report in plain text.
 
-`t` opens the theme picker (`ESC` returns) and cycles the appearance. **`mono`**
-turns colour off entirely, using bold and reverse-video attributes for emphasis.
+`t` opens console-window's theme picker (`ESC` returns) and `t` there cycles the
+appearance: the palettes, then `mono`, which turns colour off and wraps back to
+the first palette. A pick is applied immediately and remembered per user.
 
-The choice is remembered per user. `--theme` selects a theme, `--no-color` (or
-the standard `NO_COLOR` convention) disables colour, `--theme mono` is the same
-as `--no-color`, and `--list-themes` prints the available names.
+`--theme` selects a theme, `--no-color` (or the standard `NO_COLOR` convention)
+disables colour, `--theme mono` is the same as `--no-color`, and
+`--list-themes` prints the available names.
 
 ## Memory growth (leak) detection
 
