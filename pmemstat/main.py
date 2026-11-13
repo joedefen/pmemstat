@@ -2811,6 +2811,12 @@ class PmemStat:
             # Inline search: the bar owns keys until ENTER accepts or ESC clears.
             self.search_bar.start(self.opts.search)
             self.window.passthrough_mode = True
+            # Request a repaint now: starting the bar only changes the header
+            # (the '/pattern' field goes live), but MainScreen.draw_screen()
+            # renders nothing unless a refresh is pending -- without this the
+            # new legend appeared only on the next idle-timeout sample, i.e.
+            # after loop_secs (5s by default).
+            self.needs_refresh = True
             return
         if key == ord('z'):
             # Runtime equivalent of --reset-history-now (root only; the key is

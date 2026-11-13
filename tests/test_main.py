@@ -1949,6 +1949,26 @@ class TestScreens(unittest.TestCase):
         main.draw_screen()          # no refresh requested: model untouched
         self.assertEqual(pm.window.head.texts, before)
 
+    def test_slash_requests_immediate_repaint(self):
+        """'/' shows the live search field at once, not after loop_secs.
+
+        Starting the bar only changes the header legend, so it forgot to ask
+        for a refresh; the field then appeared only when the idle timeout took
+        the next sample (5s by default).  The flag is the regression guard.
+        """
+        pm = self._app()
+        pm.first_loop = False
+        pm.regroup_pending = False
+        main = pm.screens[main_module.MAIN_ST]
+        main.draw_screen()              # settle the model; flag cleared
+        self.assertFalse(pm.needs_refresh)
+        self._press(pm, ord('/'))
+        self.assertTrue(pm.search_bar.is_active)
+        self.assertTrue(pm.window.passthrough_mode)
+        self.assertTrue(pm.needs_refresh)
+        main.draw_screen()              # the redraw the flag buys
+        self.assertTrue(any('/|' in line for line in pm.window.head.texts))
+
 
 if __name__ == '__main__':
     unittest.main()
