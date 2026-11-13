@@ -57,8 +57,12 @@ Run the source without owning the entry point:
     ./runner -U                   # the same, but stay the invoking user
 
 `runner` installs nothing and never writes to `~/.local/bin`, so a source run
-and a released install cannot collide. When the command on `PATH` should follow
-the tree instead, hand the entry point to it:
+and a released install cannot collide. If a `console-window` working tree sits
+beside this checkout at `../console-window`, both `runner` and the test package
+put it ahead of whatever release is installed in `.venv`; a local change to the
+library is therefore exercised by `./runner` and `pytest` immediately, with no
+reinstall step. When the command on `PATH` should follow the tree instead, hand
+the entry point to it:
 
     bt edit        # ~/.local/bin/pmemstat -> .venv/bin/pmemstat
 

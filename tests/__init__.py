@@ -7,8 +7,20 @@ does not have the curses UI dependency installed.  When a real
 ``console_window`` is importable it always wins, so the stub never shadows the
 genuine dependency.
 """
+import os
 import sys
 import types
+
+# Prefer a sibling console-window working tree, when present, so the suite
+# exercises the live 3.0 API under development instead of whichever release
+# happens to be installed in ./.venv.  A normal checkout has no sibling and
+# simply uses the installed dependency.
+_here = os.path.dirname(os.path.abspath(__file__))
+_live_console_window = os.path.normpath(
+    os.path.join(_here, '..', '..', 'console-window'))
+if (os.path.isfile(os.path.join(_live_console_window, 'pyproject.toml'))
+        and _live_console_window not in sys.path):
+    sys.path.insert(0, _live_console_window)
 
 #: True when the real ``console_window`` is importable, so tests can skip the
 #: ones that need its Screen/ScreenStack machinery (the stub cannot provide it).
@@ -62,9 +74,13 @@ except ImportError:  # pragma: no cover - depends on the environment
         HOTSWAP = 9
         OLD_SUCCESS = 10
 
+        MONO = 'mono'
+        # Match console-window 3.0: mono is a real theme and the list ends
+        # with it; the old dark-mono/light-mono aliases are gone.
         THEMES = {name: {'name': name} for name in (
-            'dark-mono', 'light-mono', 'default', 'solarized-dark',
-            'solarized-light', 'gruvbox', 'nord')}
+            'dark', 'light', 'default', 'solarized-dark',
+            'solarized-light', 'gruvbox', 'nord', 'mono')}
+        ALIASES = {'dark-mono': 'dark', 'light-mono': 'light'}
 
         _current = 'default'
 
@@ -73,9 +89,22 @@ except ImportError:  # pragma: no cover - depends on the environment
             return list(cls.THEMES)
 
         @classmethod
+        def canonical(cls, theme_name):
+            """Stand-in for Theme.canonical."""
+            if not theme_name:
+                return None
+            name = cls.ALIASES.get(theme_name, theme_name)
+            return name if name in cls.THEMES else None
+
+        @classmethod
+        def is_mono(cls, theme_name):
+            """Stand-in for Theme.is_mono."""
+            return cls.canonical(theme_name) == cls.MONO
+
+        @classmethod
         def resolve(cls, theme_name):
             """Stand-in for Theme.resolve: an unknown name means 'default'."""
-            return theme_name if theme_name in cls.THEMES else 'default'
+            return cls.canonical(theme_name) or 'default'
 
         @classmethod
         def get_current(cls):
@@ -134,7 +163,7 @@ except ImportError:  # pragma: no cover - depends on the environment
 
     _stub.ConsoleWindowOpts = _StubConsoleWindowOpts
 
-    # Mirrors console_window.appearance: the role -> attribute fallback, the
+    # Mirrors console_window.Appearance: the role -> attribute fallback, the
     # process-wide switch and the one resolver main.py imports.
     _mono_roles = {
         _StubTheme.DANGER: curses.A_BOLD | curses.A_REVERSE,
@@ -166,25 +195,20 @@ except ImportError:  # pragma: no cover - depends on the environment
         except curses.error:
             return 0
 
-    def _resolve_appearance(cli_theme=None, no_color=False, saved_theme='',
-                            saved_colors=True, environ=None):
+    def _resolve_appearance(cli_theme=None, saved_theme='', environ=None):
+        """Stand-in for the 3.0 resolver: one theme name, mono for NO_COLOR."""
         env = {} if environ is None else environ
-        if no_color:
-            colors = False
-        elif cli_theme:
-            colors = True
-        elif env.get('NO_COLOR'):
-            colors = False
-        else:
-            colors = bool(saved_colors)
-        theme = cli_theme or saved_theme or ''
-        if theme and theme not in _StubTheme.THEMES:
-            theme = 'default'
-        return theme, colors
+        if cli_theme:
+            return _StubTheme.resolve(cli_theme)
+        if env.get('NO_COLOR'):
+            return _StubTheme.MONO
+        if saved_theme:
+            return _StubTheme.resolve(saved_theme)
+        return ''
 
     _stub.set_colors_enabled = _set_colors_enabled
     _stub.colors_enabled = _colors_enabled
     _stub.semantic_attr = _semantic_attr
     _stub.resolve_appearance = _resolve_appearance
-    _stub.__version__ = '2.2.2'
+    _stub.__version__ = '3.0.0'
     sys.modules['console_window'] = _stub

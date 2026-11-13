@@ -23,6 +23,16 @@ project_dir = os.path.dirname(os.path.abspath(__file__))
 if project_dir not in sys.path:
     sys.path.insert(0, project_dir)
 
+# Exercise the live console-window working tree when it sits beside this
+# checkout.  The editable install in ./.venv normally points here anyway, but
+# this keeps ./runner honest even if a released console-window has been
+# installed over it (the 3.0 API is required).
+live_console_window = os.path.normpath(
+    os.path.join(project_dir, '..', 'console-window'))
+if (os.path.isfile(os.path.join(live_console_window, 'pyproject.toml'))
+        and live_console_window not in sys.path):
+    sys.path.insert(0, live_console_window)
+
 venv_dir = os.path.join(project_dir, '.venv')
 venv_python = os.path.join(venv_dir, 'bin', 'python')
 

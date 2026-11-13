@@ -36,8 +36,8 @@ FILE_NAME = 'ui.json'
 #: a hand-edited ``"colors": 1`` must be ignored, not treated as truthy, and an
 #: unknown key must never appear in the saved file.
 DEFAULTS = {
-    # '' means "whatever console-window calls the default"; 'mono' is
-    # pmemstat's own no-colour pseudo-theme (see main.MONO_THEME).
+    # '' means "whatever console-window calls the default"; 'mono' is the
+    # library's real no-colour theme (see main.MONO_THEME).
     'theme': '',
     'colors': True,
 }

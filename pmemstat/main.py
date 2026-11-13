@@ -55,10 +55,9 @@ from io import StringIO
 # from curses.textpad import rectangle
 from types import SimpleNamespace
 
-# console-window is intentionally pinned to an exact version (see pyproject.toml).
-# Provide a clear, actionable message instead of a bare ImportError when the
-# pinned package is missing or when a different version has been substituted.
-# Keep this in sync with the pin in pyproject.toml's ``dependencies``.
+# console-window >= 3.0 is required (see pyproject.toml): content belongs to
+# Screen, and 'mono' is a real theme.  The individual appearance helpers below
+# remain part of the 3.x package root in addition to ``Appearance``.
 from console_window import (
     ConsoleWindow,
     ConsoleWindowOpts,
@@ -119,17 +118,17 @@ GROWTH_VIEWS = ('exe', 'cmd', 'pid') + CGROUP_GROUPS
 # Set PMEMSTAT_NO_HISTORY to any value to disable cross-run history entirely.
 HISTORY_ENV_DISABLE = 'PMEMSTAT_NO_HISTORY'
 
-# pmemstat's own "no colour at all" pseudo-theme.  console-window has no such
-# theme (its 'dark-mono'/'light-mono' are still colour themes), so mono is not a
-# palette but a mode: choosing it turns the appearance layer's process-wide
-# colour switch off, and every semantic role degrades to an attribute instead of
-# a colour pair.  It is accepted as ``--theme mono`` and sits last in the
-# picker's cycle, so ``t`` steps from the final palette into mono and wraps back
-# to the first palette.
-MONO_THEME = 'mono'
+# console-window 3.0 ships ``mono`` as a real theme: it installs only the
+# terminal-default background and resolves every semantic role through
+# ``Appearance.MONO_ROLES`` (bold/reverse attributes instead of colour pairs).
+# It sits last in the library's list, so ``t`` steps from the final palette into
+# mono and wraps back to the first palette without pmemstat adding an entry of
+# its own.  ``resolve_ui_prefs`` translates the app-level ``--no-color`` switch
+# to this theme.
+MONO_THEME = Theme.MONO
 
-# The picker's cycle: the library's palettes, then pmemstat's mono mode.
-THEME_CHOICES = (*Theme.list_all(), MONO_THEME)
+# The picker's cycle is the library's own theme list (which now ends in mono).
+THEME_CHOICES = tuple(Theme.list_all())
 
 # Screen identities for the ScreenStack; MAIN is the report itself.
 MAIN_ST, HELP_ST, THEMES_ST = 0, 1, 2
@@ -174,9 +173,9 @@ def cgroup_view_totals(data):
 ##############################################################################
 # Colour is decoration, never information.  The pair ids are console-window's
 # semantic Theme roles, and the role -> attribute fallback, the process-wide
-# colour switch and the resolver all come from ``console_window.appearance``
-# (imported above), so a theme change recolours the whole report without an
-# edit here.  Roles used:
+# colour switch and the resolver all come from ``console_window.Appearance``
+# (whose individual functions are imported above), so a theme change recolours
+# the whole report without an edit here.  Roles used:
 #   HOTSWAP  - numbers that are *changing*: a row's growth annotation, the Δ
 #              values on the system growth line, the 'growth' header label
 #   EMPHASIS - titles: the column header line and the TOTALS row.  Deliberately
@@ -1188,8 +1187,12 @@ class PmemStat:
         # frames, so `needs_refresh` is what asks for a fresh /proc sample (a
         # timeout, a presentation key, or returning from another screen), and
         # `regroup_pending` carries the mode/fit change into that sample.
+        # Content belongs to a Screen in console-window 3.x, so `curr_screen`
+        # is the screen the current draw pass writes through.  It is set at the
+        # top of each screen's draw_screen().
         self.screens = {}
         self.stack = None
+        self.curr_screen = None
         self.prefs = getattr(opts, 'prefs', None)
         self.needs_refresh = True
         self.first_loop = True
@@ -2724,10 +2727,10 @@ class PmemStat:
             search, search_attr = f'/{before}|{after}', curses.A_REVERSE
         else:
             search, search_attr = f'/{self.opts.search or ""}', curses.A_BOLD
-        self.window.add_fancy_header(f'{lead}{legend} {search}',
-                                     mode='Underline',
-                                     search_pattern_attr=search_attr,
-                                     line_attr=curses.A_DIM)
+        self.curr_screen.add_fancy_header(f'{lead}{legend} {search}',
+                                          mode='Underline',
+                                          search_pattern_attr=search_attr,
+                                          line_attr=curses.A_DIM)
         self.window.calc()
 
     def zap_key_offered(self):
@@ -2765,13 +2768,19 @@ class PmemStat:
                       resume=bool(resume) or idx > 0)
 
     def emit(self, line, to_head=False, attr=None, resume=False):
-        """ Emit a line of the report"""
-        if self.window:
+        """Emit a line of the report through the active Screen.
+
+        console-window 3.x moved the content writers from the window to the
+        Screen, so the report writes into ``curr_screen`` (set by the current
+        screen's ``draw_screen()``) and the window only paints what the screen
+        holds.
+        """
+        if self.window and self.curr_screen is not None:
             if to_head:
-                self.window.add_header(line, attr=attr, resume=resume)
+                self.curr_screen.add_header(line, attr=attr, resume=resume)
                 self.window.calc()
             else:
-                self.window.add_body(line, attr=attr, resume=resume)
+                self.curr_screen.add_body(line, attr=attr, resume=resume)
         else:
             print(('' if resume else '\n') + line, end='')
 
@@ -2894,18 +2903,23 @@ class PmemStat:
         self.stack = ScreenStack(self.window, self.opts, SCREEN_NAMES,
                                  self.screens)
         # Apply the remembered appearance before the first paint, so the very
-        # first frame is already in the user's colours (or in mono).
-        self.window.set_theme('default' if not colors_enabled()
-                              else (getattr(self.opts, 'theme', '') or 'default'))
+        # first frame is already in the user's colours (or in mono).  A legacy
+        # saved preference may still say "colour off" without naming the mono
+        # theme; in 3.x mono is a real theme, so apply it explicitly.
+        start_theme = getattr(self.opts, 'theme', '') or 'default'
+        if not colors_enabled():
+            start_theme = MONO_THEME
+        self.window.set_theme(start_theme)
 
         self.spin = OptionSpinner(stack=self.stack)
         spin = self.spin
-        # '?' and 'T' are actions: the stack routes each to <name>_ACTION on the
-        # current screen.  ENTER is deliberately not a screen key (ESC is the
-        # one way back, as in the other tools); it stays kill mode's selector.
+        # '?' and 't' are actions: the stack routes each to <name>_ACTION on the
+        # current screen.  ESC is the spinner's built-in ``escape`` action in
+        # 3.x (Screen.escape_ACTION pops one screen and is a no-op at home), so
+        # the app no longer registers it.  ENTER is deliberately not a screen
+        # key (ESC is the one way back, as in the other tools); it stays kill
+        # mode's selector.
         spin.add_key('help', '? - help screen', genre='action')
-        spin.add_key('screen_escape', 'ESC - back one screen', keys=27,
-                     genre='action')
         # 't' opens the picker from the report and from Help alike, so the key
         # listed on the help body actually works there.  The picker is pushed
         # onto the stack, so ESC returns to whichever screen opened it.
@@ -2961,10 +2975,13 @@ class PmemStat:
                 self.needs_refresh = True
             current = self.stack.curr
             screen = self.screens[current.num]
+            # In the 3.x model content belongs to the Screen.  Only start a new
+            # content pass when the screen will actually redraw: the report
+            # keeps its rows between refreshes so a j/k keystroke costs no
+            # /proc scan, while auxiliary screens are rebuilt every frame.
+            # MainScreen.draw_screen() performs its own clear on a refresh.
             if current.num != MAIN_ST:
-                # Auxiliary screens are rebuilt from scratch every frame; the
-                # report's model is kept so keeping it costs no /proc scan.
-                self.window.clear()
+                screen.clear()
             screen.draw_screen()
             self.window.render()
             key = self.window.prompt(self.prompt_secs(self.opts.loop_secs))
@@ -2982,13 +2999,14 @@ class PmemStat:
 ###### Screens (console-window ScreenStack model)
 ####################################################################################
 class PmemScreen(Screen):
-    """Base screen; the report owner (``PmemStat``) is ``self.app``."""
+    """Base screen; the report owner (``PmemStat``) is ``self.app``.
+
+    The 3.x ``Screen`` supplies the built-in ``quit_ACTION()`` and
+    ``escape_ACTION()`` (pop one screen, a no-op at home), so ESC and q no
+    longer need application registrations.
+    """
 
     app: 'PmemStat'
-
-    def screen_escape_ACTION(self):
-        """ESC goes back one screen (MAIN's stack is empty, so it is a no-op)."""
-        self.app.stack.pop()
 
 
 class MainScreen(PmemScreen):
@@ -3002,9 +3020,15 @@ class MainScreen(PmemScreen):
 
     def draw_screen(self):
         app = self.app
+        # Content writers live on the Screen in 3.x; the emit helpers route
+        # through this attribute.  Set it even on a no-refresh pass so any
+        # later write still targets this screen.
+        app.curr_screen = self
         if not app.needs_refresh:
             return
-        app.window.clear()
+        # clear() both resets this screen's content and makes it the window's
+        # active view.
+        self.clear()
         app.loop(datetime.now(), is_first=app.first_loop,
                  regroup=app.regroup_pending)
         app.first_loop = False
@@ -3031,27 +3055,31 @@ class HelpScreen(PmemScreen):
 
     def draw_screen(self):
         app = self.app
-        win = app.window
-        win.set_pick_mode(False)
-        win.add_header("-- HELP SCREEN ['?' or ESC closes Help; Ctrl-C exits ] --",
-                       attr=curses.A_BOLD)
-        if app.spin:
-            app.spin.show_help_nav_keys(win)
-            app.spin.show_help_body(win)
+        app.curr_screen = self
+        self.set_pick_mode(False)
+        self.add_header("-- HELP SCREEN ['?' or ESC closes Help; Ctrl-C exits ] --",
+                        attr=curses.A_BOLD)
+        spinner = self.get_spinner()
+        if spinner:
+            # The 3.x help helpers take the Screen, not the window: they write
+            # content through add_header()/add_body() and consult the screen's
+            # own scope number.
+            spinner.show_help_nav_keys(self)
+            spinner.show_help_body(self)
         if app.zap_confirm_active():
             # An armed 'z' also asks for its answer here, so the prompt is never
             # invisible while it counts down.
-            win.add_body(app.zap_confirm_text(),
-                         attr=curses.A_BOLD | semantic_attr(Theme.DANGER))
+            self.add_body(app.zap_confirm_text(),
+                          attr=curses.A_BOLD | semantic_attr(Theme.DANGER))
         if os.geteuid() != 0:
-            win.add_body('Hint: run "sudo pmemstat" to show all PIDs',
-                         attr=curses.A_BOLD)
+            self.add_body('Hint: run "sudo pmemstat" to show all PIDs',
+                          attr=curses.A_BOLD)
         else:
-            win.add_body('z - zap the growth history (current values become '
-                         'baseline) - asks for "y"/ESC')
+            self.add_body('z - zap the growth history (current values become '
+                          'baseline) - asks for "y"/ESC')
 
     def help_ACTION(self):
-        """'?' closes Help again (ESC does the same via screen_escape)."""
+        """'?' closes Help again (ESC does the same via escape_ACTION)."""
         self.app.stack.pop()
 
     def theme_screen_ACTION(self):
@@ -3075,10 +3103,11 @@ class HelpScreen(PmemScreen):
 def theme_choice(opts, win):
     """The picker's current choice: ``mono`` while colour is off, else a palette.
 
-    Colour can be off while a palette is still selected (``--no-color`` keeps
-    ``--theme``), so the switch -- not the window's palette -- decides whether
-    the choice is the mono mode.  Otherwise the window is the authority, because
-    a palette may have been installed before ``opts`` was filled in.
+    In 3.x ``mono`` is a real theme, but colour can still be off independently
+    of the last palette a user picked (the process-wide switch is what the
+    roles actually consult), so the switch remains the authority for whether
+    the picker is on mono.  Otherwise the window is the authority, because a
+    palette may have been installed before ``opts`` was filled in.
     """
     if not colors_enabled():
         return MONO_THEME
@@ -3092,7 +3121,7 @@ def next_theme_choice(current):
 
 
 class ThemeScreen(Theme.create_picker_screen(PmemScreen, cycle_key='t')):
-    """console-window's canned picker, extended with pmemstat's mono mode.
+    """console-window's canned picker, extended with pmemstat's persistence.
 
     The stock screen draws the header, the cycle hint and one swatch per
     semantic role; there is deliberately no extra commentary line.  Two hooks
@@ -3100,12 +3129,13 @@ class ThemeScreen(Theme.create_picker_screen(PmemScreen, cycle_key='t')):
 
     * ``theme_label()`` names ``mono`` while colour is off, so the header agrees
       with the swatches, which then show role attributes rather than a palette.
-    * ``spin_theme_ACTION()`` cycles :data:`THEME_CHOICES` -- the library
-      palettes plus ``mono`` -- and remembers the pick in the user's prefs.
+    * ``spin_theme_ACTION()`` cycles :data:`THEME_CHOICES` -- the library's own
+      list, which ends in the real ``mono`` theme -- and remembers the pick in
+      the user's prefs.
 
-    A palette is a request for colour, so selecting one lifts a ``--no-color``
-    switch (the ``appearance`` layer's documented contract); ``mono`` turns the
-    switch off and leaves the selected palette installed underneath it.
+    The library owns the colour switch now: installing a palette enables it and
+    installing ``mono`` disables it, so ``apply_theme_choice()`` just applies
+    the theme and records the resulting state.
     """
 
     def theme_label(self, theme_name):
@@ -3122,17 +3152,14 @@ class ThemeScreen(Theme.create_picker_screen(PmemScreen, cycle_key='t')):
     def apply_theme_choice(self, choice):
         """Make *choice* live and remember it for the next run."""
         opts = self.app.opts
-        if choice == MONO_THEME:
-            set_colors_enabled(False)
-            opts.colors = False
-        else:
-            set_colors_enabled(True)
-            opts.colors = True
-            Theme.apply_to(self.app.win, choice)
-            opts.theme = choice
+        Theme.apply_to(self.app.win, choice)
+        opts.theme = choice
+        # Theme installation is the single synchronization point: a palette
+        # turns semantic colour on, mono turns it off.
+        opts.colors = colors_enabled()
         prefs = getattr(self.app, 'prefs', None)
         if prefs is not None:
-            prefs.set('theme', getattr(opts, 'theme', '') or '')
+            prefs.set('theme', choice)
             prefs.set('colors', opts.colors)
             prefs.save()
 
@@ -3163,19 +3190,32 @@ def resolve_ui_prefs(opts, prefs, environ=None):
     """Starting ``(theme, colors)`` from the CLI, the environment and the prefs.
 
     The precedence and the ``NO_COLOR`` handling live in
-    :func:`console_window.appearance.resolve_appearance`; this wrapper only
-    translates pmemstat's ``--theme mono`` pseudo-theme, which means "no colour"
-    and has no library theme to install.  ``theme`` is ``''`` for
-    console-window's default, otherwise a resolved library theme name.
+    :func:`console_window.Appearance.resolve_appearance`, which in 3.x returns
+    one theme name: an explicit ``--theme``, then ``NO_COLOR`` (which selects the
+    real ``mono`` theme), then the remembered choice.  This wrapper keeps
+    pmemstat's two-value result for its callers:
+
+      * the app-level ``--no-color`` switch is translated to ``--theme mono``,
+        because the library no longer has a separate colour flag;
+      * a legacy preference that stored a palette together with
+        ``colors == False`` is read as a remembered mono choice;
+      * ``colors`` is derived from whether the resolved theme is mono.
     """
     cli_theme = getattr(opts, 'theme', None)
-    mono = cli_theme == MONO_THEME
-    return resolve_appearance(
-        cli_theme=None if mono else cli_theme,
-        no_color=mono or getattr(opts, 'no_color', False),
-        saved_theme='' if mono else (prefs.get('theme') or ''),
-        saved_colors=bool(prefs.get('colors')),
-        environ=environ)
+    if getattr(opts, 'no_color', False):
+        cli_theme = MONO_THEME
+    saved_theme = prefs.get('theme') or ''
+    saved_colors = bool(prefs.get('colors'))
+    if not saved_colors and not Theme.is_mono(saved_theme):
+        # The old store kept a palette alongside colors=False; the pair means
+        # "remember this palette, but start in mono".
+        saved_theme = MONO_THEME
+    theme = resolve_appearance(cli_theme=cli_theme,
+                               saved_theme=saved_theme,
+                               environ=environ)
+    if not theme:
+        return '', saved_colors
+    return theme, not Theme.is_mono(theme)
 
 
 def _resolve_argv(raw_argv, env_text):
@@ -3506,9 +3546,9 @@ def main():
     # DB(0, f'opts={opts}')
 
     if opts.list_themes:
+        # Theme.list_all() already ends with the real 'mono' theme in 3.x.
         for name in Theme.list_all():
             print(f'{name:16} {Theme.THEMES[name]["name"]}')
-        print(f'{MONO_THEME:16} No colour (bold/reverse attributes only)')
         return 0
 
     if opts.save_history_now:
@@ -3521,6 +3561,9 @@ def main():
     prefs = UiPrefs()
     opts.theme, opts.colors = resolve_ui_prefs(opts, prefs)
     opts.prefs = prefs
+    # Seed the appearance switch for call sites that run before a window (or a
+    # Theme.set_active()) exists; window_loop re-applies the theme once the
+    # window is up, and theme installation keeps the two in step thereafter.
     set_colors_enabled(opts.colors)
 
     # Root is the default view; only -U/--user opts out.  Elevation failure is

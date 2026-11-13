@@ -29,7 +29,11 @@ classifiers = [
     "Operating System :: POSIX :: Linux"
 ]
 dependencies = [
-    'console-window == 2.2.2',
+    # The Screen-owned content API and the real 'mono' theme arrived in 3.0.
+    # `runner` and the test package additionally prefer a sibling
+    # ../console-window working tree when one exists, so local development
+    # exercises the live package rather than this installed release.
+    'console-window >= 3.0.0, < 4',
 ]
 
 [project.urls]

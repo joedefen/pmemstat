@@ -1007,12 +1007,14 @@ class TestKeyLegend(unittest.TestCase):
         return PmemStat(SimpleNamespace(**fields))
 
     def _emit(self, euid, **over):
-        """Call emit_key_legend() as ``euid``; return the fake window."""
+        """Call emit_key_legend() as ``euid``; return the fake screen."""
         pm = self._pm(**over)
         pm.window = mock.Mock()
+        # Content is a Screen property in console-window 3.x.
+        pm.curr_screen = mock.Mock()
         with mock.patch.object(main_module.os, 'geteuid', return_value=euid):
             pm.emit_key_legend()
-        return pm.window
+        return pm.curr_screen
 
     def _legend(self, euid, **over):
         """Return the fancy-header line emitted for the given effective uid."""
@@ -1620,8 +1622,9 @@ class TestColourRoles(unittest.TestCase):
         """The first run starts the row; every later run resumes it."""
         pm = self._pm()
         pm.window = mock.Mock()
+        pm.curr_screen = mock.Mock()
         pm.emit_segments([('ab', 1), ('cd', 2)])
-        calls = pm.window.add_body.call_args_list
+        calls = pm.curr_screen.add_body.call_args_list
         self.assertEqual([call.args[0] for call in calls], ['ab', 'cd'])
         self.assertFalse(calls[0].kwargs['resume'])
         self.assertTrue(calls[1].kwargs['resume'])
@@ -1644,7 +1647,7 @@ class TestMonoRoles(unittest.TestCase):
     def test_roles_become_attributes(self):
         main_module.set_colors_enabled(False)
         self.assertFalse(main_module.colors_enabled())
-        # The mapping is console_window.appearance.MONO_ROLES: hot-swap and
+        # The mapping is console_window.Appearance.MONO_ROLES: hot-swap and
         # informational roles are plain, emphasis and success are bold, and the
         # destructive roles are bold+reversed.
         self.assertEqual(main_module.semantic_attr(Theme.HOTSWAP), curses.A_NORMAL)
@@ -1697,25 +1700,26 @@ class TestResolveUiPrefs(unittest.TestCase):
             self._opts(theme='gruvbox'), self._prefs('nord', True), environ={})
         self.assertEqual((theme, colors), ('gruvbox', True))
 
-    def test_no_color_env_disables_colour(self):
+    def test_no_color_env_selects_mono(self):
+        """3.x's resolver returns the real mono theme, not a separate flag."""
         theme, colors = main_module.resolve_ui_prefs(
             self._opts(), self._prefs('nord', True), environ={'NO_COLOR': '1'})
-        self.assertEqual((theme, colors), ('nord', False))
+        self.assertEqual((theme, colors), ('mono', False))
 
-    def test_cli_no_color_disables_colour(self):
-        _, colors = main_module.resolve_ui_prefs(
+    def test_cli_no_color_selects_mono(self):
+        theme, colors = main_module.resolve_ui_prefs(
             self._opts(no_color=True), self._prefs('', True), environ={})
-        self.assertFalse(colors)
+        self.assertEqual((theme, colors), ('mono', False))
 
-    def test_mono_means_no_colour_and_no_theme(self):
+    def test_mono_means_no_colour(self):
         theme, colors = main_module.resolve_ui_prefs(
             self._opts(theme='mono'), self._prefs('nord', True), environ={})
-        self.assertEqual((theme, colors), ('', False))
+        self.assertEqual((theme, colors), ('mono', False))
 
     def test_saved_colour_off_survives(self):
-        _, colors = main_module.resolve_ui_prefs(
+        theme, colors = main_module.resolve_ui_prefs(
             self._opts(), self._prefs('', False), environ={})
-        self.assertFalse(colors)
+        self.assertEqual((theme, colors), ('mono', False))
 
 
 class TestThemeChoices(unittest.TestCase):
@@ -1726,8 +1730,9 @@ class TestThemeChoices(unittest.TestCase):
 
     def test_mono_is_last_and_reachable(self):
         self.assertEqual(main_module.THEME_CHOICES[-1], main_module.MONO_THEME)
-        self.assertEqual(main_module.THEME_CHOICES[:-1],
-                         tuple(Theme.list_all()))
+        # 3.x lists mono as a real theme, so pmemstat's cycle is exactly the
+        # library's list rather than that list plus a pseudo-theme.
+        self.assertEqual(main_module.THEME_CHOICES, tuple(Theme.list_all()))
 
     def test_cycle_steps_through_the_palettes(self):
         names = Theme.list_all()
@@ -1784,11 +1789,17 @@ class TestScreens(unittest.TestCase):
                       main_module.THEMES_ST: main_module.ThemeScreen(pm)}
         pm.stack = ScreenStack(pm.window, opts, main_module.SCREEN_NAMES,
                                pm.screens)
+        # Mirror window_loop(): apply the remembered appearance before drawing.
+        start_theme = opts.theme or 'default'
+        if not opts.colors:
+            start_theme = main_module.MONO_THEME
+        pm.window.set_theme(start_theme)
         # Registered as window_loop() does it, so the scope bookkeeping (HELP
         # subtracts K from kill mode; p/P are distinct letters) is exercised.
+        # ESC is the spinner's built-in escape action in 3.x, so it is not
+        # registered here.
         spin = pm.spin = OptionSpinner(stack=pm.stack)
         spin.add_key('help', '? - help screen', genre='action')
-        spin.add_key('screen_escape', 'ESC - back', keys=27, genre='action')
         spin.add_key('theme_screen', 't - theme picker', genre='action',
                      scope=[main_module.MAIN_ST, main_module.HELP_ST])
         spin.add_key('spin_theme', 't - cycle theme', genre='action',
