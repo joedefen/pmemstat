@@ -1,0 +1,51 @@
+# ruff.toml -- lint policy for the pmemstat checkout.
+#
+# My gate (`ruffit`) defers to this file for the lint policy.
+#
+# The exceptions below are scoped to `pmemstat/` rather than applied globally.
+# ruff resolves this file for every path it is handed from the checkout, which
+# includes the gate script itself (`~/bin/ruffit`); keeping the rules global
+# would silently change how that script is linted.  Each entry is a deliberate
+# project decision, not a blanket weakening of the gate.
+
+[lint.per-file-ignores]
+"pmemstat/*" = [
+    # Broad `except Exception` handlers.  This is a best-effort monitor that
+    # must keep drawing even when a single /proc read fails or a PID exits mid-scan
+    "BLE001",
+    "S110",
+
+    # set([x]) / set(list(x)): the redundant conversion is kept so both
+    # branches of the isinstance() test read the same way.
+    "C405",
+    "C414",
+
+    # Shebang lines on modules that are imported by the package, never
+    # executed directly (the console script is the only entry point).
+    "EXE001",
+
+    # Module names intentionally mirror the primary class they define
+    # (CGroup.py -> CGroup, PmemCommon.py -> PmemCommon, ...).
+    "N999",
+
+    # The class-level `chunk_dict` is a reusable fill-in template, copied per
+    # instance before use, not shared mutable state.
+    "RUF012",
+
+    # int(round(...)) is kept to document that an integer is the intended
+    # result type at the call site.
+    "RUF046",
+
+    # Nested `if` statements are kept when the inner branch carries its own
+    # explanatory comment and flattening would obscure the intent.
+    "SIM102",
+
+    # /proc and /sys file handles are opened once and re-seeked on every
+    # refresh; they are long-lived by design, not leaked.
+    "SIM115",
+]
+
+# PmemStat is referenced only inside a string annotation (the real class lives
+# in pmemstat/main.py and importing it here would create an import cycle), and
+# the help text deliberately splits one sentence across two adjacent literals.
+"pmemstat/Screens.py" = ["F821", "ISC004"]

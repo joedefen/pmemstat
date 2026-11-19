@@ -1,0 +1,14 @@
+pmemstat.bundle
+.venv/
+dist/
+build/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+*.whl
+*.tar.gz
+.vscode/
+*.egg-info/
+memtest

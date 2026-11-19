@@ -1,0 +1,39 @@
+[build-system]
+requires = ["flit_core>=3.4,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "pmemstat"
+dynamic = ["version"]
+description = "Report Proportional Memory on Linux"
+authors = [
+    {name = "Joe Defen", email = "joedef@duck.com"},
+]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+keywords = ["proportional memory", "RAM", "htop", "top", "monitor"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux"
+]
+dependencies = [
+    # latest 3.1.x only
+    'console-window ~= 3.1.0',
+]
+
+[project.urls]
+"Homepage" = "https://github.com/joedefen/pmemstat"
+"Bug Tracker" = "https://github.com/joedefen/pmemstat/issues"
+
+
+[project.scripts]
+pmemstat = "pmemstat.main:run"
