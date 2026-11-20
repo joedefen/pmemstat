@@ -2,10 +2,14 @@
 import curses
 import os
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from console_window import BasicHelpScreen, Screen, Theme, semantic_attr
 
 from pmemstat.UiPrefs import ThemePrefs
+
+if TYPE_CHECKING:  # pragma: no cover - imported for type checkers only
+    from pmemstat.main import PmemStat
 
 # Screen identities for the ScreenStack; MAIN is the report itself.
 MAIN_ST, HELP_ST, THEMES_ST = 0, 1, 2
